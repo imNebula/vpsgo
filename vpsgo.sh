@@ -28,7 +28,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.3"
+VERSION="1.4"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -2305,7 +2305,7 @@ _show_main_menu() {
     printf "    ${GREEN}9${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
     echo ""
     printf "    ${GREEN}u${PLAIN}) 更新 VPSGo                      ${DIM}— 从 GitHub 拉取最新版${PLAIN}\n"
-    printf "    ${RED}x${PLAIN}) 卸载 VPSGo                      ${DIM}— 删除安装${PLAIN}\n"
+    printf "    ${RED}x${PLAIN}) 卸载 VPSGo                      ${DIM}— 卸载${PLAIN}\n"
     printf "    ${RED}0${PLAIN}) 退出脚本\n"
     echo ""
 }
