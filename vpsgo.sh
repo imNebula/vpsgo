@@ -17,9 +17,7 @@
 # 使用方法: bash vpsgo.sh
 #
 
-# ============================================================
-# 如果被 sh/dash 调用，自动切换到 bash
-# ============================================================
+# --- 强制 bash 运行 ---
 if [ -z "${BASH_VERSION:-}" ]; then
     if command -v bash >/dev/null 2>&1; then
         exec bash "$0" "$@"
@@ -31,14 +29,14 @@ fi
 
 set -uo pipefail
 
-# ============================================================
-# 全局变量
-# ============================================================
-SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
-VERSION="1.0.0"
-INSTALL_PATH="/usr/local/bin/vpsgo"
+VERSION="1.0"
 
-# 颜色定义
+# --- 全局变量 ---
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
+INSTALL_PATH="/usr/local/bin/vpsgo"
+UPDATE_URL="https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
+
+# 颜色
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
@@ -49,9 +47,7 @@ DIM='\033[2m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
 
-# ============================================================
-# 通用工具函数
-# ============================================================
+# --- 通用工具函数 ---
 _red()    { printf "${RED}%b${PLAIN}" "$1"; }
 _green()  { printf "${GREEN}%b${PLAIN}" "$1"; }
 _yellow() { printf "${YELLOW}%b${PLAIN}" "$1"; }
@@ -121,9 +117,7 @@ _press_any_key() {
     echo ""
 }
 
-# ============================================================
-# 系统信息检测 (通用)
-# ============================================================
+# --- 系统信息检测 ---
 _os() {
     local os=""
     [ -f "/etc/debian_version" ] && source /etc/os-release && os="${ID}" && printf '%s' "${os}" && return
@@ -183,11 +177,7 @@ _show_sys_info() {
     printf "    Kernel: ${DIM}%s${PLAIN}  Virt: ${DIM}%s${PLAIN}\n" "$kern" "$virt"
 }
 
-# ############################################################
-#
-#  模块一: TCP BBR 拥塞控制算法
-#
-# ############################################################
+# --- 1. 开启内核自带 BBR ---
 
 _bbr_error_detect() {
     local cmd="$1"
@@ -416,11 +406,7 @@ _bbr_install() {
     _bbr_reboot_os
 }
 
-# ############################################################
-#
-#  模块二: 队列调度算法 (qdisc) 设置
-#
-# ############################################################
+# --- 2. 设置队列调度算法 ---
 
 _qdisc_check_virt() {
     local virt
@@ -589,11 +575,7 @@ _qdisc_setup() {
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块三: IPv4 / IPv6 优先级切换
-#
-# ############################################################
+# --- 3. 设置 IPv4/IPv6 优先级 ---
 
 _V4V6_GAI_CONF="/etc/gai.conf"
 _V4V6_RULE_V4="precedence ::ffff:0:0/96  100"
@@ -712,11 +694,7 @@ _v4v6_setup() {
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块四: TCP 缓冲区调优
-#
-# ############################################################
+# --- 4. TCP 缓冲区调优 ---
 
 _TCPTUNE_SYSCTL_TARGET="/etc/sysctl.d/999-net-tcp-tune.conf"
 _TCPTUNE_KEY_REGEX='^(net\.core\.rmem_max|net\.core\.wmem_max|net\.core\.rmem_default|net\.core\.wmem_default|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_rmem|net\.ipv4\.tcp_wmem|net\.ipv4\.tcp_mtu_probing|net\.ipv4\.tcp_fastopen|net\.ipv4\.tcp_slow_start_after_idle|net\.ipv4\.tcp_notsent_lowat|net\.ipv4\.tcp_timestamps|net\.ipv4\.tcp_sack|net\.ipv4\.tcp_window_scaling|net\.ipv4\.tcp_adv_win_scale)[[:space:]]*='
@@ -1056,11 +1034,7 @@ TCPTUNE_EOF
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块五: Docker 日志轮转配置
-#
-# ############################################################
+# --- 7. Docker 日志轮转 ---
 
 _dockerlog_setup() {
     _header "Docker 日志轮转配置"
@@ -1168,11 +1142,7 @@ _dockerlog_setup() {
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块六: Mihomo 代理内核安装
-#
-# ############################################################
+# --- 8. Mihomo 安装 ---
 
 _mihomo_download() {
     local url="$1" output="$2"
@@ -1369,11 +1339,7 @@ _mihomo_setup() {
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块七: Mihomo 配置生成
-#
-# ############################################################
+# --- 9. 生成 Mihomo 配置 ---
 
 _MIHOMOCONF_CONFIG_DIR="/etc/mihomo"
 _MIHOMOCONF_CONFIG_FILE="/etc/mihomo/config.yaml"
@@ -1753,11 +1719,7 @@ MIHOMOCONF_AT_YAML
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块八: iperf3 测速服务端
-#
-# ############################################################
+# --- 5. iPerf3 测速服务端 ---
 
 _iperf3_check() {
     if command -v iperf3 >/dev/null 2>&1; then
@@ -1942,11 +1904,7 @@ _iperf3_setup() {
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块九: NodeQuality 网络质量测试
-#
-# ############################################################
+# --- 6. NodeQuality 测试 ---
 
 _nodequality_setup() {
     _header "NodeQuality 网络质量测试"
@@ -1966,11 +1924,7 @@ _nodequality_setup() {
     _press_any_key
 }
 
-# ############################################################
-#
-#  模块十: sing-box 安装
-#
-# ############################################################
+# --- 10. sing-box 安装 ---
 
 _singbox_install_apt() {
     _info "使用 APT 官方仓库安装..."
@@ -2059,11 +2013,58 @@ _singbox_setup() {
     _press_any_key
 }
 
-# ############################################################
-#
-#  自安装: 写入 /usr/local/bin/vpsgo
-#
-# ############################################################
+# --- 自更新 ---
+
+_self_update() {
+    _header "VPSGo 更新"
+
+    if ! command -v curl >/dev/null 2>&1; then
+        _error_no_exit "需要 curl 命令"
+        _press_any_key
+        return
+    fi
+
+    _info "当前版本: v${VERSION}"
+    _info "正在检查更新..."
+
+    local tmp_file
+    tmp_file=$(mktemp /tmp/vpsgo.XXXXXX.sh)
+    if ! curl -fsSL -o "$tmp_file" "$UPDATE_URL"; then
+        rm -f "$tmp_file"
+        _error_no_exit "下载失败，请检查网络连接"
+        _press_any_key
+        return
+    fi
+
+    if [[ ! -s "$tmp_file" ]]; then
+        rm -f "$tmp_file"
+        _error_no_exit "下载文件为空"
+        _press_any_key
+        return
+    fi
+
+    local remote_ver
+    remote_ver=$(grep '^VERSION=' "$tmp_file" | head -1 | cut -d'"' -f2)
+    _info "最新版本: v${remote_ver:-未知}"
+
+    if [[ "$remote_ver" == "$VERSION" ]]; then
+        _info "已是最新版本，无需更新"
+        rm -f "$tmp_file"
+        _press_any_key
+        return
+    fi
+
+    cp "$tmp_file" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    rm -f "$tmp_file"
+
+    _info "更新完成! v${VERSION} -> v${remote_ver}"
+    _info "正在重新启动..."
+    echo ""
+    exec "$INSTALL_PATH" "$@"
+}
+
+# --- 自安装 ---
 
 _self_install() {
     local self
@@ -2087,11 +2088,7 @@ _self_install() {
     fi
 }
 
-# ############################################################
-#
-#  主菜单
-#
-# ############################################################
+# --- 主菜单 ---
 
 _show_banner() {
     clear
@@ -2123,12 +2120,13 @@ _show_main_menu() {
     printf "    ${GREEN}9${PLAIN}) 生成 Mihomo 配置                ${DIM}— 支持生成 SS/AnyTLS 配置${PLAIN}\n"
     printf "   ${GREEN}10${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
     echo ""
+    printf "    ${GREEN}u${PLAIN}) 更新 VPSGo                       ${DIM}— 从 GitHub 拉取最新版${PLAIN}\n"
     printf "    ${RED}0${PLAIN}) 退出脚本\n"
     echo ""
 }
 
 main() {
-    [[ $EUID -ne 0 ]] && _error "此脚本需要 root 权限运行"
+    [[ $EUID -ne 0 ]] && _error "此脚本需要 root 权限，请使用 sudo vpsgo 运行"
 
     _self_install
 
@@ -2150,6 +2148,7 @@ main() {
             8) _mihomo_setup ;;
             9) _mihomoconf_setup ;;
             10) _singbox_setup ;;
+            u|U) _self_update ;;
             0)
                 echo ""
                 _info "感谢使用 VPSGo，再见!"
