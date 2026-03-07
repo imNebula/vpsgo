@@ -12,6 +12,7 @@
 #   7. Docker 日志轮转配置
 #   8. Mihomo 管理 (安装/配置/重启)
 #   9. sing-box 安装
+#  10. Swap 管理
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -2181,6 +2182,184 @@ _singbox_setup() {
     _press_any_key
 }
 
+# --- 11. Swap 管理 ---
+
+_swap_human_readable() {
+    local bytes=$1
+    if [ "$bytes" -ge $((1024 * 1024 * 1024)) ]; then
+        awk -v b="$bytes" 'BEGIN{ printf "%.1f GiB", b/1024/1024/1024 }'
+    else
+        awk -v b="$bytes" 'BEGIN{ printf "%.0f MiB", b/1024/1024 }'
+    fi
+}
+
+_swap_setup() {
+    _header "Swap 管理"
+
+    # ---- 检测物理内存 ----
+    local mem_total_kb mem_total_bytes mem_total_display
+    mem_total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+    mem_total_bytes=$((mem_total_kb * 1024))
+    mem_total_display=$(_swap_human_readable "$mem_total_bytes")
+
+    # ---- 检测现有 Swap ----
+    local swap_total_kb swap_total_bytes swap_total_display
+    swap_total_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
+    swap_total_bytes=$((swap_total_kb * 1024))
+    swap_total_display=$(_swap_human_readable "$swap_total_bytes")
+
+    # ---- 检测硬盘剩余空间 ----
+    local disk_avail_kb disk_avail_bytes disk_avail_display
+    disk_avail_kb=$(df -k / | awk 'NR==2{print $4}')
+    disk_avail_bytes=$((disk_avail_kb * 1024))
+    disk_avail_display=$(_swap_human_readable "$disk_avail_bytes")
+
+    # ---- 计算推荐 Swap 大小 (MiB) ----
+    local mem_mib=$((mem_total_kb / 1024))
+    local recommend_mib
+    if [ "$mem_mib" -le 1024 ]; then
+        recommend_mib=$((mem_mib * 2))
+    elif [ "$mem_mib" -le 4096 ]; then
+        recommend_mib=$mem_mib
+    else
+        recommend_mib=4096
+    fi
+
+    # 确保推荐值不超过磁盘可用空间的 80%
+    local disk_limit_mib=$((disk_avail_kb / 1024 * 80 / 100))
+    if [ "$recommend_mib" -gt "$disk_limit_mib" ]; then
+        recommend_mib=$disk_limit_mib
+    fi
+
+    # 扣除已有 swap
+    local existing_swap_mib=$((swap_total_kb / 1024))
+    local recommend_new_mib=$((recommend_mib - existing_swap_mib))
+    if [ "$recommend_new_mib" -lt 0 ]; then
+        recommend_new_mib=0
+    fi
+
+    # ---- 展示信息 ----
+    echo ""
+    printf "  ${BOLD}[ 当前状态 ]${PLAIN}\n"
+    printf "    物理内存:         ${CYAN}%s${PLAIN}\n" "$mem_total_display"
+    printf "    现有 Swap:        ${CYAN}%s${PLAIN}\n" "$swap_total_display"
+    printf "    硬盘剩余空间:     ${CYAN}%s${PLAIN}\n" "$disk_avail_display"
+    echo ""
+    _separator
+
+    if [ "$recommend_new_mib" -le 0 ]; then
+        _info "当前 Swap 已达到或超过推荐值 (${recommend_mib} MiB)，无需额外创建"
+        echo ""
+        printf "    ${GREEN}1${PLAIN}) 仍要创建/扩展 Swap\n"
+        printf "    ${RED}2${PLAIN}) 删除现有 Swap 文件 (/swapfile)\n"
+        printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+        echo ""
+        local sub_choice
+        read -rp "  请输入选项: " sub_choice
+        case "$sub_choice" in
+            1) ;;
+            2)
+                if [ -f /swapfile ]; then
+                    swapoff /swapfile 2>/dev/null
+                    rm -f /swapfile
+                    sed -i '\|/swapfile|d' /etc/fstab
+                    _info "已删除 /swapfile 并移除 fstab 条目"
+                else
+                    _warn "未找到 /swapfile"
+                fi
+                _press_any_key
+                return
+                ;;
+            *) return ;;
+        esac
+        recommend_new_mib=$recommend_mib
+    fi
+
+    printf "  ${BOLD}[ 推荐新建 Swap ]${PLAIN}\n"
+    printf "    推荐大小: ${GREEN}%s MiB${PLAIN}\n" "$recommend_new_mib"
+    echo ""
+
+    local swap_input swap_size_mib
+    read -rp "  请输入要创建的 Swap 大小 (MiB) [默认 ${recommend_new_mib}]: " swap_input
+    swap_size_mib="${swap_input:-$recommend_new_mib}"
+
+    # 校验输入
+    if ! _is_digit "$swap_size_mib" || [ "$swap_size_mib" -le 0 ]; then
+        _error_no_exit "无效的大小: ${swap_size_mib}"
+        _press_any_key
+        return
+    fi
+
+    # 检查是否超过磁盘可用空间的 90%
+    local max_allowed_mib=$((disk_avail_kb / 1024 * 90 / 100))
+    if [ "$swap_size_mib" -gt "$max_allowed_mib" ]; then
+        _error_no_exit "所选大小 (${swap_size_mib} MiB) 超过硬盘可用空间的 90% (${max_allowed_mib} MiB)"
+        _press_any_key
+        return
+    fi
+
+    # ---- 确认 ----
+    echo ""
+    _warn "将在 /swapfile 创建 ${swap_size_mib} MiB 的 Swap"
+    local confirm
+    read -rp "  确认? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    # ---- 如果已有 /swapfile，先关闭 ----
+    if [ -f /swapfile ]; then
+        _info "检测到已有 /swapfile，正在关闭..."
+        swapoff /swapfile 2>/dev/null
+        rm -f /swapfile
+    fi
+
+    # ---- 创建 Swap ----
+    echo ""
+    _info "正在创建 ${swap_size_mib} MiB 的 Swap 文件..."
+    if command -v fallocate >/dev/null 2>&1; then
+        fallocate -l "${swap_size_mib}M" /swapfile
+    else
+        dd if=/dev/zero of=/swapfile bs=1M count="$swap_size_mib" status=progress
+    fi
+
+    if [ $? -ne 0 ]; then
+        _error_no_exit "Swap 文件创建失败"
+        rm -f /swapfile
+        _press_any_key
+        return
+    fi
+
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+    swapon /swapfile
+
+    if [ $? -ne 0 ]; then
+        _error_no_exit "Swap 启用失败"
+        rm -f /swapfile
+        _press_any_key
+        return
+    fi
+
+    # ---- 写入 fstab 实现开机自动挂载 ----
+    sed -i '\|/swapfile|d' /etc/fstab
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+    # ---- 显示结果 ----
+    echo ""
+    _header "Swap 创建完成"
+    echo ""
+    local new_swap_kb new_swap_display
+    new_swap_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
+    new_swap_display=$(_swap_human_readable "$((new_swap_kb * 1024))")
+    printf "  ${BOLD}当前 Swap:${PLAIN} ${GREEN}%s${PLAIN}\n" "$new_swap_display"
+    _info "已写入 /etc/fstab，重启后自动生效"
+
+    _press_any_key
+}
+
 # --- 自更新 ---
 
 _self_update() {
@@ -2319,6 +2498,8 @@ _show_main_menu() {
     printf "    ${GREEN}7${PLAIN}) Docker 日志轮转                 ${DIM}— 限制容器日志大小${PLAIN}\n"
     printf "    ${GREEN}8${PLAIN}) Mihomo 管理                     ${DIM}— 安装/配置/重启${PLAIN}\n"
     printf "    ${GREEN}9${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
+    printf "  ${BOLD}[ 系统 ]${PLAIN}\n"
+    printf "    ${GREEN}10${PLAIN}) Swap 管理                      ${DIM}— 创建/删除 Swap${PLAIN}\n"
     echo ""
     printf "    ${GREEN}u${PLAIN}) 更新 VPSGo                      ${DIM}— 从 GitHub 拉取最新版${PLAIN}\n"
     printf "    ${RED}x${PLAIN}) 卸载 VPSGo                      ${DIM}— 卸载${PLAIN}\n"
@@ -2348,6 +2529,7 @@ main() {
             7) _dockerlog_setup ;;
             8) _mihomo_manage ;;
             9) _singbox_setup ;;
+            10) _swap_setup ;;
             u|U) _self_update ;;
             x|X) _self_uninstall ;;
             0)
