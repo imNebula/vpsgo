@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.12"
+VERSION="1.13"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -1893,14 +1893,14 @@ _mihomo_manage() {
         echo ""
         if command -v mihomo >/dev/null 2>&1; then
             local ver
-            ver=$(mihomo -v 2>/dev/null | head -1 || echo "未知")
-            _info "当前版本: ${ver}"
+            ver=$(mihomo -v 2>/dev/null | head -1)
+            _info "当前版本: ${ver:-未知}"
             local pid
             pid=$(pgrep -x mihomo 2>/dev/null || true)
             if [[ -n "$pid" ]]; then
-                _info "运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)"
+                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
             else
-                _info "运行状态: ${RED}未运行${PLAIN}"
+                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
             fi
         else
             _info "当前未安装 mihomo"
