@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.9"
+VERSION="1.10"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -887,43 +887,28 @@ _tcptune_setup() {
     local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=87380 TCP_RMEM_MAX=$MAX_BYTES
     local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=65536 TCP_WMEM_MAX=$MAX_BYTES
 
-    # ---- 检测环境 ----
-    local IFACE CURRENT_CC CURRENT_QDISC
-    IFACE="$(_tcptune_default_iface)"
+    # ---- 检测拥塞算法 ----
+    local CURRENT_CC
     CURRENT_CC="$(_tcptune_detect_cc)"
-    CURRENT_QDISC="$(_tcptune_detect_qdisc "${IFACE:-}")"
 
-    local IS_BBR=0 IS_AQM_QDISC=0 IS_FQ=0
+    local IS_BBR=0
     case "$CURRENT_CC" in
         bbr|bbr2|bbr3) IS_BBR=1 ;;
     esac
-    case "$CURRENT_QDISC" in
-        fq)                   IS_FQ=1 ;;
-        cake|fq_pie|fq_codel) IS_AQM_QDISC=1 ;;
-    esac
 
     echo ""
-    _info "拥塞算法: ${CURRENT_CC} | 排队规则: ${CURRENT_QDISC} | 接口: ${IFACE:-无}"
+    _info "拥塞算法: ${CURRENT_CC}"
     _info "BDP: $(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB | 桶值: ${MAX_MB} MB"
 
     # ---- 自适应参数 ----
-    local NOTSENT_LOWAT="" SLOW_START_IDLE="" ADV_WIN_SCALE=""
+    local NOTSENT_LOWAT="" SLOW_START_IDLE=""
 
     if [ "$IS_BBR" -eq 1 ]; then
         SLOW_START_IDLE=0
-        if [ "$IS_AQM_QDISC" -eq 1 ]; then
-            NOTSENT_LOWAT=131072
-            ADV_WIN_SCALE=1
-            _info "BBR + AQM (${CURRENT_QDISC}): notsent_lowat=128KB, adv_win_scale=1"
-        elif [ "$IS_FQ" -eq 1 ]; then
-            NOTSENT_LOWAT=262144
-            _info "BBR + fq: notsent_lowat=256KB"
-        else
-            NOTSENT_LOWAT=131072
-            _info "BBR + ${CURRENT_QDISC}: notsent_lowat=128KB"
-        fi
+        NOTSENT_LOWAT=131072
+        _info "BBR 模式: notsent_lowat=128KB, slow_start_after_idle=0"
     else
-        _info "非 BBR (${CURRENT_CC}): 仅调缓冲区，不改 slow_start/notsent_lowat"
+        _info "非 BBR (${CURRENT_CC}): 仅调缓冲区"
     fi
 
     local BACKLOG
@@ -954,7 +939,7 @@ _tcptune_setup() {
 # Inputs: MEM_G=${MEM_G}GiB, BW=${BW_Mbps}Mbps, RTT=${RTT_ms}ms
 # BDP: ${BDP_BYTES} bytes (~$(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB)
 # Caps: min(2*BDP, 3%RAM, 64MB) -> Bucket ${MAX_MB} MB
-# Detected CC: ${CURRENT_CC}, Qdisc: ${CURRENT_QDISC}
+# Detected CC: ${CURRENT_CC}
 
 # ---- 核心缓冲区 ----
 net.core.rmem_default = ${DEF_R}
@@ -986,16 +971,8 @@ TCPTUNE_EOF
     if [ -n "$NOTSENT_LOWAT" ]; then
         cat >>"$tmpf" <<TCPTUNE_EOF
 
-# 控制未发送数据上限，配合 ${CURRENT_QDISC} 减少 bufferbloat
+# 控制未发送数据上限，减少 bufferbloat
 net.ipv4.tcp_notsent_lowat = ${NOTSENT_LOWAT}
-TCPTUNE_EOF
-    fi
-
-    if [ -n "$ADV_WIN_SCALE" ]; then
-        cat >>"$tmpf" <<TCPTUNE_EOF
-
-# BBR+AQM: 调整接收窗口开销估算
-net.ipv4.tcp_adv_win_scale = ${ADV_WIN_SCALE}
 TCPTUNE_EOF
     fi
 
@@ -1005,31 +982,40 @@ TCPTUNE_EOF
 
     # ---- 显示结果 ----
     echo ""
-    _header "调优结果"
+    _header "调优完成"
     echo ""
-    printf "  ${BOLD}参数${PLAIN}               ${DIM}|${PLAIN}  ${BOLD}带宽${PLAIN} ${BW_Mbps} Mbps  ${BOLD}RTT${PLAIN} ${RTT_ms} ms  ${BOLD}内存${PLAIN} ${MEM_G} GiB\n"
-    printf "  ${BOLD}桶值${PLAIN} ${MAX_MB} MB       ${DIM}|${PLAIN}  ${BOLD}CC${PLAIN} ${CURRENT_CC}  ${BOLD}Qdisc${PLAIN} ${CURRENT_QDISC}\n"
-    _separator
-
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "rmem_default"   "$(sysctl -n net.core.rmem_default 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "wmem_default"   "$(sysctl -n net.core.wmem_default 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "rmem_max"       "$(sysctl -n net.core.rmem_max 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "wmem_max"       "$(sysctl -n net.core.wmem_max 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "backlog"        "$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "tcp_rmem"       "$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "tcp_wmem"       "$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)"
-    _separator
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "mtu_probing"    "$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "fastopen"       "$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "timestamps"     "$(sysctl -n net.ipv4.tcp_timestamps 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "sack"           "$(sysctl -n net.ipv4.tcp_sack 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "window_scaling" "$(sysctl -n net.ipv4.tcp_window_scaling 2>/dev/null)"
-    _separator
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "slow_start_idle" "$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "notsent_lowat"   "$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo N/A)"
-    printf "  ${DIM}%-22s${PLAIN} %s\n" "adv_win_scale"   "$(sysctl -n net.ipv4.tcp_adv_win_scale 2>/dev/null || echo N/A)"
+    printf "  ${BOLD}输入参数${PLAIN}\n"
+    printf "    带宽: ${CYAN}%s Mbps${PLAIN}  RTT: ${CYAN}%s ms${PLAIN}  内存: ${CYAN}%s GiB${PLAIN}\n" "$BW_Mbps" "$RTT_ms" "$MEM_G"
+    printf "    BDP: ${CYAN}$(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB${PLAIN}  桶值: ${CYAN}${MAX_MB} MB${PLAIN}  CC: ${CYAN}${CURRENT_CC}${PLAIN}\n"
     echo ""
+    _separator
+    printf "  ${BOLD}核心缓冲区${PLAIN}\n"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "rmem_default"   "$(sysctl -n net.core.rmem_default 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "wmem_default"   "$(sysctl -n net.core.wmem_default 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "rmem_max"       "$(sysctl -n net.core.rmem_max 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "wmem_max"       "$(sysctl -n net.core.wmem_max 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "backlog"        "$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
+    echo ""
+    printf "  ${BOLD}TCP 缓冲区${PLAIN}\n"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "tcp_rmem"       "$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "tcp_wmem"       "$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)"
+    echo ""
+    printf "  ${BOLD}通用优化${PLAIN}\n"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "mtu_probing"    "$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "fastopen"       "$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "timestamps"     "$(sysctl -n net.ipv4.tcp_timestamps 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "sack"           "$(sysctl -n net.ipv4.tcp_sack 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "window_scaling" "$(sysctl -n net.ipv4.tcp_window_scaling 2>/dev/null)"
+    if [ "$IS_BBR" -eq 1 ]; then
+        echo ""
+        printf "  ${BOLD}BBR 参数${PLAIN}\n"
+        printf "    %-20s ${GREEN}%s${PLAIN}\n" "slow_start_idle" "$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null)"
+        printf "    %-20s ${GREEN}%s${PLAIN}\n" "notsent_lowat"   "$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo N/A)"
+    fi
+    echo ""
+    _separator
     _info "配置已写入: ${_TCPTUNE_SYSCTL_TARGET}"
+    _info "配置已生效，重启后仍然有效"
 
     _press_any_key
 }
