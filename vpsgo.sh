@@ -2473,14 +2473,17 @@ _self_install() {
         return
     fi
 
+    # 检查源文件是否可读（防止管道运行时 $0 不可用）
+    if [[ ! -f "$self" ]] || [[ ! -r "$self" ]]; then
+        return
+    fi
+
     # 如果目标不存在，或者源文件更新了，则安装/更新
     if [[ ! -f "$INSTALL_PATH" ]]; then
-        cp "$self" "$INSTALL_PATH"
-        chmod +x "$INSTALL_PATH"
+        install -m 0755 "$self" "$INSTALL_PATH"
         _info "已安装到 ${INSTALL_PATH}，后续可直接输入 vpsgo 启动"
-    elif [[ "$self" -nt "$INSTALL_PATH" ]]; then
-        cp "$self" "$INSTALL_PATH"
-        chmod +x "$INSTALL_PATH"
+    elif [[ "$self" -nt "$INSTALL_PATH" ]] || ! cmp -s "$self" "$INSTALL_PATH"; then
+        install -m 0755 "$self" "$INSTALL_PATH"
         _info "已更新 ${INSTALL_PATH}"
     fi
 }
