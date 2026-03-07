@@ -10,9 +10,8 @@
 #   5. iPerf3 测速服务端
 #   6. NodeQuality 测试
 #   7. Docker 日志轮转配置
-#   8. Mihomo 安装
-#   9. 生成 Mihomo 配置 (SS/AnyTLS)
-#  10. sing-box 安装
+#   8. Mihomo 管理 (安装/配置/重启)
+#   9. sing-box 安装
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -29,7 +28,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.0"
+VERSION="1.1"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -1719,6 +1718,159 @@ MIHOMOCONF_AT_YAML
     _press_any_key
 }
 
+# --- Mihomo 管理子菜单 ---
+
+_mihomo_restart() {
+    _header "Mihomo 重启"
+
+    if ! command -v mihomo >/dev/null 2>&1; then
+        _error_no_exit "未检测到 mihomo，请先安装"
+        _press_any_key
+        return
+    fi
+
+    # systemd 服务
+    if systemctl list-unit-files mihomo.service &>/dev/null; then
+        _info "通过 systemd 重启 mihomo..."
+        systemctl restart mihomo
+        sleep 1
+        if systemctl is-active --quiet mihomo; then
+            _info "mihomo 已成功重启"
+        else
+            _error_no_exit "mihomo 重启失败，请检查 systemctl status mihomo"
+        fi
+    else
+        # 手动进程
+        local pid
+        pid=$(pgrep -x mihomo 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            _info "终止旧进程 (PID: $pid)..."
+            kill "$pid" 2>/dev/null
+            sleep 1
+        fi
+        local config_dir="/etc/mihomo"
+        if [[ -d "$config_dir" ]]; then
+            _info "启动 mihomo -d ${config_dir}..."
+            nohup mihomo -d "$config_dir" >/dev/null 2>&1 &
+            sleep 1
+            if pgrep -x mihomo &>/dev/null; then
+                _info "mihomo 已成功启动 (PID: $!)"
+            else
+                _error_no_exit "mihomo 启动失败"
+            fi
+        else
+            _error_no_exit "配置目录 $config_dir 不存在，请先生成配置"
+        fi
+    fi
+
+    _press_any_key
+}
+
+_mihomo_enable() {
+    _header "Mihomo 自启动配置"
+
+    if ! command -v mihomo >/dev/null 2>&1; then
+        _error_no_exit "未检测到 mihomo，请先安装"
+        _press_any_key
+        return
+    fi
+
+    local service_file="/etc/systemd/system/mihomo.service"
+    local config_dir="/etc/mihomo"
+    local mihomo_bin
+    mihomo_bin=$(command -v mihomo)
+
+    if [[ ! -d "$config_dir" ]]; then
+        _error_no_exit "配置目录 $config_dir 不存在，请先生成配置"
+        _press_any_key
+        return
+    fi
+
+    if [[ -f "$service_file" ]]; then
+        _warn "systemd 服务文件已存在"
+        local overwrite
+        read -rp "  是否覆盖? [y/N]: " overwrite
+        if [[ ! "$overwrite" =~ ^[Yy] ]]; then
+            _press_any_key
+            return
+        fi
+    fi
+
+    _info "生成 systemd 服务文件..."
+    cat > "$service_file" <<SERVICEEOF
+[Unit]
+Description=Mihomo Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${mihomo_bin} -d ${config_dir}
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+    systemctl daemon-reload
+    systemctl enable mihomo
+    _info "已设置开机自启"
+
+    systemctl start mihomo
+    sleep 1
+    if systemctl is-active --quiet mihomo; then
+        _info "mihomo 已成功启动"
+    else
+        _error_no_exit "mihomo 启动失败，请检查: systemctl status mihomo"
+    fi
+
+    _press_any_key
+}
+
+_mihomo_manage() {
+    while true; do
+        _header "Mihomo 管理"
+
+        echo ""
+        if command -v mihomo >/dev/null 2>&1; then
+            local ver
+            ver=$(mihomo -v 2>/dev/null | head -1 || echo "未知")
+            _info "当前版本: ${ver}"
+            local pid
+            pid=$(pgrep -x mihomo 2>/dev/null || true)
+            if [[ -n "$pid" ]]; then
+                _info "运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)"
+            else
+                _info "运行状态: ${RED}未运行${PLAIN}"
+            fi
+        else
+            _info "当前未安装 mihomo"
+        fi
+
+        echo ""
+        _separator
+        printf "    ${GREEN}1${PLAIN}) 安装/更新 Mihomo\n"
+        printf "    ${GREEN}2${PLAIN}) 生成配置 ${DIM}(SS / AnyTLS)${PLAIN}\n"
+        printf "    ${GREEN}3${PLAIN}) 配置自启并启动\n"
+        printf "    ${GREEN}4${PLAIN}) 重启 Mihomo\n"
+        echo ""
+        printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+        echo ""
+
+        local choice
+        read -rp "  请输入选项 [0-4]: " choice
+        case "$choice" in
+            1) _mihomo_setup ;;
+            2) _mihomoconf_setup ;;
+            3) _mihomo_enable ;;
+            4) _mihomo_restart ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
 # --- 5. iPerf3 测速服务端 ---
 
 _iperf3_check() {
@@ -2116,11 +2268,10 @@ _show_main_menu() {
     printf "    ${GREEN}5${PLAIN}) iPerf3 测速服务端               ${DIM}— 临时启动${PLAIN}\n"
     printf "    ${GREEN}6${PLAIN}) NodeQuality 测试                ${DIM}— vps 测试脚本${PLAIN}\n"
     printf "    ${GREEN}7${PLAIN}) Docker 日志轮转                 ${DIM}— 限制容器日志大小${PLAIN}\n"
-    printf "    ${GREEN}8${PLAIN}) Mihomo 安装                     ${DIM}— 优秀的代理核心${PLAIN}\n"
-    printf "    ${GREEN}9${PLAIN}) 生成 Mihomo 配置                ${DIM}— 支持生成 SS/AnyTLS 配置${PLAIN}\n"
-    printf "   ${GREEN}10${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
+    printf "    ${GREEN}8${PLAIN}) Mihomo 管理                     ${DIM}— 安装/配置/重启${PLAIN}\n"
+    printf "    ${GREEN}9${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
     echo ""
-    printf "    ${GREEN}u${PLAIN}) 更新 VPSGo                       ${DIM}— 从 GitHub 拉取最新版${PLAIN}\n"
+    printf "    ${GREEN}u${PLAIN}) 更新 VPSGo                      ${DIM}— 从 GitHub 拉取最新版${PLAIN}\n"
     printf "    ${RED}0${PLAIN}) 退出脚本\n"
     echo ""
 }
@@ -2145,9 +2296,8 @@ main() {
             5) _iperf3_setup ;;
             6) _nodequality_setup ;;
             7) _dockerlog_setup ;;
-            8) _mihomo_setup ;;
-            9) _mihomoconf_setup ;;
-            10) _singbox_setup ;;
+            8) _mihomo_manage ;;
+            9) _singbox_setup ;;
             u|U) _self_update ;;
             0)
                 echo ""
