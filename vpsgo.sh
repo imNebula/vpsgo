@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.6"
+VERSION="1.7"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -1583,6 +1583,14 @@ _mihomoconf_setup() {
             printf "    私钥: ${YELLOW}${SSL_DIR}/cert.key${PLAIN}\n"
             echo ""
             _info "目录 ${SSL_DIR}/ 已自动创建"
+            echo ""
+            printf "${YELLOW}  按任意键继续...${PLAIN}"
+            local SAVEDSTTY
+            SAVEDSTTY=$(stty -g)
+            stty -echo -icanon
+            dd if=/dev/tty bs=1 count=1 2>/dev/null
+            stty "$SAVEDSTTY"
+            echo ""
         fi
     fi
 
