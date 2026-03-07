@@ -2247,6 +2247,32 @@ _self_install() {
     fi
 }
 
+# --- 卸载 ---
+
+_self_uninstall() {
+    _header "VPSGo 卸载"
+
+    if [[ ! -f "$INSTALL_PATH" ]]; then
+        _info "VPSGo 未安装，无需卸载"
+        _press_any_key
+        return
+    fi
+
+    _warn "即将删除 ${INSTALL_PATH}"
+    local confirm
+    read -rp "  确认卸载? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    rm -f "$INSTALL_PATH"
+    _info "VPSGo 已卸载，vpsgo 命令不再可用"
+    echo ""
+    exit 0
+}
+
 # --- 主菜单 ---
 
 _show_banner() {
@@ -2279,6 +2305,7 @@ _show_main_menu() {
     printf "    ${GREEN}9${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
     echo ""
     printf "    ${GREEN}u${PLAIN}) 更新 VPSGo                      ${DIM}— 从 GitHub 拉取最新版${PLAIN}\n"
+    printf "    ${RED}x${PLAIN}) 卸载 VPSGo                      ${DIM}— 删除安装${PLAIN}\n"
     printf "    ${RED}0${PLAIN}) 退出脚本\n"
     echo ""
 }
@@ -2306,6 +2333,7 @@ main() {
             8) _mihomo_manage ;;
             9) _singbox_setup ;;
             u|U) _self_update ;;
+            x|X) _self_uninstall ;;
             0)
                 echo ""
                 _info "感谢使用 VPSGo，再见!"
