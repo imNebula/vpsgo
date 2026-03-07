@@ -1,0 +1,2167 @@
+#!/usr/bin/env bash
+#
+# VPS Go — 一站式 VPS 管理脚本
+#
+# 模块:
+#   1. 开启内核自带 BBR
+#   2. 设置队列调度算法 (fq/cake/fq_pie)
+#   3. 设置IPv4 / IPv6 优先级
+#   4. TCP 缓冲区调优
+#   5. iPerf3 测速服务端
+#   6. NodeQuality 测试
+#   7. Docker 日志轮转配置
+#   8. Mihomo 安装
+#   9. 生成 Mihomo 配置 (SS/AnyTLS)
+#  10. sing-box 安装
+#
+# 使用方法: bash vpsgo.sh
+#
+
+# ============================================================
+# 如果被 sh/dash 调用，自动切换到 bash
+# ============================================================
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    else
+        echo "[Error] bash is required to run this script."
+        exit 1
+    fi
+fi
+
+set -uo pipefail
+
+# ============================================================
+# 全局变量
+# ============================================================
+SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
+VERSION="1.0.0"
+INSTALL_PATH="/usr/local/bin/vpsgo"
+
+# 颜色定义
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+BLUE='\033[1;34m'
+MAGENTA='\033[1;35m'
+DIM='\033[2m'
+BOLD='\033[1m'
+PLAIN='\033[0m'
+
+# ============================================================
+# 通用工具函数
+# ============================================================
+_red()    { printf "${RED}%b${PLAIN}" "$1"; }
+_green()  { printf "${GREEN}%b${PLAIN}" "$1"; }
+_yellow() { printf "${YELLOW}%b${PLAIN}" "$1"; }
+_cyan()   { printf "${CYAN}%b${PLAIN}" "$1"; }
+_blue()   { printf "${BLUE}%b${PLAIN}" "$1"; }
+
+_info() {
+    printf "${GREEN}  ✔ ${PLAIN}%s\n" "$1"
+}
+
+_warn() {
+    printf "${YELLOW}  ⚠ ${PLAIN}%s\n" "$1"
+}
+
+_error() {
+    printf "${RED}  ✘ ${PLAIN}%s\n" "$1"
+    exit 1
+}
+
+_error_no_exit() {
+    printf "${RED}  ✘ ${PLAIN}%s\n" "$1"
+}
+
+_header() {
+    echo ""
+    printf "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
+    printf "${CYAN}  %s${PLAIN}\n" "$1"
+    printf "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${PLAIN}\n"
+}
+
+_separator() {
+    printf "${DIM}──────────────────────────────────────────────────${PLAIN}\n"
+}
+
+_exists() {
+    local cmd="$1"
+    if eval type type > /dev/null 2>&1; then
+        eval type "$cmd" > /dev/null 2>&1
+    elif command > /dev/null 2>&1; then
+        command -v "$cmd" > /dev/null 2>&1
+    else
+        which "$cmd" > /dev/null 2>&1
+    fi
+    return $?
+}
+
+_is_digit() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+_is_64bit() {
+    [ "$(getconf WORD_BIT)" = '32' ] && [ "$(getconf LONG_BIT)" = '64' ]
+}
+
+_version_ge() {
+    test "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1"
+}
+
+_press_any_key() {
+    echo ""
+    printf "${DIM}  按任意键返回主菜单...${PLAIN}"
+    local SAVEDSTTY
+    SAVEDSTTY=$(stty -g)
+    stty -echo -icanon
+    dd if=/dev/tty bs=1 count=1 2>/dev/null
+    stty "$SAVEDSTTY"
+    echo ""
+}
+
+# ============================================================
+# 系统信息检测 (通用)
+# ============================================================
+_os() {
+    local os=""
+    [ -f "/etc/debian_version" ] && source /etc/os-release && os="${ID}" && printf '%s' "${os}" && return
+    [ -f "/etc/redhat-release" ] && os="centos" && printf '%s' "${os}" && return
+}
+
+_os_full() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        printf '%s' "${PRETTY_NAME:-unknown}"
+    elif [ -f /etc/redhat-release ]; then
+        cat /etc/redhat-release
+    elif [ -f /etc/lsb-release ]; then
+        awk -F'[="]+' '/DESCRIPTION/{print $2}' /etc/lsb-release
+    else
+        printf '%s' "unknown"
+    fi
+}
+
+_os_ver() {
+    local main_ver
+    main_ver="$(echo "$(_os_full)" | grep -oE '[0-9.]+')"
+    printf '%s' "${main_ver%%.*}"
+}
+
+_kernel_version() {
+    uname -r | cut -d- -f1
+}
+
+_detect_virt() {
+    local virt=""
+    if command -v virt-what >/dev/null 2>&1; then
+        virt="$(virt-what 2>/dev/null | head -1)"
+    elif command -v systemd-detect-virt >/dev/null 2>&1; then
+        virt="$(systemd-detect-virt 2>/dev/null)"
+    fi
+    if [ -z "$virt" ] || [ "$virt" = "none" ]; then
+        if [ -d /proc/vz ] && [ ! -d /proc/bc ]; then
+            virt="openvz"
+        elif [ -f /proc/1/environ ] && grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+            virt="lxc"
+        fi
+    fi
+    printf '%s' "${virt:-none}"
+}
+
+_show_sys_info() {
+    local opsy arch kern virt
+    opsy="$(_os_full)"
+    arch="$(uname -m) ($(getconf LONG_BIT) Bit)"
+    kern="$(uname -r)"
+    virt="$(_detect_virt)"
+
+    echo ""
+    printf "  ${BOLD}[ 系统信息 ]${PLAIN}\n"
+    printf "    OS: ${DIM}%s${PLAIN}  Arch: ${DIM}%s${PLAIN}\n" "$opsy" "$arch"
+    printf "    Kernel: ${DIM}%s${PLAIN}  Virt: ${DIM}%s${PLAIN}\n" "$kern" "$virt"
+}
+
+# ############################################################
+#
+#  模块一: TCP BBR 拥塞控制算法
+#
+# ############################################################
+
+_bbr_error_detect() {
+    local cmd="$1"
+    _info "执行: ${cmd}"
+    eval ${cmd}
+    if [ $? -ne 0 ]; then
+        _error "命令执行失败: ${cmd}"
+    fi
+}
+
+_bbr_check_status() {
+    local param
+    param=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    [[ "${param}" == "bbr" ]]
+}
+
+_bbr_check_kernel() {
+    local kv
+    kv="$(_kernel_version)"
+    _version_ge "${kv}" "4.9"
+}
+
+_bbr_check_os() {
+    local virt
+    if _exists "virt-what"; then
+        virt="$(virt-what)"
+    elif _exists "systemd-detect-virt"; then
+        virt="$(systemd-detect-virt)"
+    fi
+    if [ -n "${virt}" ] && [ "${virt}" = "lxc" ]; then
+        _error "虚拟化架构为 LXC，不支持修改内核。"
+    fi
+    if [ -n "${virt}" ] && [ "${virt}" = "openvz" ] || [ -d "/proc/vz" ]; then
+        _error "虚拟化架构为 OpenVZ，不支持修改内核。"
+    fi
+    [ -z "$(_os)" ] && _error "不支持的操作系统"
+    case "$(_os)" in
+        ubuntu)
+            [ -n "$(_os_ver)" ] && [ "$(_os_ver)" -lt 16 ] && _error "不支持的系统版本，请升级到 Ubuntu 16+ 后重试。"
+            ;;
+        debian)
+            [ -n "$(_os_ver)" ] && [ "$(_os_ver)" -lt 8 ] && _error "不支持的系统版本，请升级到 Debian 8+ 后重试。"
+            ;;
+        centos)
+            [ -n "$(_os_ver)" ] && [ "$(_os_ver)" -lt 6 ] && _error "不支持的系统版本，请升级到 CentOS 6+ 后重试。"
+            ;;
+        *)
+            _error "不支持的操作系统"
+            ;;
+    esac
+}
+
+_bbr_sysctl_config() {
+    [ -f /etc/sysctl.conf ] && sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
+    [ -f /etc/sysctl.conf ] && sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
+    echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
+    sysctl -p >/dev/null 2>&1
+}
+
+_bbr_get_latest_version() {
+    local latest_version
+    latest_version=($(wget -qO- https://kernel.ubuntu.com/~kernel-ppa/mainline/ | awk -F'"v' '/v[4-9]./{print $2}' | cut -d/ -f1 | grep -v - | sort -V))
+    [ ${#latest_version[@]} -eq 0 ] && _error "获取最新内核版本失败。"
+
+    local kernel_arr=()
+    for i in "${latest_version[@]}"; do
+        if _version_ge "$i" "5.15"; then
+            kernel_arr+=("$i")
+        fi
+    done
+
+    echo ""
+    echo "  可选内核版本:"
+    _separator
+    local idx=1
+    for k in "${kernel_arr[@]}"; do
+        printf "    ${GREEN}%d${PLAIN}) %s\n" "$idx" "$k"
+        ((idx++))
+    done
+    echo ""
+
+    local pick
+    read -rp "  选择内核版本 (默认最新 ${kernel_arr[-1]}): " pick
+    if [ -z "$pick" ]; then
+        pick=${#kernel_arr[@]}
+    fi
+    if ! _is_digit "$pick" || [ "$pick" -lt 1 ] || [ "$pick" -gt ${#kernel_arr[@]} ]; then
+        _error "无效的选择"
+    fi
+    local kernel="${kernel_arr[$((pick-1))]}"
+
+    local deb_name deb_kernel_url deb_kernel_name
+    local modules_deb_name deb_kernel_modules_url deb_kernel_modules_name
+
+    if _is_64bit; then
+        deb_name=$(wget -qO- "https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/" | grep "linux-image" | grep "generic" | awk -F'">' '/amd64.deb/{print $2}' | cut -d'<' -f1 | head -1)
+        deb_kernel_url="https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/${deb_name}"
+        deb_kernel_name="linux-image-${kernel}-amd64.deb"
+        modules_deb_name=$(wget -qO- "https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/" | grep "linux-modules" | grep "generic" | awk -F'">' '/amd64.deb/{print $2}' | cut -d'<' -f1 | head -1)
+        deb_kernel_modules_url="https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/${modules_deb_name}"
+        deb_kernel_modules_name="linux-modules-${kernel}-amd64.deb"
+    else
+        deb_name=$(wget -qO- "https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/" | grep "linux-image" | grep "generic" | awk -F'">' '/i386.deb/{print $2}' | cut -d'<' -f1 | head -1)
+        deb_kernel_url="https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/${deb_name}"
+        deb_kernel_name="linux-image-${kernel}-i386.deb"
+        modules_deb_name=$(wget -qO- "https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/" | grep "linux-modules" | grep "generic" | awk -F'">' '/i386.deb/{print $2}' | cut -d'<' -f1 | head -1)
+        deb_kernel_modules_url="https://kernel.ubuntu.com/~kernel-ppa/mainline/v${kernel}/${modules_deb_name}"
+        deb_kernel_modules_name="linux-modules-${kernel}-i386.deb"
+    fi
+    [ -z "${deb_name}" ] && _error "获取内核安装包名称失败，可能是编译失败，请选择其他版本重试。"
+
+    # 导出变量给后续使用
+    BBR_KERNEL="${kernel}"
+    BBR_DEB_NAME="${deb_name}"
+    BBR_DEB_KERNEL_URL="${deb_kernel_url}"
+    BBR_DEB_KERNEL_NAME="${deb_kernel_name}"
+    BBR_MODULES_DEB_NAME="${modules_deb_name}"
+    BBR_DEB_KERNEL_MODULES_URL="${deb_kernel_modules_url}"
+    BBR_DEB_KERNEL_MODULES_NAME="${deb_kernel_modules_name}"
+}
+
+_bbr_install_kernel() {
+    case "$(_os)" in
+        centos)
+            if [ -n "$(_os_ver)" ]; then
+                if ! _exists "perl"; then
+                    _bbr_error_detect "yum install -y perl"
+                fi
+                if [ "$(_os_ver)" -eq 6 ]; then
+                    _bbr_error_detect "rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org"
+                    local rpm_kernel_url="https://dl.lamp.sh/files/"
+                    local rpm_kernel_name rpm_kernel_devel_name
+                    if _is_64bit; then
+                        rpm_kernel_name="kernel-ml-4.18.20-1.el6.elrepo.x86_64.rpm"
+                        rpm_kernel_devel_name="kernel-ml-devel-4.18.20-1.el6.elrepo.x86_64.rpm"
+                    else
+                        rpm_kernel_name="kernel-ml-4.18.20-1.el6.elrepo.i686.rpm"
+                        rpm_kernel_devel_name="kernel-ml-devel-4.18.20-1.el6.elrepo.i686.rpm"
+                    fi
+                    _bbr_error_detect "wget -c -t3 -T60 -O ${rpm_kernel_name} ${rpm_kernel_url}${rpm_kernel_name}"
+                    _bbr_error_detect "wget -c -t3 -T60 -O ${rpm_kernel_devel_name} ${rpm_kernel_url}${rpm_kernel_devel_name}"
+                    [ -s "${rpm_kernel_name}" ] && _bbr_error_detect "rpm -ivh ${rpm_kernel_name}" || _error "下载 ${rpm_kernel_name} 失败。"
+                    [ -s "${rpm_kernel_devel_name}" ] && _bbr_error_detect "rpm -ivh ${rpm_kernel_devel_name}" || _error "下载 ${rpm_kernel_devel_name} 失败。"
+                    rm -f ${rpm_kernel_name} ${rpm_kernel_devel_name}
+                    [ ! -f "/boot/grub/grub.conf" ] && _error "未找到 /boot/grub/grub.conf"
+                    sed -i 's/^default=.*/default=0/g' /boot/grub/grub.conf
+                elif [ "$(_os_ver)" -eq 7 ]; then
+                    local rpm_kernel_url="https://dl.lamp.sh/kernel/el7/"
+                    local rpm_kernel_name rpm_kernel_devel_name
+                    if _is_64bit; then
+                        rpm_kernel_name="kernel-ml-5.15.60-1.el7.x86_64.rpm"
+                        rpm_kernel_devel_name="kernel-ml-devel-5.15.60-1.el7.x86_64.rpm"
+                    else
+                        _error "不支持 32 位架构，请切换到 64 位系统。"
+                    fi
+                    _bbr_error_detect "wget -c -t3 -T60 -O ${rpm_kernel_name} ${rpm_kernel_url}${rpm_kernel_name}"
+                    _bbr_error_detect "wget -c -t3 -T60 -O ${rpm_kernel_devel_name} ${rpm_kernel_url}${rpm_kernel_devel_name}"
+                    [ -s "${rpm_kernel_name}" ] && _bbr_error_detect "rpm -ivh ${rpm_kernel_name}" || _error "下载 ${rpm_kernel_name} 失败。"
+                    [ -s "${rpm_kernel_devel_name}" ] && _bbr_error_detect "rpm -ivh ${rpm_kernel_devel_name}" || _error "下载 ${rpm_kernel_devel_name} 失败。"
+                    rm -f ${rpm_kernel_name} ${rpm_kernel_devel_name}
+                    /usr/sbin/grub2-set-default 0
+                fi
+            fi
+            ;;
+        ubuntu|debian)
+            _info "正在获取最新内核版本..."
+            _bbr_get_latest_version
+            if [ -n "${BBR_MODULES_DEB_NAME}" ]; then
+                _bbr_error_detect "wget -c -t3 -T60 -O ${BBR_DEB_KERNEL_MODULES_NAME} ${BBR_DEB_KERNEL_MODULES_URL}"
+            fi
+            _bbr_error_detect "wget -c -t3 -T60 -O ${BBR_DEB_KERNEL_NAME} ${BBR_DEB_KERNEL_URL}"
+            _bbr_error_detect "dpkg -i ${BBR_DEB_KERNEL_MODULES_NAME} ${BBR_DEB_KERNEL_NAME}"
+            rm -f ${BBR_DEB_KERNEL_MODULES_NAME} ${BBR_DEB_KERNEL_NAME}
+            _bbr_error_detect "/usr/sbin/update-grub"
+            ;;
+        *)
+            ;; # do nothing
+    esac
+}
+
+_bbr_reboot_os() {
+    echo ""
+    _warn "系统需要重启以应用新内核。"
+    local is_reboot
+    read -rp "  是否立即重启? [y/N]: " is_reboot
+    if [[ "${is_reboot}" == "y" || "${is_reboot}" == "Y" ]]; then
+        reboot
+    else
+        _info "已取消重启。"
+    fi
+}
+
+_bbr_install() {
+    _header "TCP BBR 拥塞控制算法"
+
+    local cc qdisc
+    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+    qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+    echo ""
+    _info "当前拥塞算法: ${cc}"
+    _info "当前队列算法: ${qdisc}"
+
+    if _bbr_check_status; then
+        echo ""
+        _info "TCP BBR 已经启用，无需重复操作。"
+        _press_any_key
+        return
+    fi
+
+    if _bbr_check_kernel; then
+        echo ""
+        _info "当前内核版本 >= 4.9，直接启用 BBR..."
+        _bbr_sysctl_config
+        _info "TCP BBR 启用成功!"
+        echo ""
+        _info "当前拥塞算法: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+        _info "当前队列算法: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
+        _press_any_key
+        return
+    fi
+
+    _bbr_check_os
+    _bbr_install_kernel
+    _bbr_sysctl_config
+    _bbr_reboot_os
+}
+
+# ############################################################
+#
+#  模块二: 队列调度算法 (qdisc) 设置
+#
+# ############################################################
+
+_qdisc_check_virt() {
+    local virt
+    virt="$(_detect_virt)"
+    case "$virt" in
+        openvz|ovz)
+            _error "检测到虚拟化架构为 OpenVZ，共享母机内核，无法修改队列算法。"
+            ;;
+        lxc|lxc-libvirt)
+            _warn "检测到虚拟化架构为 LXC/LXD（容器），共享母机内核。"
+            _warn "队列算法能否生效取决于母机，脚本将继续尝试..."
+            ;;
+    esac
+}
+
+_qdisc_is_enabled() {
+    [ "$(sysctl -n net.core.default_qdisc 2>/dev/null || true)" = "$1" ]
+}
+
+_qdisc_is_active_on_ifaces() {
+    local qdisc="$1"
+    local iface
+    iface="$(ip -o route show default 2>/dev/null | awk '{print $5; exit}')"
+    [ -z "$iface" ] && return 1
+    tc qdisc show dev "$iface" 2>/dev/null | grep -q "\b${qdisc}\b"
+}
+
+_qdisc_print_status() {
+    local current_qdisc current_cc
+    current_qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+    current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
+    _info "当前队列算法: ${current_qdisc}"
+    _info "当前拥塞算法: ${current_cc}"
+}
+
+_qdisc_persist_module_load() {
+    local qdisc="$1"
+    local module="sch_${qdisc}"
+    local modules_file="/etc/modules-load.d/${qdisc}.conf"
+    mkdir -p /etc/modules-load.d
+    if [ ! -f "$modules_file" ] || ! grep -qx "$module" "$modules_file" 2>/dev/null; then
+        printf '%s\n' "$module" >> "$modules_file"
+    fi
+}
+
+_qdisc_apply_to_ifaces() {
+    local qdisc="$1"
+    local iface
+    if ! command -v tc >/dev/null 2>&1; then
+        _warn "tc 命令不可用，无法实时应用 ${qdisc}，将在重启后生效。"
+        return 0
+    fi
+    while IFS= read -r iface; do
+        [ -z "$iface" ] && continue
+        if tc qdisc replace dev "$iface" root "$qdisc" 2>/dev/null; then
+            _info "已对 ${iface} 实时应用 ${qdisc}"
+        else
+            _warn "无法对 ${iface} 应用 ${qdisc}（可能不支持）"
+        fi
+    done < <(ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$')
+}
+
+_qdisc_enable_sysctl() {
+    local qdisc="$1"
+    local sysctl_file="/etc/sysctl.d/99-${qdisc}.conf"
+    mkdir -p /etc/sysctl.d
+
+    # 清理旧配置
+    [ -f /etc/sysctl.conf ] && sed -i '/^[[:space:]]*net\.core\.default_qdisc[[:space:]]*=/d' /etc/sysctl.conf
+    for old in fq cake fq_pie; do
+        [ "$old" = "$qdisc" ] && continue
+        rm -f "/etc/sysctl.d/99-${old}.conf"
+    done
+
+    printf '%s\n' "net.core.default_qdisc = ${qdisc}" > "$sysctl_file"
+
+    if ! sysctl -p "$sysctl_file" >/dev/null 2>&1; then
+        _warn "sysctl -p 执行失败，可能是容器环境权限不足。"
+        return 1
+    fi
+
+    _qdisc_apply_to_ifaces "$qdisc"
+}
+
+_qdisc_min_kernel_for() {
+    case "$1" in
+        fq)     echo "3.12" ;;
+        cake)   echo "4.19" ;;
+        fq_pie) echo "4.19" ;;
+    esac
+}
+
+_qdisc_setup() {
+    _header "队列调度算法 (Qdisc) 设置"
+
+    echo ""
+    _qdisc_print_status
+    _qdisc_check_virt
+
+    echo ""
+    echo "  请选择要启用的队列调度算法:"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) fq      — Fair Queuing                ${DIM}(内核 >= 3.12)${PLAIN}\n"
+    printf "    ${GREEN}2${PLAIN}) cake    — Common Applications Kept Enhanced  ${DIM}(内核 >= 4.19)${PLAIN}\n"
+    printf "    ${GREEN}3${PLAIN}) fq_pie  — Fair Queuing + PIE          ${DIM}(内核 >= 4.19)${PLAIN}\n"
+    echo ""
+    printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+    echo ""
+
+    local choice
+    read -rp "  请输入选项 [0-3]: " choice
+
+    local qdisc=""
+    case "$choice" in
+        1) qdisc="fq" ;;
+        2) qdisc="cake" ;;
+        3) qdisc="fq_pie" ;;
+        0) return ;;
+        *) _error_no_exit "无效选项: ${choice}"; _press_any_key; return ;;
+    esac
+
+    local kv min_kv
+    kv="$(_kernel_version)"
+    min_kv="$(_qdisc_min_kernel_for "$qdisc")"
+
+    if ! _version_ge "$kv" "$min_kv"; then
+        _warn "当前内核版本 ${kv} < ${min_kv}，不支持 ${qdisc}。"
+        _warn "请先升级内核到 ${min_kv}+ 后再执行。"
+        _press_any_key
+        return
+    fi
+
+    if _qdisc_is_enabled "$qdisc" && _qdisc_is_active_on_ifaces "$qdisc"; then
+        _info "${qdisc} 已经启用且在网卡上生效，无需重复设置。"
+        _qdisc_print_status
+        _press_any_key
+        return
+    fi
+
+    # 加载内核模块
+    local module="sch_${qdisc}"
+    if command -v modprobe >/dev/null 2>&1; then
+        if ! modprobe "$module" >/dev/null 2>&1; then
+            _warn "${module} 模块加载失败，可能内核未内置该模块。"
+        fi
+    fi
+
+    _qdisc_persist_module_load "$qdisc"
+
+    _info "内核版本 ${kv} (>= ${min_kv})，开始启用 ${qdisc} 队列算法..."
+    _qdisc_enable_sysctl "$qdisc" || true
+
+    echo ""
+    if _qdisc_is_enabled "$qdisc" && _qdisc_is_active_on_ifaces "$qdisc"; then
+        _info "${qdisc} 启用成功并已在网卡上生效!"
+        _qdisc_print_status
+    elif _qdisc_is_enabled "$qdisc"; then
+        _info "${qdisc} sysctl 配置已生效，部分网卡可能需要重启后应用。"
+        _qdisc_print_status
+    else
+        _warn "已写入 sysctl 配置，但当前未检测到 ${qdisc} 生效。"
+        _qdisc_print_status
+        _warn "可尝试: modprobe ${module} && sysctl -p"
+    fi
+
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块三: IPv4 / IPv6 优先级切换
+#
+# ############################################################
+
+_V4V6_GAI_CONF="/etc/gai.conf"
+_V4V6_RULE_V4="precedence ::ffff:0:0/96  100"
+_V4V6_RULE_RE='^#?[[:space:]]*precedence[[:space:]]+::ffff:0:0/96'
+
+_v4v6_detect_current() {
+    if [ ! -f "$_V4V6_GAI_CONF" ]; then
+        echo "v6"  # 无配置文件，系统默认 IPv6 优先
+        return
+    fi
+    if grep -qE '^precedence[[:space:]]+::ffff:0:0/96' "$_V4V6_GAI_CONF"; then
+        echo "v4"
+    else
+        echo "v6"
+    fi
+}
+
+_v4v6_set_ipv4_first() {
+    _info "设置 IPv4 优先..."
+    if [ ! -f "$_V4V6_GAI_CONF" ]; then
+        echo "$_V4V6_RULE_V4" > "$_V4V6_GAI_CONF"
+        _info "创建 $_V4V6_GAI_CONF 并写入 IPv4 优先规则"
+        return
+    fi
+    if grep -qE "$_V4V6_RULE_RE" "$_V4V6_GAI_CONF"; then
+        sed -i -E "s|${_V4V6_RULE_RE}.*|${_V4V6_RULE_V4}|" "$_V4V6_GAI_CONF"
+        _info "已更新 IPv4 优先规则 (precedence 100)"
+    else
+        echo "$_V4V6_RULE_V4" >> "$_V4V6_GAI_CONF"
+        _info "已追加 IPv4 优先规则"
+    fi
+}
+
+_v4v6_set_ipv6_first() {
+    _info "设置 IPv6 优先..."
+    if [ ! -f "$_V4V6_GAI_CONF" ]; then
+        _info "无需修改，系统默认已是 IPv6 优先"
+        return
+    fi
+    if grep -qE '^precedence[[:space:]]+::ffff:0:0/96' "$_V4V6_GAI_CONF"; then
+        sed -i -E 's|^(precedence[[:space:]]+::ffff:0:0/96.*)|# \1|' "$_V4V6_GAI_CONF"
+        _info "已注释 IPv4 优先规则，恢复 IPv6 优先"
+    else
+        _info "无需修改，当前已是 IPv6 优先"
+    fi
+}
+
+_v4v6_show_exits() {
+    _info "正在探测出口 IP..."
+    local ip4 ip6
+    ip4=$(curl -4 -s -m 5 ip.sb 2>/dev/null || true)
+    ip6=$(curl -6 -s -m 5 ip.sb 2>/dev/null || true)
+    if [ -n "$ip4" ]; then
+        printf "    ${YELLOW}IPv4 出口: %s${PLAIN}\n" "$ip4"
+    else
+        printf "    ${RED}IPv4 出口: 不可用${PLAIN}\n"
+    fi
+    if [ -n "$ip6" ]; then
+        printf "    ${CYAN}IPv6 出口: %s${PLAIN}\n" "$ip6"
+    else
+        printf "    ${RED}IPv6 出口: 不可用${PLAIN}\n"
+    fi
+}
+
+_v4v6_verify_ip() {
+    _info "正在验证当前出口 IP..."
+    local ip
+    ip=$(curl -s -m 5 ip.sb || true)
+    if [ -z "$ip" ]; then
+        _error_no_exit "无法获取 IP，请检查网络"
+        return
+    fi
+    printf "    ${YELLOW}出口 IP: %s${PLAIN}\n" "$ip"
+    if echo "$ip" | grep -q ':'; then
+        _info "当前出口为 IPv6"
+    else
+        _info "当前出口为 IPv4"
+    fi
+}
+
+_v4v6_setup() {
+    _header "IPv4 / IPv6 优先级切换"
+
+    local current
+    current="$(_v4v6_detect_current)"
+    echo ""
+    if [ "$current" = "v4" ]; then
+        printf "  ${BOLD}当前状态:${PLAIN} ${YELLOW}IPv4 优先${PLAIN}\n"
+    else
+        printf "  ${BOLD}当前状态:${PLAIN} ${CYAN}IPv6 优先${PLAIN}\n"
+    fi
+    echo ""
+    _v4v6_show_exits
+
+    echo ""
+    echo "  请选择操作:"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) 设置 IPv4 优先\n"
+    printf "    ${GREEN}2${PLAIN}) 设置 IPv6 优先\n"
+    echo ""
+    printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+    echo ""
+
+    local choice
+    read -rp "  请输入选项 [0-2]: " choice
+
+    case "$choice" in
+        1) _v4v6_set_ipv4_first ;;
+        2) _v4v6_set_ipv6_first ;;
+        0) return ;;
+        *) _error_no_exit "无效选项: ${choice}"; _press_any_key; return ;;
+    esac
+
+    echo ""
+    _v4v6_verify_ip
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块四: TCP 缓冲区调优
+#
+# ############################################################
+
+_TCPTUNE_SYSCTL_TARGET="/etc/sysctl.d/999-net-tcp-tune.conf"
+_TCPTUNE_KEY_REGEX='^(net\.core\.rmem_max|net\.core\.wmem_max|net\.core\.rmem_default|net\.core\.wmem_default|net\.core\.netdev_max_backlog|net\.ipv4\.tcp_rmem|net\.ipv4\.tcp_wmem|net\.ipv4\.tcp_mtu_probing|net\.ipv4\.tcp_fastopen|net\.ipv4\.tcp_slow_start_after_idle|net\.ipv4\.tcp_notsent_lowat|net\.ipv4\.tcp_timestamps|net\.ipv4\.tcp_sack|net\.ipv4\.tcp_window_scaling|net\.ipv4\.tcp_adv_win_scale)[[:space:]]*='
+
+_tcptune_detect_mem_gib() {
+    local kb
+    if [ -f /proc/meminfo ]; then
+        kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+        awk -v k="$kb" 'BEGIN{ printf "%.1f", k/1024/1024 }'
+    elif command -v sysctl >/dev/null 2>&1 && sysctl -n hw.memsize >/dev/null 2>&1; then
+        awk -v b="$(sysctl -n hw.memsize)" 'BEGIN{ printf "%.1f", b/1024/1024/1024 }'
+    else
+        echo "1"
+    fi
+}
+
+_tcptune_detect_rtt_china() {
+    local entries=(
+        "180.163.117.56:上海/电信"
+        "211.95.52.65:上海/联通"
+        "117.186.171.239:上海/移动"
+        "42.81.147.213:天津/电信"
+        "123.117.133.134:北京/联通"
+        "111.132.43.23:北京/移动"
+        "59.37.89.174:广东佛山/电信"
+        "157.148.78.253:广东广州/联通"
+        "120.232.97.43:广东佛山/移动"
+    )
+    local min_rtt=""
+    local rtt_sum=0
+    local rtt_count=0
+
+    for entry in "${entries[@]}"; do
+        local ip="${entry%%:*}"
+        local name="${entry#*:}"
+        local rtt
+        rtt=$(ping -c 3 -W 5 "$ip" 2>/dev/null \
+              | awk '/rtt|round-trip/ { split($4,a,"/"); printf "%.1f", a[2] }')
+        if [ -n "$rtt" ] && [ "$rtt" != "0" ] && [ "$rtt" != "0.0" ]; then
+            printf "    ${DIM}%-18s${PLAIN} ${GREEN}%s ms${PLAIN}\n" "${name}" "${rtt}"
+            rtt_sum=$(awk -v s="$rtt_sum" -v r="$rtt" 'BEGIN{ printf "%.1f", s+r }')
+            rtt_count=$((rtt_count+1))
+            if [ -z "$min_rtt" ] || awk -v a="$rtt" -v b="$min_rtt" 'BEGIN{exit !(a<b)}'; then
+                min_rtt="$rtt"
+            fi
+        else
+            printf "    ${DIM}%-18s${PLAIN} ${RED}不可达${PLAIN}\n" "${name}"
+        fi
+    done
+
+    if [ "$rtt_count" -gt 0 ]; then
+        local avg_rtt avg_int
+        avg_rtt=$(awk -v s="$rtt_sum" -v n="$rtt_count" 'BEGIN{ printf "%.1f", s/n }')
+        avg_int=$(awk -v r="$avg_rtt" 'BEGIN{ printf "%d", (r==int(r)) ? r : int(r)+1 }')
+        echo ""
+        _info "最低: ${min_rtt} ms | 平均: ${avg_rtt} ms | 建议值: ${avg_int} ms"
+        echo "$avg_int"
+    else
+        _warn "所有节点均不可达"
+        echo ""
+    fi
+}
+
+_tcptune_detect_cc() {
+    sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown"
+}
+
+_tcptune_detect_qdisc() {
+    local iface="$1" qd="unknown"
+    if command -v tc >/dev/null 2>&1 && [ -n "$iface" ]; then
+        qd=$(tc qdisc show dev "$iface" 2>/dev/null | awk 'NR==1{print $2}' || echo "unknown")
+    fi
+    echo "$qd"
+}
+
+_tcptune_default_iface() {
+    ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -1 || true
+}
+
+_tcptune_bucket_le_mb() {
+    local mb="${1:-0}"
+    if   [ "$mb" -ge 64 ]; then echo 64
+    elif [ "$mb" -ge 32 ]; then echo 32
+    elif [ "$mb" -ge 16 ]; then echo 16
+    elif [ "$mb" -ge  8 ]; then echo 8
+    elif [ "$mb" -ge  4 ]; then echo 4
+    else echo 4
+    fi
+}
+
+_tcptune_comment_conflicts_in_sysctl_conf() {
+    local f="/etc/sysctl.conf"
+    [ -f "$f" ] || { _info "/etc/sysctl.conf 不存在，跳过"; return 0; }
+    if grep -Eq "$_TCPTUNE_KEY_REGEX" "$f"; then
+        _info "注释 /etc/sysctl.conf 中的冲突键..."
+        awk -v re="$_TCPTUNE_KEY_REGEX" '
+            $0 ~ re && $0 !~ /^[[:space:]]*#/ { print "# " $0; next }
+            { print $0 }
+        ' "$f" > "${f}.tmp.$$"
+        install -m 0644 "${f}.tmp.$$" "$f"
+        rm -f "${f}.tmp.$$"
+        _info "已注释掉冲突键"
+    else
+        _info "/etc/sysctl.conf 无冲突键"
+    fi
+}
+
+_tcptune_delete_conflict_files_in_dir() {
+    local dir="$1"
+    [ -d "$dir" ] || { _info "$dir 不存在，跳过"; return 0; }
+    shopt -s nullglob
+    local removed=0
+    for f in "$dir"/*.conf; do
+        [ "$(readlink -f "$f")" = "$(readlink -f "$_TCPTUNE_SYSCTL_TARGET")" ] && continue
+        if grep -Eq "$_TCPTUNE_KEY_REGEX" "$f"; then
+            rm -f -- "$f"
+            _info "已删除冲突文件: $f"
+            removed=1
+        fi
+    done
+    shopt -u nullglob
+    [ "$removed" -eq 1 ] && _info "$dir 冲突文件已清理" || _info "$dir 无需处理"
+}
+
+_tcptune_scan_conflicts_ro() {
+    local dir="$1"
+    [ -d "$dir" ] || return 0
+    if grep -RIlEq "$_TCPTUNE_KEY_REGEX" "$dir" 2>/dev/null; then
+        _warn "发现潜在冲突（只提示不改）: $dir"
+        grep -RhnE "$_TCPTUNE_KEY_REGEX" "$dir" 2>/dev/null || true
+    fi
+}
+
+_tcptune_setup() {
+    _header "TCP 缓冲区调优"
+
+    # ---- 检测系统内存 ----
+    local MEM_G
+    MEM_G="$(_tcptune_detect_mem_gib)"
+    _is_digit "${MEM_G%%.*}" || MEM_G=1
+    echo ""
+    _info "系统内存: ${MEM_G} GiB"
+
+    # ---- 输入带宽 ----
+    local BW_Mbps_INPUT BW_Mbps
+    read -rp "  带宽 (Mbps) [默认 1000]: " BW_Mbps_INPUT
+    BW_Mbps="${BW_Mbps_INPUT:-1000}"
+    _is_digit "$BW_Mbps" || BW_Mbps=1000
+
+    # ---- 测量 RTT ----
+    echo ""
+    _info "正在测量到国内多节点 RTT..."
+    _separator
+    local AUTO_RTT
+    AUTO_RTT="$(_tcptune_detect_rtt_china)"
+
+    local RTT_ms RTT_ms_INPUT
+    if [ -n "$AUTO_RTT" ]; then
+        read -rp "  RTT (ms) [检测建议 ${AUTO_RTT}]: " RTT_ms_INPUT
+        RTT_ms="${RTT_ms_INPUT:-$AUTO_RTT}"
+    else
+        _warn "RTT 自动检测失败"
+        read -rp "  请手动输入 RTT (ms) [默认 150]: " RTT_ms_INPUT
+        RTT_ms="${RTT_ms_INPUT:-150}"
+    fi
+
+    # ---- 计算 BDP ----
+    local BDP_BYTES MEM_BYTES TWO_BDP RAM3_BYTES CAP64 MAX_NUM_BYTES
+    BDP_BYTES=$(awk -v bw="$BW_Mbps" -v rtt="$RTT_ms" 'BEGIN{ printf "%.0f", bw*125*rtt }')
+    MEM_BYTES=$(awk -v g="$MEM_G" 'BEGIN{ printf "%.0f", g*1024*1024*1024 }')
+    TWO_BDP=$(( BDP_BYTES * 2 ))
+    RAM3_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ printf "%.0f", m*0.03 }')
+    CAP64=$(( 64 * 1024 * 1024 ))
+    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM3_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
+
+    local MAX_MB_NUM MAX_MB MAX_BYTES
+    MAX_MB_NUM=$(( MAX_NUM_BYTES / 1024 / 1024 ))
+    MAX_MB=$(_tcptune_bucket_le_mb "$MAX_MB_NUM")
+    MAX_BYTES=$(( MAX_MB * 1024 * 1024 ))
+
+    local DEF_R DEF_W
+    if [ "$MAX_MB" -ge 32 ]; then
+        DEF_R=262144; DEF_W=524288
+    elif [ "$MAX_MB" -ge 8 ]; then
+        DEF_R=131072; DEF_W=262144
+    else
+        DEF_R=131072; DEF_W=131072
+    fi
+
+    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=87380 TCP_RMEM_MAX=$MAX_BYTES
+    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=65536 TCP_WMEM_MAX=$MAX_BYTES
+
+    # ---- 检测环境 ----
+    local IFACE CURRENT_CC CURRENT_QDISC
+    IFACE="$(_tcptune_default_iface)"
+    CURRENT_CC="$(_tcptune_detect_cc)"
+    CURRENT_QDISC="$(_tcptune_detect_qdisc "${IFACE:-}")"
+
+    local IS_BBR=0 IS_AQM_QDISC=0 IS_FQ=0
+    case "$CURRENT_CC" in
+        bbr|bbr2|bbr3) IS_BBR=1 ;;
+    esac
+    case "$CURRENT_QDISC" in
+        fq)                   IS_FQ=1 ;;
+        cake|fq_pie|fq_codel) IS_AQM_QDISC=1 ;;
+    esac
+
+    echo ""
+    _info "拥塞算法: ${CURRENT_CC} | 排队规则: ${CURRENT_QDISC} | 接口: ${IFACE:-无}"
+    _info "BDP: $(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB | 桶值: ${MAX_MB} MB"
+
+    # ---- 自适应参数 ----
+    local NOTSENT_LOWAT="" SLOW_START_IDLE="" ADV_WIN_SCALE=""
+
+    if [ "$IS_BBR" -eq 1 ]; then
+        SLOW_START_IDLE=0
+        if [ "$IS_AQM_QDISC" -eq 1 ]; then
+            NOTSENT_LOWAT=131072
+            ADV_WIN_SCALE=1
+            _info "BBR + AQM (${CURRENT_QDISC}): notsent_lowat=128KB, adv_win_scale=1"
+        elif [ "$IS_FQ" -eq 1 ]; then
+            NOTSENT_LOWAT=262144
+            _info "BBR + fq: notsent_lowat=256KB"
+        else
+            NOTSENT_LOWAT=131072
+            _info "BBR + ${CURRENT_QDISC}: notsent_lowat=128KB"
+        fi
+    else
+        _info "非 BBR (${CURRENT_CC}): 仅调缓冲区，不改 slow_start/notsent_lowat"
+    fi
+
+    local BACKLOG
+    if [ "$BW_Mbps" -ge 10000 ]; then
+        BACKLOG=16384
+    elif [ "$BW_Mbps" -ge 1000 ]; then
+        BACKLOG=8192
+    else
+        BACKLOG=4096
+    fi
+
+    # ---- 冲突清理 ----
+    echo ""
+    _info "清理冲突配置..."
+    _separator
+    _tcptune_comment_conflicts_in_sysctl_conf
+    _tcptune_delete_conflict_files_in_dir "/etc/sysctl.d"
+    _tcptune_scan_conflicts_ro "/usr/local/lib/sysctl.d"
+    _tcptune_scan_conflicts_ro "/usr/lib/sysctl.d"
+    _tcptune_scan_conflicts_ro "/lib/sysctl.d"
+    _tcptune_scan_conflicts_ro "/run/sysctl.d"
+
+    # ---- 写入配置 ----
+    local tmpf
+    tmpf="$(mktemp)"
+    cat >"$tmpf" <<TCPTUNE_EOF
+# Auto-generated by VPSGo TCP Tune
+# Inputs: MEM_G=${MEM_G}GiB, BW=${BW_Mbps}Mbps, RTT=${RTT_ms}ms
+# BDP: ${BDP_BYTES} bytes (~$(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB)
+# Caps: min(2*BDP, 3%RAM, 64MB) -> Bucket ${MAX_MB} MB
+# Detected CC: ${CURRENT_CC}, Qdisc: ${CURRENT_QDISC}
+
+# ---- 核心缓冲区 ----
+net.core.rmem_default = ${DEF_R}
+net.core.wmem_default = ${DEF_W}
+net.core.rmem_max = ${MAX_BYTES}
+net.core.wmem_max = ${MAX_BYTES}
+net.core.netdev_max_backlog = ${BACKLOG}
+
+# ---- TCP 缓冲区 ----
+net.ipv4.tcp_rmem = ${TCP_RMEM_MIN} ${TCP_RMEM_DEF} ${TCP_RMEM_MAX}
+net.ipv4.tcp_wmem = ${TCP_WMEM_MIN} ${TCP_WMEM_DEF} ${TCP_WMEM_MAX}
+
+# ---- 通用优化 ----
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+TCPTUNE_EOF
+
+    if [ -n "$SLOW_START_IDLE" ]; then
+        cat >>"$tmpf" <<TCPTUNE_EOF
+
+# BBR: 禁用 idle 后慢启动重置
+net.ipv4.tcp_slow_start_after_idle = ${SLOW_START_IDLE}
+TCPTUNE_EOF
+    fi
+
+    if [ -n "$NOTSENT_LOWAT" ]; then
+        cat >>"$tmpf" <<TCPTUNE_EOF
+
+# 控制未发送数据上限，配合 ${CURRENT_QDISC} 减少 bufferbloat
+net.ipv4.tcp_notsent_lowat = ${NOTSENT_LOWAT}
+TCPTUNE_EOF
+    fi
+
+    if [ -n "$ADV_WIN_SCALE" ]; then
+        cat >>"$tmpf" <<TCPTUNE_EOF
+
+# BBR+AQM: 调整接收窗口开销估算
+net.ipv4.tcp_adv_win_scale = ${ADV_WIN_SCALE}
+TCPTUNE_EOF
+    fi
+
+    install -m 0644 "$tmpf" "$_TCPTUNE_SYSCTL_TARGET"
+    rm -f "$tmpf"
+    sysctl --system >/dev/null
+
+    # ---- 显示结果 ----
+    echo ""
+    _header "调优结果"
+    echo ""
+    printf "  ${BOLD}参数${PLAIN}               ${DIM}|${PLAIN}  ${BOLD}带宽${PLAIN} ${BW_Mbps} Mbps  ${BOLD}RTT${PLAIN} ${RTT_ms} ms  ${BOLD}内存${PLAIN} ${MEM_G} GiB\n"
+    printf "  ${BOLD}桶值${PLAIN} ${MAX_MB} MB       ${DIM}|${PLAIN}  ${BOLD}CC${PLAIN} ${CURRENT_CC}  ${BOLD}Qdisc${PLAIN} ${CURRENT_QDISC}\n"
+    _separator
+
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "rmem_default"   "$(sysctl -n net.core.rmem_default 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "wmem_default"   "$(sysctl -n net.core.wmem_default 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "rmem_max"       "$(sysctl -n net.core.rmem_max 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "wmem_max"       "$(sysctl -n net.core.wmem_max 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "backlog"        "$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "tcp_rmem"       "$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "tcp_wmem"       "$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)"
+    _separator
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "mtu_probing"    "$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "fastopen"       "$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "timestamps"     "$(sysctl -n net.ipv4.tcp_timestamps 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "sack"           "$(sysctl -n net.ipv4.tcp_sack 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "window_scaling" "$(sysctl -n net.ipv4.tcp_window_scaling 2>/dev/null)"
+    _separator
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "slow_start_idle" "$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "notsent_lowat"   "$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo N/A)"
+    printf "  ${DIM}%-22s${PLAIN} %s\n" "adv_win_scale"   "$(sysctl -n net.ipv4.tcp_adv_win_scale 2>/dev/null || echo N/A)"
+    echo ""
+    _info "配置已写入: ${_TCPTUNE_SYSCTL_TARGET}"
+
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块五: Docker 日志轮转配置
+#
+# ############################################################
+
+_dockerlog_setup() {
+    _header "Docker 日志轮转配置"
+
+    # 检查 Docker 是否安装
+    if ! command -v docker >/dev/null 2>&1; then
+        _error_no_exit "未检测到 Docker，请先安装 Docker。"
+        _press_any_key
+        return
+    fi
+
+    # 检查 jq 是否安装
+    if ! command -v jq >/dev/null 2>&1; then
+        _error_no_exit "需要 jq 工具来处理 JSON 配置，请先安装: apt install -y jq 或 yum install -y jq"
+        _press_any_key
+        return
+    fi
+
+    local DAEMON_JSON="/etc/docker/daemon.json"
+    local LOG_MAX_SIZE="10m"
+    local LOG_MAX_FILE="7"
+
+    echo ""
+    _info "目标配置: log-driver=json-file, max-size=${LOG_MAX_SIZE}, max-file=${LOG_MAX_FILE}"
+
+    # 显示当前配置
+    if [ -f "$DAEMON_JSON" ]; then
+        local cur_driver cur_size cur_file
+        cur_driver=$(jq -r '.["log-driver"] // "未设置"' "$DAEMON_JSON" 2>/dev/null || echo "未设置")
+        cur_size=$(jq -r '.["log-opts"]["max-size"] // "未设置"' "$DAEMON_JSON" 2>/dev/null || echo "未设置")
+        cur_file=$(jq -r '.["log-opts"]["max-file"] // "未设置"' "$DAEMON_JSON" 2>/dev/null || echo "未设置")
+        echo ""
+        printf "  ${BOLD}当前配置:${PLAIN}\n"
+        _separator
+        printf "    log-driver : %s\n" "$cur_driver"
+        printf "    max-size   : %s\n" "$cur_size"
+        printf "    max-file   : %s\n" "$cur_file"
+
+        # 检查是否已经一致
+        if [ "$cur_driver" = "json-file" ] && [ "$cur_size" = "$LOG_MAX_SIZE" ] && [ "$cur_file" = "$LOG_MAX_FILE" ]; then
+            echo ""
+            _info "日志配置已存在且一致，无需修改。"
+            _press_any_key
+            return
+        fi
+    else
+        echo ""
+        _info "当前无 daemon.json 配置文件，将创建新配置。"
+    fi
+
+    echo ""
+    echo "  请选择操作:"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) 应用日志轮转配置 ${DIM}(自动备份原配置)${PLAIN}\n"
+    echo ""
+    printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+    echo ""
+
+    local choice
+    read -rp "  请输入选项 [0-1]: " choice
+    case "$choice" in
+        1) ;;
+        0) return ;;
+        *) _error_no_exit "无效选项"; _press_any_key; return ;;
+    esac
+
+    # 确保目录存在
+    mkdir -p /etc/docker
+
+    # 备份原有配置
+    if [ -f "$DAEMON_JSON" ]; then
+        local backup="${DAEMON_JSON}.bak.$(date +%Y%m%d%H%M%S)"
+        cp "$DAEMON_JSON" "$backup"
+        _info "已备份原配置: ${backup}"
+    fi
+
+    # 合并/创建配置
+    local LOG_CONFIG='{"log-driver":"json-file","log-opts":{"max-size":"'"$LOG_MAX_SIZE"'","max-file":"'"$LOG_MAX_FILE"'"}}'
+
+    if [ -f "$DAEMON_JSON" ]; then
+        jq -s '.[0] * .[1]' "$DAEMON_JSON" <(echo "$LOG_CONFIG") > "${DAEMON_JSON}.tmp.$$"
+        mv "${DAEMON_JSON}.tmp.$$" "$DAEMON_JSON"
+        _info "已合并日志配置到 daemon.json"
+    else
+        echo "$LOG_CONFIG" | jq . > "$DAEMON_JSON"
+        _info "已创建 daemon.json"
+    fi
+
+    # 重启 Docker
+    _info "正在重启 Docker..."
+    if systemctl restart docker 2>/dev/null; then
+        _info "Docker 重启成功!"
+    else
+        _warn "Docker 重启失败，请手动执行: systemctl restart docker"
+    fi
+
+    # 显示最终配置
+    echo ""
+    printf "  ${BOLD}最终配置:${PLAIN}\n"
+    _separator
+    printf "    log-driver : %s\n" "$(jq -r '.["log-driver"] // "N/A"' "$DAEMON_JSON" 2>/dev/null)"
+    printf "    max-size   : %s\n" "$(jq -r '.["log-opts"]["max-size"] // "N/A"' "$DAEMON_JSON" 2>/dev/null)"
+    printf "    max-file   : %s\n" "$(jq -r '.["log-opts"]["max-file"] // "N/A"' "$DAEMON_JSON" 2>/dev/null)"
+
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块六: Mihomo 代理内核安装
+#
+# ############################################################
+
+_mihomo_download() {
+    local url="$1" output="$2"
+    if command -v wget &>/dev/null; then
+        wget -q --show-progress -O "$output" "$url"
+    else
+        curl -fSL -o "$output" "$url"
+    fi
+}
+
+_mihomo_detect_amd64_level() {
+    local flags
+    flags=$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | cut -d: -f2 || true)
+    if [[ -z "$flags" ]]; then
+        _warn "无法读取 /proc/cpuinfo，使用最兼容版本"
+        echo "amd64-compatible"
+        return
+    fi
+    if echo "$flags" | grep -qw 'avx2'; then
+        echo "amd64-v3"
+    elif echo "$flags" | grep -qw 'sse4_2' && echo "$flags" | grep -qw 'popcnt'; then
+        echo "amd64-v2"
+    else
+        echo "amd64-compatible"
+    fi
+}
+
+_mihomo_detect_mips_float() {
+    if grep -q 'FPU' /proc/cpuinfo 2>/dev/null; then
+        echo "hardfloat"
+    else
+        echo "softfloat"
+    fi
+}
+
+_mihomo_detect_arch() {
+    local machine
+    machine=$(uname -m)
+    case "$machine" in
+        x86_64|amd64)       _mihomo_detect_amd64_level ;;
+        i386|i486|i586|i686) echo "386" ;;
+        aarch64|arm64)      echo "arm64" ;;
+        armv7*|armhf)       echo "armv7" ;;
+        armv6*)             echo "armv6" ;;
+        armv5*)             echo "armv5" ;;
+        mips64)             echo "mips64" ;;
+        mips64el|mips64le)  echo "mips64le" ;;
+        mips)               echo "mips-$(_mihomo_detect_mips_float)" ;;
+        mipsel|mipsle)      echo "mipsle-$(_mihomo_detect_mips_float)" ;;
+        riscv64)            echo "riscv64" ;;
+        s390x)              echo "s390x" ;;
+        ppc64le)            echo "ppc64le" ;;
+        loongarch64)        echo "loong64-abi2" ;;
+        *)                  echo "" ;;
+    esac
+}
+
+_mihomo_try_install() {
+    local arch="$1" version="$2"
+    local install_dir="/usr/local/bin"
+    local url="https://github.com/MetaCubeX/mihomo/releases/download/${version}/mihomo-linux-${arch}-${version}.gz"
+    local tmp_file
+    tmp_file=$(mktemp /tmp/mihomo.XXXXXX.gz)
+
+    _info "下载 mihomo-linux-${arch}..."
+    printf "    ${DIM}%s${PLAIN}\n" "$url"
+
+    if ! _mihomo_download "$url" "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if [[ ! -s "$tmp_file" ]]; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    gunzip -c "$tmp_file" > "${install_dir}/mihomo"
+    chmod +x "${install_dir}/mihomo"
+    rm -f "$tmp_file"
+
+    if "${install_dir}/mihomo" -v 2>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+_mihomo_setup() {
+    _header "Mihomo 代理内核安装"
+
+    # 前置检查
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        _error_no_exit "此功能仅支持 Linux 系统"
+        _press_any_key
+        return
+    fi
+    for cmd in curl gunzip; do
+        if ! command -v "$cmd" &>/dev/null; then
+            _error_no_exit "缺少必要命令: $cmd，请先安装"
+            _press_any_key
+            return
+        fi
+    done
+
+    local INSTALL_DIR="/usr/local/bin"
+    local CONFIG_DIR="/etc/mihomo"
+
+    # 检测当前安装
+    echo ""
+    if [ -x "${INSTALL_DIR}/mihomo" ]; then
+        local cur_ver
+        cur_ver=$("${INSTALL_DIR}/mihomo" -v 2>/dev/null | head -1 || echo "未知")
+        _info "当前已安装: ${cur_ver}"
+    else
+        _info "当前未安装 mihomo"
+    fi
+
+    # 检测架构
+    _info "检测系统架构..."
+    local ARCH
+    ARCH=$(_mihomo_detect_arch)
+    if [[ -z "$ARCH" ]]; then
+        _error_no_exit "不支持的架构: $(uname -m)"
+        _press_any_key
+        return
+    fi
+    _info "检测到架构: ${ARCH}"
+
+    echo ""
+    echo "  请选择操作:"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) 安装/更新 mihomo ${DIM}(自动获取最新版)${PLAIN}\n"
+    echo ""
+    printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+    echo ""
+
+    local choice
+    read -rp "  请输入选项 [0-1]: " choice
+    case "$choice" in
+        1) ;;
+        0) return ;;
+        *) _error_no_exit "无效选项"; _press_any_key; return ;;
+    esac
+
+    # 获取最新版本
+    _info "获取最新版本号..."
+    local LATEST_VERSION
+    LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+        | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    if [[ -z "$LATEST_VERSION" ]]; then
+        _error_no_exit "无法获取最新版本号，请检查网络连接"
+        _press_any_key
+        return
+    fi
+    _info "最新版本: ${LATEST_VERSION}"
+
+    # 安装 (支持自动降级)
+    echo ""
+    mkdir -p "$CONFIG_DIR"
+
+    if _mihomo_try_install "$ARCH" "$LATEST_VERSION"; then
+        echo ""
+        _info "mihomo (${ARCH}) 安装成功!"
+    elif [[ "$ARCH" == "amd64-v3" ]]; then
+        _warn "amd64-v3 运行失败，自动降级到 amd64-v2..."
+        if _mihomo_try_install "amd64-v2" "$LATEST_VERSION"; then
+            ARCH="amd64-v2"
+            _info "mihomo (amd64-v2) 安装成功!"
+        else
+            _warn "amd64-v2 也运行失败，继续降级到 amd64-compatible..."
+            if _mihomo_try_install "amd64-compatible" "$LATEST_VERSION"; then
+                ARCH="amd64-compatible"
+                _info "mihomo (amd64-compatible) 安装成功!"
+            else
+                _error_no_exit "安装失败，所有 amd64 版本均无法运行"
+                _press_any_key
+                return
+            fi
+        fi
+    else
+        _error_no_exit "安装验证失败，mihomo 无法运行"
+        _press_any_key
+        return
+    fi
+
+    echo ""
+    printf "  ${BOLD}安装信息:${PLAIN}\n"
+    _separator
+    printf "    二进制路径 : %s\n" "${INSTALL_DIR}/mihomo"
+    printf "    配置目录   : %s\n" "${CONFIG_DIR}"
+    printf "    架构       : %s\n" "${ARCH}"
+    printf "    版本       : %s\n" "${LATEST_VERSION}"
+
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块七: Mihomo 配置生成
+#
+# ############################################################
+
+_MIHOMOCONF_CONFIG_DIR="/etc/mihomo"
+_MIHOMOCONF_CONFIG_FILE="/etc/mihomo/config.yaml"
+_MIHOMOCONF_SSL_DIR="/etc/mihomo/ssl"
+
+_mihomoconf_gen_ss_password_128() { head -c 16 /dev/urandom | base64; }
+_mihomoconf_gen_ss_password_256() { head -c 32 /dev/urandom | base64; }
+_mihomoconf_gen_anytls_password()  { head -c 24 /dev/urandom | base64; }
+
+_mihomoconf_gen_uuid() {
+    if command -v uuidgen &>/dev/null; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+    else
+        cat /proc/sys/kernel/random/uuid 2>/dev/null || \
+            head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' | \
+            sed 's/\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)/\1-\2-\3-\4-\5/'
+    fi
+}
+
+_mihomoconf_url_base64() {
+    echo -n "$1" | base64 | tr -d '\n' | tr '+/' '-_' | tr -d '='
+}
+
+_mihomoconf_urlencode() {
+    local string="$1" encoded="" i c
+    for (( i=0; i<${#string}; i++ )); do
+        c="${string:$i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) encoded+="$c" ;;
+            *) encoded+=$(printf '%%%02X' "'$c") ;;
+        esac
+    done
+    echo "$encoded"
+}
+
+_mihomoconf_get_server_ip() {
+    local ip=""
+    for url in "https://ifconfig.me" "https://api.ipify.org" "https://icanhazip.com"; do
+        ip=$(curl -fsSL --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]') && [[ -n "$ip" ]] && break
+    done
+    if [[ -z "$ip" ]]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_SERVER_IP")
+    fi
+    echo "$ip"
+}
+
+_mihomoconf_gen_ss_link() {
+    local server="$1" port="$2" cipher="$3" password="$4" name="$5"
+    local userinfo encoded_name
+    userinfo=$(_mihomoconf_url_base64 "${cipher}:${password}")
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    echo "ss://${userinfo}@${server}:${port}?tfo=1&uot=2#${encoded_name}"
+}
+
+_mihomoconf_gen_anytls_link() {
+    local server="$1" port="$2" password="$3" name="$4" sni="$5"
+    local encoded_name params
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    params="fastopen=1&udp=1"
+    if [[ -n "$sni" ]]; then
+        params="peer=${sni}&${params}"
+    fi
+    echo "anytls://${password}@${server}:${port}?${params}#${encoded_name}"
+}
+
+_mihomoconf_has_listener_type() {
+    local type="$1"
+    grep -q "type: ${type}" "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null
+}
+
+_mihomoconf_list_listeners() {
+    local type="$1"
+    awk -v t="$type" '
+        /^  - name:/ { name=$3 }
+        /type:/ && $2 == t { found=1 }
+        found && /port:/ { print "      " name " (端口: " $2 ")"; found=0 }
+    ' "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null
+}
+
+_mihomoconf_remove_listeners_by_type() {
+    local type="$1"
+    local tmp
+    tmp=$(mktemp)
+    awk -v t="$type" '
+        BEGIN { skip=0; buf="" }
+        /^  - name:/ {
+            if (skip) { skip=0; buf="" }
+            if (buf != "") { printf "%s", buf; buf="" }
+            buf = $0 "\n"
+            next
+        }
+        buf != "" && /^    type:/ {
+            if ($2 == t) {
+                skip=1; buf=""
+            } else {
+                buf = buf $0 "\n"
+            }
+            next
+        }
+        buf != "" && !skip {
+            buf = buf $0 "\n"
+            next
+        }
+        skip && /^  - / { skip=0; buf = $0 "\n"; next }
+        skip && /^[^ ]/ { skip=0; print; next }
+        skip { next }
+        { print }
+        END { if (buf != "" && !skip) printf "%s", buf }
+    ' "$_MIHOMOCONF_CONFIG_FILE" > "$tmp"
+    mv "$tmp" "$_MIHOMOCONF_CONFIG_FILE"
+}
+
+_mihomoconf_setup() {
+    _header "Mihomo 配置生成"
+
+    local CONFIG_DIR="$_MIHOMOCONF_CONFIG_DIR"
+    local CONFIG_FILE="$_MIHOMOCONF_CONFIG_FILE"
+    local SSL_DIR="$_MIHOMOCONF_SSL_DIR"
+
+    # ---- 判断写入模式 ----
+    local WRITE_MODE="new"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        echo ""
+        _info "检测到已有配置: ${CONFIG_FILE}"
+        echo ""
+        echo "  请选择操作:"
+        _separator
+        printf "    ${GREEN}1${PLAIN}) 追加新节点到现有配置\n"
+        printf "    ${GREEN}2${PLAIN}) 覆盖，重新生成配置\n"
+        echo ""
+        printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+        echo ""
+        local file_action
+        read -rp "  请选择 [0-2]: " file_action
+        case "$file_action" in
+            1) WRITE_MODE="append" ;;
+            2) WRITE_MODE="new" ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; _press_any_key; return ;;
+        esac
+    fi
+
+    # ---- 选择协议 ----
+    echo ""
+    echo "  请选择要添加的协议 (可多选，空格分隔):"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) Shadowsocks\n"
+    printf "    ${GREEN}2${PLAIN}) AnyTLS\n"
+    echo ""
+    local PROTOCOL_CHOICES
+    read -rp "  请输入选项 (如 \"1 2\" 表示两个都添加): " -a PROTOCOL_CHOICES
+
+    local ENABLE_SS="n" ENABLE_ANYTLS="n"
+    for ch in "${PROTOCOL_CHOICES[@]}"; do
+        case "$ch" in
+            1) ENABLE_SS="y" ;;
+            2) ENABLE_ANYTLS="y" ;;
+            *) _warn "忽略无效选项: $ch" ;;
+        esac
+    done
+    if [[ "$ENABLE_SS" == "n" && "$ENABLE_ANYTLS" == "n" ]]; then
+        _error_no_exit "未选择任何协议"
+        _press_any_key
+        return
+    fi
+
+    # ---- 追加模式: 检查已有同协议节点 ----
+    local SS_REPLACE="n" ANYTLS_REPLACE="n"
+    if [[ "$WRITE_MODE" == "append" ]]; then
+        if [[ "$ENABLE_SS" == "y" ]] && _mihomoconf_has_listener_type "shadowsocks"; then
+            echo ""
+            _warn "配置中已存在 Shadowsocks 节点:"
+            _mihomoconf_list_listeners "shadowsocks"
+            echo ""
+            printf "    ${GREEN}1${PLAIN}) 覆盖已有 SS 节点\n"
+            printf "    ${GREEN}2${PLAIN}) 保留已有，继续添加\n"
+            local ss_action
+            read -rp "  请选择 [1/2，默认 2]: " ss_action
+            [[ "${ss_action:-2}" == "1" ]] && SS_REPLACE="y"
+        fi
+        if [[ "$ENABLE_ANYTLS" == "y" ]] && _mihomoconf_has_listener_type "anytls"; then
+            echo ""
+            _warn "配置中已存在 AnyTLS 节点:"
+            _mihomoconf_list_listeners "anytls"
+            echo ""
+            printf "    ${GREEN}1${PLAIN}) 覆盖已有 AnyTLS 节点\n"
+            printf "    ${GREEN}2${PLAIN}) 保留已有，继续添加\n"
+            local anytls_action
+            read -rp "  请选择 [1/2，默认 2]: " anytls_action
+            [[ "${anytls_action:-2}" == "1" ]] && ANYTLS_REPLACE="y"
+        fi
+    fi
+
+    # ---- Shadowsocks 配置 ----
+    local SS_PORT SS_CIPHER SS_PASSWORD
+    if [[ "$ENABLE_SS" == "y" ]]; then
+        echo ""
+        printf "  ${BOLD}Shadowsocks 配置${PLAIN}\n"
+        _separator
+        read -rp "    SS 监听端口 [默认 12353]: " SS_PORT
+        SS_PORT="${SS_PORT:-12353}"
+
+        echo "    请选择加密方式:"
+        printf "      ${GREEN}1${PLAIN}) 2022-blake3-aes-128-gcm ${DIM}(推荐)${PLAIN}\n"
+        printf "      ${GREEN}2${PLAIN}) 2022-blake3-aes-256-gcm\n"
+        local cipher_choice
+        read -rp "    请输入选项 [1/2，默认 1]: " cipher_choice
+        case "${cipher_choice:-1}" in
+            1) SS_CIPHER="2022-blake3-aes-128-gcm"; SS_PASSWORD=$(_mihomoconf_gen_ss_password_128) ;;
+            2) SS_CIPHER="2022-blake3-aes-256-gcm"; SS_PASSWORD=$(_mihomoconf_gen_ss_password_256) ;;
+            *) _error_no_exit "无效选项"; _press_any_key; return ;;
+        esac
+        _info "SS 密码已随机生成"
+    fi
+
+    # ---- AnyTLS 配置 ----
+    local ANYTLS_PORT ANYTLS_SNI ANYTLS_USER_ID ANYTLS_PASSWORD
+    if [[ "$ENABLE_ANYTLS" == "y" ]]; then
+        echo ""
+        printf "  ${BOLD}AnyTLS 配置${PLAIN}\n"
+        _separator
+        read -rp "    AnyTLS 监听端口 [默认 443]: " ANYTLS_PORT
+        ANYTLS_PORT="${ANYTLS_PORT:-443}"
+        read -rp "    SNI 域名 (留空则用 IP): " ANYTLS_SNI
+        ANYTLS_SNI="${ANYTLS_SNI:-}"
+        ANYTLS_USER_ID=$(_mihomoconf_gen_uuid)
+        ANYTLS_PASSWORD=$(_mihomoconf_gen_anytls_password)
+        _info "AnyTLS 用户 ID 和密码已随机生成"
+    fi
+
+    # ---- 写入配置 ----
+    mkdir -p "$CONFIG_DIR"
+
+    # 内部函数: 追加 listeners
+    _mihomoconf_append_listeners() {
+        if [[ "$ENABLE_SS" == "y" ]]; then
+            cat >> "$CONFIG_FILE" <<MIHOMOCONF_SS_EOF
+  - name: ss-in-${SS_PORT}
+    type: shadowsocks
+    port: ${SS_PORT}
+    listen: "::"
+    cipher: ${SS_CIPHER}
+    password: "${SS_PASSWORD}"
+    udp: true
+MIHOMOCONF_SS_EOF
+        fi
+        if [[ "$ENABLE_ANYTLS" == "y" ]]; then
+            cat >> "$CONFIG_FILE" <<MIHOMOCONF_AT_EOF
+  - name: anytls-in-${ANYTLS_PORT}
+    type: anytls
+    port: ${ANYTLS_PORT}
+    listen: "::"
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+    users:
+      "${ANYTLS_USER_ID}": "${ANYTLS_PASSWORD}"
+MIHOMOCONF_AT_EOF
+        fi
+    }
+
+    if [[ "$WRITE_MODE" == "new" ]]; then
+        cat > "$CONFIG_FILE" <<'MIHOMOCONF_HEADER'
+# mihomo 服务端配置 (自动生成)
+allow-lan: false
+mode: direct
+log-level: info
+ipv6: true
+
+dns:
+  enable: true
+  ipv6: true
+  nameserver:
+    - 8.8.8.8
+    - 208.67.222.222
+
+listeners:
+MIHOMOCONF_HEADER
+        _mihomoconf_append_listeners
+    else
+        [[ "$SS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "shadowsocks" && _info "已移除旧的 SS 节点"
+        [[ "$ANYTLS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "anytls" && _info "已移除旧的 AnyTLS 节点"
+        if grep -q '^listeners:' "$CONFIG_FILE" 2>/dev/null; then
+            _mihomoconf_append_listeners
+        else
+            echo "" >> "$CONFIG_FILE"
+            echo "listeners:" >> "$CONFIG_FILE"
+            _mihomoconf_append_listeners
+        fi
+    fi
+
+    # ---- 获取服务器 IP ----
+    _info "正在获取服务器公网 IP..."
+    local SERVER_IP
+    SERVER_IP=$(_mihomoconf_get_server_ip)
+    _info "服务器 IP: ${SERVER_IP}"
+
+    # ---- 输出结果 ----
+    echo ""
+    _header "配置生成完成"
+    echo ""
+    _info "配置文件: ${CONFIG_FILE}"
+    _info "写入模式: $( [[ "$WRITE_MODE" == "new" ]] && echo "全新生成" || echo "追加到现有配置" )"
+
+    # SS 输出
+    if [[ "$ENABLE_SS" == "y" ]]; then
+        echo ""
+        printf "  ${BOLD}Shadowsocks 连接信息${PLAIN}\n"
+        _separator
+        printf "    服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_IP"
+        printf "    端口   : ${GREEN}%s${PLAIN}\n" "$SS_PORT"
+        printf "    加密   : ${GREEN}%s${PLAIN}\n" "$SS_CIPHER"
+        printf "    密码   : ${GREEN}%s${PLAIN}\n" "$SS_PASSWORD"
+        echo ""
+        local SS_LINK
+        SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_IP" "$SS_PORT" "$SS_CIPHER" "$SS_PASSWORD" "mihomo-ss-${SS_PORT}")
+        printf "  ${BOLD}SS 分享链接:${PLAIN}\n"
+        printf "  ${GREEN}%s${PLAIN}\n" "$SS_LINK"
+        echo ""
+        printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+        _separator
+        cat <<MIHOMOCONF_SS_YAML
+    proxies:
+      - name: "mihomo-ss-${SS_PORT}"
+        type: ss
+        server: ${SERVER_IP}
+        port: ${SS_PORT}
+        cipher: ${SS_CIPHER}
+        password: "${SS_PASSWORD}"
+        udp: true
+        tfo: true
+        udp-over-tcp: true
+MIHOMOCONF_SS_YAML
+    fi
+
+    # AnyTLS 输出
+    if [[ "$ENABLE_ANYTLS" == "y" ]]; then
+        echo ""
+        printf "  ${BOLD}AnyTLS 连接信息${PLAIN}\n"
+        _separator
+        printf "    服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_IP"
+        printf "    端口   : ${GREEN}%s${PLAIN}\n" "$ANYTLS_PORT"
+        printf "    用户ID : ${GREEN}%s${PLAIN}\n" "$ANYTLS_USER_ID"
+        printf "    密码   : ${GREEN}%s${PLAIN}\n" "$ANYTLS_PASSWORD"
+        if [[ -n "$ANYTLS_SNI" ]]; then
+            printf "    SNI    : ${GREEN}%s${PLAIN}\n" "$ANYTLS_SNI"
+        fi
+        echo ""
+        local ANYTLS_LINK
+        ANYTLS_LINK=$(_mihomoconf_gen_anytls_link "$SERVER_IP" "$ANYTLS_PORT" "$ANYTLS_PASSWORD" "mihomo-anytls-${ANYTLS_PORT}" "$ANYTLS_SNI")
+        printf "  ${BOLD}AnyTLS 分享链接:${PLAIN}\n"
+        printf "  ${GREEN}%s${PLAIN}\n" "$ANYTLS_LINK"
+        echo ""
+        printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+        _separator
+        cat <<MIHOMOCONF_AT_YAML
+    proxies:
+      - name: "mihomo-anytls-${ANYTLS_PORT}"
+        type: anytls
+        server: ${SERVER_IP}
+        port: ${ANYTLS_PORT}
+        password: "${ANYTLS_PASSWORD}"
+        udp: true
+        tfo: true
+MIHOMOCONF_AT_YAML
+        if [[ -n "$ANYTLS_SNI" ]]; then
+            echo "        sni: ${ANYTLS_SNI}"
+        else
+            echo "        skip-cert-verify: true"
+        fi
+    fi
+
+    echo ""
+    _separator
+    _warn "请妥善保存以上凭据和链接，密码不会再次显示!"
+    _info "启动命令: mihomo -d ${CONFIG_DIR}"
+
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块八: iperf3 测速服务端
+#
+# ############################################################
+
+_iperf3_check() {
+    if command -v iperf3 >/dev/null 2>&1; then
+        _info "iperf3 版本: $(iperf3 --version 2>&1 | head -1)"
+        return 0
+    fi
+
+    _warn "未检测到 iperf3，正在尝试自动安装..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq iperf3 >/dev/null 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y iperf3 >/dev/null 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y iperf3 >/dev/null 2>&1
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm iperf3 >/dev/null 2>&1
+    elif command -v apk >/dev/null 2>&1; then
+        apk add iperf3 >/dev/null 2>&1
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y iperf3 >/dev/null 2>&1
+    else
+        _error_no_exit "无法识别包管理器，请手动安装 iperf3"
+        return 1
+    fi
+
+    if ! command -v iperf3 >/dev/null 2>&1; then
+        _error_no_exit "iperf3 安装失败，请手动安装"
+        return 1
+    fi
+    _info "iperf3 安装成功"
+    return 0
+}
+
+_iperf3_get_public_ip() {
+    local ip=""
+    for url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
+        ip="$(curl -4 -s --max-time 3 "$url" 2>/dev/null || true)"
+        if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '%s' "$ip"
+            return
+        fi
+    done
+    printf '%s' ""
+}
+
+_iperf3_get_local_ip() {
+    local ip=""
+    if command -v ip >/dev/null 2>&1; then
+        ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)"
+    fi
+    if [ -z "$ip" ] && command -v ifconfig >/dev/null 2>&1; then
+        ip="$(ifconfig 2>/dev/null | awk '/inet / && !/127\.0\.0\.1/ {print $2; exit}' | sed 's/addr://')"
+    fi
+    printf '%s' "${ip:-unknown}"
+}
+
+_iperf3_check_port() {
+    local port="$1"
+    local pid
+    pid="$(lsof -ti :"$port" 2>/dev/null || true)"
+    [ -z "$pid" ] && return 0
+
+    local proc_info
+    proc_info="$(ps -p "$pid" -o pid=,comm= 2>/dev/null || echo "$pid unknown")"
+    _warn "端口 $port 已被占用 (PID: $proc_info)"
+    echo ""
+    printf "    ${GREEN}1${PLAIN}) 终止占用进程并继续\n"
+    printf "    ${GREEN}2${PLAIN}) 更换端口\n"
+    printf "    ${RED}0${PLAIN}) 返回\n"
+    echo ""
+    local action
+    read -rp "  请输入选项 [0-2]: " action
+    case "$action" in
+        1)
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+            if lsof -ti :"$port" >/dev/null 2>&1; then
+                kill -9 "$pid" 2>/dev/null || true
+                sleep 1
+            fi
+            if lsof -ti :"$port" >/dev/null 2>&1; then
+                _error_no_exit "无法终止占用端口 $port 的进程"
+                return 1
+            fi
+            _info "已终止进程 $pid"
+            return 0
+            ;;
+        2)
+            local new_port
+            read -rp "  新端口号: " new_port
+            if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+                _error_no_exit "端口号无效 (1-65535)"
+                return 1
+            fi
+            # 通过全局变量返回新端口
+            _IPERF3_PORT="$new_port"
+            _iperf3_check_port "$new_port"
+            return $?
+            ;;
+        0) return 1 ;;
+        *) _error_no_exit "无效选项"; return 1 ;;
+    esac
+}
+
+_iperf3_setup() {
+    _header "iperf3 测速服务端"
+
+    if ! _iperf3_check; then
+        _press_any_key
+        return
+    fi
+
+    echo ""
+    echo "  请选择操作:"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) 启动 iperf3 服务端\n"
+    echo ""
+    printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+    echo ""
+    local choice
+    read -rp "  请输入选项 [0-1]: " choice
+    case "$choice" in
+        1) ;;
+        0) return ;;
+        *) _error_no_exit "无效选项"; _press_any_key; return ;;
+    esac
+
+    # 配置端口
+    _IPERF3_PORT=5201
+    local port_input
+    read -rp "  监听端口 [默认 5201]: " port_input
+    _IPERF3_PORT="${port_input:-5201}"
+    if ! [[ "$_IPERF3_PORT" =~ ^[0-9]+$ ]] || [ "$_IPERF3_PORT" -lt 1 ] || [ "$_IPERF3_PORT" -gt 65535 ]; then
+        _error_no_exit "端口号无效 (1-65535)"
+        _press_any_key
+        return
+    fi
+
+    # 检查端口占用
+    if ! _iperf3_check_port "$_IPERF3_PORT"; then
+        _press_any_key
+        return
+    fi
+
+    # 获取 IP
+    local local_ip public_ip
+    local_ip="$(_iperf3_get_local_ip)"
+    public_ip="$(_iperf3_get_public_ip)"
+
+    # 启动服务端
+    iperf3 -s -p "$_IPERF3_PORT" &
+    local iperf_pid=$!
+    _info "iperf3 已启动 (PID: $iperf_pid)"
+
+    # 显示连接信息
+    echo ""
+    printf "  ${BOLD}服务端信息${PLAIN}\n"
+    _separator
+    printf "    监听端口 : %s\n" "$_IPERF3_PORT"
+    printf "    内网地址 : %s\n" "$local_ip"
+    if [ -n "$public_ip" ]; then
+        printf "    公网地址 : %s\n" "$public_ip"
+    fi
+    echo ""
+    printf "  ${BOLD}客户端连接命令:${PLAIN}\n"
+    _separator
+    printf "    ${GREEN}iperf3 -c %s -p %s${PLAIN}\n" "${public_ip:-$local_ip}" "$_IPERF3_PORT"
+    if [ -n "$public_ip" ] && [ "$local_ip" != "$public_ip" ]; then
+        printf "    ${DIM}局域网: iperf3 -c %s -p %s${PLAIN}\n" "$local_ip" "$_IPERF3_PORT"
+    fi
+    echo ""
+    _info "按 Ctrl+C 停止服务端"
+    echo ""
+
+    # 等待服务端进程，Ctrl+C 时清理
+    trap 'kill "$iperf_pid" 2>/dev/null; wait "$iperf_pid" 2>/dev/null; _info "iperf3 已关闭"' INT
+    set +e
+    wait "$iperf_pid" 2>/dev/null
+    set -e
+    trap - INT
+
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块九: NodeQuality 网络质量测试
+#
+# ############################################################
+
+_nodequality_setup() {
+    _header "NodeQuality 网络质量测试"
+
+    if ! command -v curl >/dev/null 2>&1; then
+        _error_no_exit "需要 curl 命令，请先安装"
+        _press_any_key
+        return
+    fi
+
+    echo ""
+    _info "正在运行 NodeQuality 测试脚本..."
+    _separator
+    echo ""
+    bash <(curl -sL https://run.NodeQuality.com)
+    echo ""
+    _press_any_key
+}
+
+# ############################################################
+#
+#  模块十: sing-box 安装
+#
+# ############################################################
+
+_singbox_install_apt() {
+    _info "使用 APT 官方仓库安装..."
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc
+    chmod a+r /etc/apt/keyrings/sagernet.asc
+
+    cat > /etc/apt/sources.list.d/sagernet.sources <<'SINGBOX_APT'
+Types: deb
+URIs: https://deb.sagernet.org/
+Suites: *
+Components: *
+Enabled: yes
+Signed-By: /etc/apt/keyrings/sagernet.asc
+SINGBOX_APT
+
+    apt-get update -qq
+    echo ""
+    echo "  请选择版本:"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) sing-box ${DIM}(稳定版)${PLAIN}\n"
+    printf "    ${GREEN}2${PLAIN}) sing-box-beta ${DIM}(测试版)${PLAIN}\n"
+    echo ""
+    local ver_choice
+    read -rp "  请选择 [1/2，默认 1]: " ver_choice
+    case "${ver_choice:-1}" in
+        1) apt-get install -y sing-box ;;
+        2) apt-get install -y sing-box-beta ;;
+        *) _error_no_exit "无效选项"; return 1 ;;
+    esac
+}
+
+_singbox_install_generic() {
+    _info "使用官方安装脚本..."
+    bash <(curl -fsSL https://sing-box.app/install.sh)
+}
+
+_singbox_setup() {
+    _header "sing-box 安装"
+
+    if ! command -v curl >/dev/null 2>&1; then
+        _error_no_exit "需要 curl 命令，请先安装"
+        _press_any_key
+        return
+    fi
+
+    echo ""
+    if command -v sing-box >/dev/null 2>&1; then
+        local cur_ver
+        cur_ver=$(sing-box version 2>/dev/null | head -1 || echo "未知")
+        _info "当前已安装: ${cur_ver}"
+    else
+        _info "当前未安装 sing-box"
+    fi
+
+    echo ""
+    echo "  请选择操作:"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) 安装/更新 sing-box\n"
+    echo ""
+    printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+    echo ""
+    local choice
+    read -rp "  请输入选项 [0-1]: " choice
+    case "$choice" in
+        1) ;;
+        0) return ;;
+        *) _error_no_exit "无效选项"; _press_any_key; return ;;
+    esac
+
+    echo ""
+    if command -v apt-get >/dev/null 2>&1; then
+        _singbox_install_apt
+    else
+        _singbox_install_generic
+    fi
+
+    echo ""
+    if command -v sing-box >/dev/null 2>&1; then
+        _info "sing-box 安装成功!"
+        _info "版本: $(sing-box version 2>/dev/null | head -1)"
+    else
+        _error_no_exit "sing-box 安装失败"
+    fi
+
+    _press_any_key
+}
+
+# ############################################################
+#
+#  自安装: 写入 /usr/local/bin/vpsgo
+#
+# ############################################################
+
+_self_install() {
+    local self
+    self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+    # 如果已经是从 INSTALL_PATH 运行的，跳过
+    if [[ "$(readlink -f "$INSTALL_PATH" 2>/dev/null)" == "$self" ]] || \
+       [[ "$self" == "$INSTALL_PATH" ]]; then
+        return
+    fi
+
+    # 如果目标不存在，或者源文件更新了，则安装/更新
+    if [[ ! -f "$INSTALL_PATH" ]]; then
+        cp "$self" "$INSTALL_PATH"
+        chmod +x "$INSTALL_PATH"
+        _info "已安装到 ${INSTALL_PATH}，后续可直接输入 vpsgo 启动"
+    elif [[ "$self" -nt "$INSTALL_PATH" ]]; then
+        cp "$self" "$INSTALL_PATH"
+        chmod +x "$INSTALL_PATH"
+        _info "已更新 ${INSTALL_PATH}"
+    fi
+}
+
+# ############################################################
+#
+#  主菜单
+#
+# ############################################################
+
+_show_banner() {
+    clear
+    echo ""
+    printf "${CYAN}"
+    cat << 'BANNER'
+  VV     VV PPPPPP   SSSSS    GGGG
+   VV   VV  PP   PP SS       GG
+    VV VV   PPPPPP   SSSSS  GG  GGG  OOOOO
+     VVV    PP           SS  GG   GG OO   OO
+      V     PP       SSSSS   GGGGGG  OOOOO
+BANNER
+    printf "${PLAIN}"
+    printf "${DIM}      VPS 一站式管理脚本  v${VERSION}${PLAIN}\n"
+}
+
+_show_main_menu() {
+    _show_sys_info
+    printf "  ${BOLD}[ 网络优化 ]${PLAIN}\n"
+    printf "    ${GREEN}1${PLAIN}) 开启内核自带 BBR                ${DIM}— 安装 BBR${PLAIN}\n"
+    printf "    ${GREEN}2${PLAIN}) 设置队列调度算法                ${DIM}— fq/cake/fq_pie${PLAIN}\n"
+    printf "    ${GREEN}3${PLAIN}) 设置 IPv4/IPv6 优先级           ${DIM}— 出口协议栈偏好${PLAIN}\n"
+    printf "    ${GREEN}4${PLAIN}) TCP 缓冲区调优                  ${DIM}— 优化连接${PLAIN}\n"
+    printf "  ${BOLD}[ 工具 ]${PLAIN}\n"
+    printf "    ${GREEN}5${PLAIN}) iPerf3 测速服务端               ${DIM}— 临时启动${PLAIN}\n"
+    printf "    ${GREEN}6${PLAIN}) NodeQuality 测试                ${DIM}— vps 测试脚本${PLAIN}\n"
+    printf "    ${GREEN}7${PLAIN}) Docker 日志轮转                 ${DIM}— 限制容器日志大小${PLAIN}\n"
+    printf "    ${GREEN}8${PLAIN}) Mihomo 安装                     ${DIM}— 优秀的代理核心${PLAIN}\n"
+    printf "    ${GREEN}9${PLAIN}) 生成 Mihomo 配置                ${DIM}— 支持生成 SS/AnyTLS 配置${PLAIN}\n"
+    printf "   ${GREEN}10${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
+    echo ""
+    printf "    ${RED}0${PLAIN}) 退出脚本\n"
+    echo ""
+}
+
+main() {
+    [[ $EUID -ne 0 ]] && _error "此脚本需要 root 权限运行"
+
+    _self_install
+
+    while true; do
+        _show_banner
+        _show_main_menu
+
+        local choice
+        read -rp "  请输入选项: " choice
+
+        case "$choice" in
+            1) _bbr_install ;;
+            2) _qdisc_setup ;;
+            3) _v4v6_setup ;;
+            4) _tcptune_setup ;;
+            5) _iperf3_setup ;;
+            6) _nodequality_setup ;;
+            7) _dockerlog_setup ;;
+            8) _mihomo_setup ;;
+            9) _mihomoconf_setup ;;
+            10) _singbox_setup ;;
+            0)
+                echo ""
+                _info "感谢使用 VPSGo，再见!"
+                echo ""
+                exit 0
+                ;;
+            *)
+                _error_no_exit "无效选项: ${choice}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+main "$@"
