@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.7"
+VERSION="1.8"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -1853,6 +1853,39 @@ SERVICEEOF
     _press_any_key
 }
 
+_mihomo_log() {
+    _header "Mihomo 日志"
+
+    if ! command -v mihomo >/dev/null 2>&1; then
+        _error_no_exit "未检测到 mihomo，请先安装"
+        _press_any_key
+        return
+    fi
+
+    echo ""
+    if systemctl list-unit-files mihomo.service &>/dev/null; then
+        _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
+        _separator
+        echo ""
+        journalctl -u mihomo --no-pager -n 50
+        echo ""
+        _separator
+        local follow
+        read -rp "  是否实时跟踪日志? [y/N]: " follow
+        if [[ "$follow" =~ ^[Yy] ]]; then
+            echo ""
+            _info "按 Ctrl+C 退出实时日志..."
+            echo ""
+            journalctl -u mihomo -f
+        fi
+    else
+        _warn "mihomo 未使用 systemd 管理，无法通过 journalctl 查看日志"
+        _info "提示: 可以通过选项3「配置自启并启动」来设置 systemd 服务"
+    fi
+
+    _press_any_key
+}
+
 _mihomo_manage() {
     while true; do
         _header "Mihomo 管理"
@@ -1879,17 +1912,19 @@ _mihomo_manage() {
         printf "    ${GREEN}2${PLAIN}) 生成配置 ${DIM}(SS / AnyTLS)${PLAIN}\n"
         printf "    ${GREEN}3${PLAIN}) 配置自启并启动\n"
         printf "    ${GREEN}4${PLAIN}) 重启 Mihomo\n"
+        printf "    ${GREEN}5${PLAIN}) 查看日志\n"
         echo ""
         printf "    ${RED}0${PLAIN}) 返回主菜单\n"
         echo ""
 
         local choice
-        read -rp "  请输入选项 [0-4]: " choice
+        read -rp "  请输入选项 [0-5]: " choice
         case "$choice" in
             1) _mihomo_setup ;;
             2) _mihomoconf_setup ;;
             3) _mihomo_enable ;;
             4) _mihomo_restart ;;
+            5) _mihomo_log ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
