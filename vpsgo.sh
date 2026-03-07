@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.8"
+VERSION="1.9"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -1941,17 +1941,17 @@ _iperf3_check() {
 
     _warn "未检测到 iperf3，正在尝试自动安装..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq iperf3 >/dev/null 2>&1
+        apt-get update -qq && apt-get install -y -qq iperf3
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y iperf3 >/dev/null 2>&1
+        yum install -y iperf3
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y iperf3 >/dev/null 2>&1
+        dnf install -y iperf3
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm iperf3 >/dev/null 2>&1
+        pacman -Sy --noconfirm iperf3
     elif command -v apk >/dev/null 2>&1; then
-        apk add iperf3 >/dev/null 2>&1
+        apk add iperf3
     elif command -v zypper >/dev/null 2>&1; then
-        zypper install -y iperf3 >/dev/null 2>&1
+        zypper install -y iperf3
     else
         _error_no_exit "无法识别包管理器，请手动安装 iperf3"
         return 1
