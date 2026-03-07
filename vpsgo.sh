@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.10"
+VERSION="1.11"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -726,6 +726,7 @@ _tcptune_detect_rtt_china() {
     local min_rtt=""
     local rtt_sum=0
     local rtt_count=0
+    local results=()
 
     for entry in "${entries[@]}"; do
         local ip="${entry%%:*}"
@@ -734,26 +735,39 @@ _tcptune_detect_rtt_china() {
         rtt=$(ping -c 3 -W 5 "$ip" 2>/dev/null \
               | awk '/rtt|round-trip/ { split($4,a,"/"); printf "%.1f", a[2] }')
         if [ -n "$rtt" ] && [ "$rtt" != "0" ] && [ "$rtt" != "0.0" ]; then
-            printf "    ${DIM}%-18s${PLAIN} ${GREEN}%s ms${PLAIN}\n" "${name}" "${rtt}"
+            results+=("$(printf "%-14s ${GREEN}%7s ms${PLAIN}" "${name}" "${rtt}")")
             rtt_sum=$(awk -v s="$rtt_sum" -v r="$rtt" 'BEGIN{ printf "%.1f", s+r }')
             rtt_count=$((rtt_count+1))
             if [ -z "$min_rtt" ] || awk -v a="$rtt" -v b="$min_rtt" 'BEGIN{exit !(a<b)}'; then
                 min_rtt="$rtt"
             fi
         else
-            printf "    ${DIM}%-18s${PLAIN} ${RED}不可达${PLAIN}\n" "${name}"
+            results+=("$(printf "%-14s ${RED}%7s   ${PLAIN}" "${name}" "超时")")
         fi
+    done
+
+    # 双列排版输出到 /dev/tty
+    local total=${#results[@]}
+    local half=$(( (total + 1) / 2 ))
+    local i
+    for (( i=0; i<half; i++ )); do
+        local left="${results[$i]}"
+        local right=""
+        if [ $((i + half)) -lt $total ]; then
+            right="${results[$((i + half))]}"
+        fi
+        printf "    %s    %s\n" "$left" "$right" > /dev/tty
     done
 
     if [ "$rtt_count" -gt 0 ]; then
         local avg_rtt avg_int
         avg_rtt=$(awk -v s="$rtt_sum" -v n="$rtt_count" 'BEGIN{ printf "%.1f", s/n }')
         avg_int=$(awk -v r="$avg_rtt" 'BEGIN{ printf "%d", (r==int(r)) ? r : int(r)+1 }')
-        echo ""
-        _info "最低: ${min_rtt} ms | 平均: ${avg_rtt} ms | 建议值: ${avg_int} ms"
+        echo "" > /dev/tty
+        printf "  ${GREEN}✔ ${PLAIN}最低: ${CYAN}%s ms${PLAIN} | 平均: ${CYAN}%s ms${PLAIN} | 建议值: ${CYAN}%s ms${PLAIN}\n" "$min_rtt" "$avg_rtt" "$avg_int" > /dev/tty
         echo "$avg_int"
     else
-        _warn "所有节点均不可达"
+        printf "  ${YELLOW}⚠ ${PLAIN}所有节点均不可达\n" > /dev/tty
         echo ""
     fi
 }
