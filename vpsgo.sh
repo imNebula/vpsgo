@@ -28,7 +28,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.4"
+VERSION="1.5"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -1376,8 +1376,10 @@ _mihomoconf_urlencode() {
 
 _mihomoconf_get_server_ip() {
     local ip=""
-    for url in "https://ifconfig.me" "https://api.ipify.org" "https://icanhazip.com"; do
-        ip=$(curl -fsSL --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]') && [[ -n "$ip" ]] && break
+    for url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
+        ip=$(curl -4 -fsSL --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')
+        [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && break
+        ip=""
     done
     if [[ -z "$ip" ]]; then
         ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_SERVER_IP")
@@ -1567,6 +1569,20 @@ _mihomoconf_setup() {
         ANYTLS_USER_ID=$(_mihomoconf_gen_uuid)
         ANYTLS_PASSWORD=$(_mihomoconf_gen_anytls_password)
         _info "AnyTLS 用户 ID 和密码已随机生成"
+
+        # SSL 证书检查
+        mkdir -p "$SSL_DIR"
+        echo ""
+        if [[ -f "${SSL_DIR}/cert.crt" && -f "${SSL_DIR}/cert.key" ]]; then
+            _info "已检测到 SSL 证书: ${SSL_DIR}/"
+        else
+            _warn "AnyTLS 需要 SSL 证书才能正常运行!"
+            _warn "请将证书文件放到以下路径:"
+            printf "    证书: ${YELLOW}${SSL_DIR}/cert.crt${PLAIN}\n"
+            printf "    私钥: ${YELLOW}${SSL_DIR}/cert.key${PLAIN}\n"
+            echo ""
+            _info "目录 ${SSL_DIR}/ 已自动创建"
+        fi
     fi
 
     # ---- 写入配置 ----
