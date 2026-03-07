@@ -8,7 +8,8 @@
 ```bash
 # 一键安装并运行
 bash <(curl -sL https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh)
-
+```
+```bash
 # 安装后直接使用
 vpsgo
 ```
