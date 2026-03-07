@@ -28,7 +28,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.1"
+VERSION="1.2"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -2196,14 +2196,21 @@ _self_update() {
     fi
 
     local remote_ver
-    remote_ver=$(grep '^VERSION=' "$tmp_file" | head -1 | cut -d'"' -f2)
-    _info "最新版本: v${remote_ver:-未知}"
+    remote_ver=$(grep '^VERSION=' "$tmp_file" | head -1 | sed 's/VERSION=//;s/[\"'"'"']//g')
 
-    if [[ "$remote_ver" == "$VERSION" ]]; then
-        _info "已是最新版本，无需更新"
+    if [[ -z "$remote_ver" ]]; then
+        _error_no_exit "无法解析远程版本号"
         rm -f "$tmp_file"
         _press_any_key
         return
+    else
+        _info "最新版本: v${remote_ver}"
+        if [[ "$remote_ver" == "$VERSION" ]]; then
+            _info "已是最新版本，无需更新"
+            rm -f "$tmp_file"
+            _press_any_key
+            return
+        fi
     fi
 
     cp "$tmp_file" "$INSTALL_PATH"
