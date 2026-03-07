@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.13"
+VERSION="1.14"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -1347,7 +1347,7 @@ _MIHOMOCONF_SSL_DIR="/etc/mihomo/ssl"
 
 _mihomoconf_gen_ss_password_128() { head -c 16 /dev/urandom | base64; }
 _mihomoconf_gen_ss_password_256() { head -c 32 /dev/urandom | base64; }
-_mihomoconf_gen_anytls_password()  { head -c 24 /dev/urandom | base64; }
+_mihomoconf_gen_anytls_password()  { head -c 32 /dev/urandom | base64 | tr '/+' 'Aa' | tr -d '=' | head -c 32; echo; }
 
 _mihomoconf_gen_uuid() {
     if command -v uuidgen &>/dev/null; then
