@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.11"
+VERSION="1.12"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -2091,7 +2091,6 @@ _iperf3_setup() {
     printf "  ${BOLD}服务端信息${PLAIN}\n"
     _separator
     printf "    监听端口 : %s\n" "$_IPERF3_PORT"
-    printf "    内网地址 : %s\n" "$local_ip"
     if [ -n "$public_ip" ]; then
         printf "    公网地址 : %s\n" "$public_ip"
     fi
@@ -2287,11 +2286,12 @@ _swap_setup() {
     printf "    物理内存:         ${CYAN}%s${PLAIN}\n" "$mem_total_display"
     printf "    现有 Swap:        ${CYAN}%s${PLAIN}\n" "$swap_total_display"
     printf "    硬盘剩余空间:     ${CYAN}%s${PLAIN}\n" "$disk_avail_display"
+    printf "    推荐总 Swap:      ${CYAN}%s MiB${PLAIN}\n" "$recommend_mib"
     echo ""
     _separator
 
-    if [ "$recommend_new_mib" -le 0 ]; then
-        _info "当前 Swap 已达到或超过推荐值 (${recommend_mib} MiB)，无需额外创建"
+    if [ "$recommend_new_mib" -le 64 ]; then
+        _info "当前 Swap (${existing_swap_mib} MiB) 已达到推荐值 (${recommend_mib} MiB)"
         echo ""
         printf "    ${GREEN}1${PLAIN}) 仍要创建/扩展 Swap\n"
         printf "    ${RED}2${PLAIN}) 删除现有 Swap 文件 (/swapfile)\n"
