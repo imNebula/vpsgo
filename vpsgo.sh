@@ -24,7 +24,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
     else
         echo "[Error] bash is required to run this script."
         exit 1
-    fi 
+    fi
 fi
 
 set -uo pipefail
