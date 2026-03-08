@@ -24,12 +24,12 @@ if [ -z "${BASH_VERSION:-}" ]; then
     else
         echo "[Error] bash is required to run this script."
         exit 1
-    fi
+    fi 
 fi
 
 set -uo pipefail
 
-VERSION="1.17"
+VERSION="1.19"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -876,17 +876,18 @@ _tcptune_setup_fq() {
     fi
 
     # ---- 计算 BDP ----
-    local BDP_BYTES MEM_BYTES TWO_BDP RAM3_BYTES CAP64 MAX_NUM_BYTES
+    local BDP_BYTES MEM_BYTES TWO_BDP RAM_LIMIT_BYTES CAP64 MAX_NUM_BYTES
     BDP_BYTES=$(awk -v bw="$BW_Mbps" -v rtt="$RTT_ms" 'BEGIN{ printf "%.0f", bw*125*rtt }')
     MEM_BYTES=$(awk -v g="$MEM_G" 'BEGIN{ printf "%.0f", g*1024*1024*1024 }')
     TWO_BDP=$(( BDP_BYTES * 2 ))
-    RAM3_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ printf "%.0f", m*0.03 }')
+    # 内存限制：至少放宽到 5% 或 32MB 保底，避免小内存机器单线程被卡死
+    RAM_LIMIT_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ limit=m*0.05; if(limit < 33554432) limit=33554432; printf "%.0f", limit }')
     CAP64=$(( 64 * 1024 * 1024 ))
-    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM3_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
+    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM_LIMIT_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
 
-    local MAX_MB_NUM MAX_MB MAX_BYTES
-    MAX_MB_NUM=$(( MAX_NUM_BYTES / 1024 / 1024 ))
-    MAX_MB=$(_tcptune_bucket_le_mb "$MAX_MB_NUM")
+    local MAX_MB MAX_BYTES
+    MAX_MB=$(( MAX_NUM_BYTES / 1024 / 1024 ))
+    [ "$MAX_MB" -lt 4 ] && MAX_MB=4
     MAX_BYTES=$(( MAX_MB * 1024 * 1024 ))
 
     local DEF_R DEF_W
@@ -919,8 +920,8 @@ _tcptune_setup_fq() {
 
     if [ "$IS_BBR" -eq 1 ]; then
         SLOW_START_IDLE=0
-        NOTSENT_LOWAT=131072
-        _info "BBR 模式: notsent_lowat=128KB, slow_start_after_idle=0"
+        NOTSENT_LOWAT=""
+        _info "BBR 模式: 禁用 slow_start_after_idle, 不限制 notsent_lowat"
     else
         _info "非 BBR (${CURRENT_CC}): 仅调缓冲区"
     fi
@@ -1060,9 +1061,9 @@ _tcptune_setup_cake() {
 
     # ---- 输入带宽 ----
     local BW_Mbps_INPUT BW_Mbps CAKE_BW
-    read -rp "  带宽 (Mbps) [默认 600]: " BW_Mbps_INPUT
-    BW_Mbps="${BW_Mbps_INPUT:-600}"
-    _is_digit "$BW_Mbps" || BW_Mbps=600
+    read -rp "  带宽 (Mbps) [默认 1000]: " BW_Mbps_INPUT
+    BW_Mbps="${BW_Mbps_INPUT:-1000}"
+    _is_digit "$BW_Mbps" || BW_Mbps=1000
     CAKE_BW="${BW_Mbps}mbit"
 
     # ---- 测量 RTT ----
@@ -1084,17 +1085,17 @@ _tcptune_setup_cake() {
     _is_digit "$RTT_ms" || RTT_ms=150
 
     # ---- 计算 BDP ----
-    local BDP_BYTES MEM_BYTES TWO_BDP RAM3_BYTES CAP64 MAX_NUM_BYTES
+    local BDP_BYTES MEM_BYTES TWO_BDP RAM_LIMIT_BYTES CAP64 MAX_NUM_BYTES
     BDP_BYTES=$(awk -v bw="$BW_Mbps" -v rtt="$RTT_ms" 'BEGIN{ printf "%.0f", bw*125*rtt }')
     MEM_BYTES=$(awk -v g="$MEM_G" 'BEGIN{ printf "%.0f", g*1024*1024*1024 }')
     TWO_BDP=$(( BDP_BYTES * 2 ))
-    RAM3_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ printf "%.0f", m*0.03 }')
+    RAM_LIMIT_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ limit=m*0.05; if(limit < 33554432) limit=33554432; printf "%.0f", limit }')
     CAP64=$(( 64 * 1024 * 1024 ))
-    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM3_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
+    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM_LIMIT_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
 
-    local MAX_MB_NUM MAX_MB MAX_BYTES
-    MAX_MB_NUM=$(( MAX_NUM_BYTES / 1024 / 1024 ))
-    MAX_MB=$(_tcptune_bucket_le_mb "$MAX_MB_NUM")
+    local MAX_MB MAX_BYTES
+    MAX_MB=$(( MAX_NUM_BYTES / 1024 / 1024 ))
+    [ "$MAX_MB" -lt 4 ] && MAX_MB=4
     MAX_BYTES=$(( MAX_MB * 1024 * 1024 ))
 
     local DEF_R DEF_W
@@ -1127,8 +1128,8 @@ _tcptune_setup_cake() {
 
     if [ "$IS_BBR" -eq 1 ]; then
         SLOW_START_IDLE=0
-        NOTSENT_LOWAT=131072
-        _info "BBR 模式: notsent_lowat=128KB, slow_start_after_idle=0"
+        NOTSENT_LOWAT=""
+        _info "BBR 模式: 禁用 slow_start_after_idle, 不限制 notsent_lowat"
     else
         _info "非 BBR (${CURRENT_CC}): 仅调缓冲区"
     fi
