@@ -11,7 +11,7 @@
 #   6. NodeQuality 测试
 #   7. Docker 日志轮转配置
 #   8. Mihomo 管理 (安装/配置/重启)
-#   9. sing-box 安装
+#   9. Sing-Box 管理 (安装/自启/重启/日志)
 #  10. Swap 管理
 #
 # 使用方法: bash vpsgo.sh
@@ -721,7 +721,9 @@ _tcptune_detect_mem_gib() {
     fi
 }
 
-_tcptune_detect_rtt_china() {
+_tcptune_rtt_bg_start() {
+    # 在后台并发 ping 所有节点，结果写入临时文件
+    _RTT_TMPDIR=$(mktemp -d)
     local entries=(
         "180.163.117.56:上海/电信"
         "211.95.52.65:上海/联通"
@@ -733,30 +735,63 @@ _tcptune_detect_rtt_china() {
         "157.148.78.253:广东广州/联通"
         "120.232.97.43:广东佛山/移动"
     )
-    local min_rtt=""
-    local rtt_sum=0
-    local rtt_count=0
-    local results=()
-
+    _RTT_BG_PIDS=()
+    local idx=0
     for entry in "${entries[@]}"; do
         local ip="${entry%%:*}"
         local name="${entry#*:}"
-        local rtt
-        rtt=$(ping -c 3 -W 5 "$ip" 2>/dev/null \
-              | awk '/rtt|round-trip/ { split($4,a,"/"); printf "%.1f", a[2] }')
-        if [ -n "$rtt" ] && [ "$rtt" != "0" ] && [ "$rtt" != "0.0" ]; then
+        (
+            local rtt
+            rtt=$(ping -c 3 -W 5 "$ip" 2>/dev/null \
+                  | awk '/rtt|round-trip/ { split($4,a,"/"); printf "%.1f", a[2] }')
+            if [ -n "$rtt" ] && [ "$rtt" != "0" ] && [ "$rtt" != "0.0" ]; then
+                echo "${name}|${rtt}" > "${_RTT_TMPDIR}/${idx}.ok"
+            else
+                echo "${name}|timeout" > "${_RTT_TMPDIR}/${idx}.fail"
+            fi
+        ) &
+        _RTT_BG_PIDS+=($!)
+        idx=$((idx+1))
+    done
+}
+
+_tcptune_rtt_bg_collect() {
+    # 等待后台 ping 完成，显示结果并返回建议 RTT
+    _info "正在等待 RTT 测量完成..."
+    for pid in "${_RTT_BG_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    local results=() min_rtt="" rtt_sum=0 rtt_count=0
+
+    # 按序号收集结果
+    local idx=0
+    while [ -f "${_RTT_TMPDIR}/${idx}.ok" ] || [ -f "${_RTT_TMPDIR}/${idx}.fail" ]; do
+        if [ -f "${_RTT_TMPDIR}/${idx}.ok" ]; then
+            local line name rtt
+            line=$(cat "${_RTT_TMPDIR}/${idx}.ok")
+            name="${line%%|*}"
+            rtt="${line#*|}"
             results+=("$(printf "%-14s ${GREEN}%7s ms${PLAIN}" "${name}" "${rtt}")")
             rtt_sum=$(awk -v s="$rtt_sum" -v r="$rtt" 'BEGIN{ printf "%.1f", s+r }')
             rtt_count=$((rtt_count+1))
             if [ -z "$min_rtt" ] || awk -v a="$rtt" -v b="$min_rtt" 'BEGIN{exit !(a<b)}'; then
                 min_rtt="$rtt"
             fi
-        else
+        elif [ -f "${_RTT_TMPDIR}/${idx}.fail" ]; then
+            local line name
+            line=$(cat "${_RTT_TMPDIR}/${idx}.fail")
+            name="${line%%|*}"
             results+=("$(printf "%-14s ${RED}%7s   ${PLAIN}" "${name}" "超时")")
         fi
+        idx=$((idx+1))
     done
 
+    # 清理临时文件
+    rm -rf "${_RTT_TMPDIR}"
+
     # 双列排版输出到 /dev/tty
+    _separator > /dev/tty
     local total=${#results[@]}
     local half=$(( (total + 1) / 2 ))
     local i
@@ -853,7 +888,10 @@ _tcptune_scan_conflicts_ro() {
 }
 
 _tcptune_setup_fq() {
-    _header "TCP 缓冲区调优 (fq 模式)"
+    _header "TCP 缓冲区调优 (fq 模式 - 自动优化)"
+
+    # ---- 后台启动 RTT 测量 ----
+    _tcptune_rtt_bg_start
 
     # ---- 检测系统内存 ----
     local MEM_G
@@ -861,6 +899,7 @@ _tcptune_setup_fq() {
     _is_digit "${MEM_G%%.*}" || MEM_G=1
     echo ""
     _info "系统内存: ${MEM_G} GiB"
+    _info "RTT 测量已在后台进行..."
 
     # ---- 输入带宽 ----
     local BW_Mbps_INPUT BW_Mbps
@@ -868,16 +907,14 @@ _tcptune_setup_fq() {
     BW_Mbps="${BW_Mbps_INPUT:-1000}"
     _is_digit "$BW_Mbps" || BW_Mbps=1000
 
-    # ---- 测量 RTT ----
+    # ---- 收集 RTT 结果 ----
     echo ""
-    _info "正在测量到国内多节点 RTT..."
-    _separator
     local AUTO_RTT
-    AUTO_RTT="$(_tcptune_detect_rtt_china)"
+    AUTO_RTT="$(_tcptune_rtt_bg_collect)"
 
     local RTT_ms RTT_ms_INPUT
     if [ -n "$AUTO_RTT" ]; then
-        read -rp "  RTT (ms) [检测建议 ${AUTO_RTT}]: " RTT_ms_INPUT
+        read -rp "  请输入服务器与你之间的延迟 RTT (ms) [默认 ${AUTO_RTT}]: " RTT_ms_INPUT
         RTT_ms="${RTT_ms_INPUT:-$AUTO_RTT}"
     else
         _warn "RTT 自动检测失败"
@@ -887,18 +924,28 @@ _tcptune_setup_fq() {
     _is_digit "$RTT_ms" || RTT_ms=150
 
     # ---- 计算 BDP ----
-    local BDP_BYTES MEM_BYTES TWO_BDP RAM_LIMIT_BYTES CAP64 MAX_NUM_BYTES
+    local BDP_BYTES MEM_BYTES TWO_BDP RAM_LIMIT_BYTES HARD_CAP MAX_NUM_BYTES
     BDP_BYTES=$(awk -v bw="$BW_Mbps" -v rtt="$RTT_ms" 'BEGIN{ printf "%.0f", bw*125*rtt }')
     MEM_BYTES=$(awk -v g="$MEM_G" 'BEGIN{ printf "%.0f", g*1024*1024*1024 }')
     TWO_BDP=$(( BDP_BYTES * 2 ))
-    # 内存限制：至少放宽到 5%RAM 或 32MB 保底，避免小内存机器单线程被卡死
-    RAM_LIMIT_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ limit=m*0.05; if(limit < 33554432) limit=33554432; printf "%.0f", limit }')
-    CAP64=$(( 64 * 1024 * 1024 ))
-    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM_LIMIT_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
+    # 内存限制：RAM ≤ 2GB 用 3%，> 2GB 用 5%，保底 32MB
+    RAM_LIMIT_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{
+        if (m <= 2*1024*1024*1024) limit=m*0.03; else limit=m*0.05
+        if (limit < 33554432) limit=33554432
+        printf "%.0f", limit
+    }')
+    if [ "$BW_Mbps" -gt 4000 ]; then
+        HARD_CAP=$(( 128 * 1024 * 1024 ))
+    elif [ "$BW_Mbps" -gt 1000 ]; then
+        HARD_CAP=$(( 64 * 1024 * 1024 ))
+    else
+        HARD_CAP=$(( 32 * 1024 * 1024 ))
+    fi
+    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM_LIMIT_BYTES" -v c="$HARD_CAP" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
 
     local MAX_MB MAX_BYTES
     MAX_MB=$(( MAX_NUM_BYTES / 1024 / 1024 ))
-    [ "$MAX_MB" -lt 4 ] && MAX_MB=4
+    [ "$MAX_MB" -lt 8 ] && MAX_MB=8
     MAX_BYTES=$(( MAX_MB * 1024 * 1024 ))
 
     local DEF_R DEF_W
@@ -910,8 +957,8 @@ _tcptune_setup_fq() {
         DEF_R=131072; DEF_W=131072
     fi
 
-    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=87380 TCP_RMEM_MAX=$MAX_BYTES
-    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=65536 TCP_WMEM_MAX=$MAX_BYTES
+    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=131072 TCP_RMEM_MAX=$MAX_BYTES
+    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=131072 TCP_WMEM_MAX=$MAX_BYTES
 
     # ---- 检测拥塞算法 ----
     local CURRENT_CC
@@ -931,8 +978,21 @@ _tcptune_setup_fq() {
 
     if [ "$IS_BBR" -eq 1 ]; then
         SLOW_START_IDLE=0
-        NOTSENT_LOWAT=""
-        _info "BBR 模式: 禁用 slow_start_after_idle, 不限制 notsent_lowat"
+        # notsent_lowat = clamp(BDP/8, 16KB, 256KB)
+        NOTSENT_LOWAT=$(awk -v bdp="$BDP_BYTES" 'BEGIN{
+            v = bdp / 8
+            if (v < 16384) v = 16384
+            if (v > 262144) v = 262144
+            printf "%.0f", v
+        }')
+        _info "BBR 模式: 禁用 slow_start_after_idle, notsent_lowat=${NOTSENT_LOWAT}"
+        echo ""
+        local LOWAT_SKIP
+        read -rp "  跳过 notsent_lowat 设置 (吞吐优先)? [y/N]: " LOWAT_SKIP
+        if [[ "$LOWAT_SKIP" =~ ^[Yy] ]]; then
+            NOTSENT_LOWAT=""
+            _info "已跳过 notsent_lowat"
+        fi
     else
         _info "非 BBR (${CURRENT_CC}): 仅调缓冲区"
     fi
@@ -964,7 +1024,7 @@ _tcptune_setup_fq() {
 # Auto-generated by VPSGo TCP Tune
 # Inputs: MEM_G=${MEM_G}GiB, BW=${BW_Mbps}Mbps, RTT=${RTT_ms}ms
 # BDP: ${BDP_BYTES} bytes (~$(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB)
-# Caps: min(2*BDP, 5%RAM, 64MB) -> Bucket ${MAX_MB} MB
+# Caps: clamp(2*BDP, 8MB, min(RAM_cap, BW_cap)) -> Bucket ${MAX_MB} MB
 # Detected CC: ${CURRENT_CC}
 
 # ---- 核心缓冲区 ----
@@ -1046,12 +1106,174 @@ TCPTUNE_EOF
     _press_any_key
 }
 
+_tcptune_manual_bucket() {
+    _header "手动修改 TCP 缓冲区桶值"
+
+    echo ""
+    _info "桶值 = TCP 缓冲区最大值，决定单连接最大吞吐量"
+    _info "理论最大速度 ≈ 桶值 / RTT (例: 16MB/100ms = 160MB/s = 1.28Gbps)"
+    echo ""
+    printf "  ${BOLD}可选桶值 (MB):${PLAIN}\n"
+    _separator
+    printf "    ${GREEN}4${PLAIN}   — 低延迟(<20ms) + 低带宽(<500Mbps) 或内存受限\n"
+    printf "    ${GREEN}8${PLAIN}   — 低延迟(<30ms) + 中带宽(500Mbps-1Gbps)\n"
+    printf "    ${GREEN}16${PLAIN}  — 中延迟(30-80ms) + 1Gbps 或 低延迟 + 2Gbps\n"
+    printf "    ${GREEN}32${PLAIN}  — 高延迟(80-150ms) + 1-2Gbps 或 中延迟 + 3-5Gbps\n"
+    printf "    ${GREEN}64${PLAIN}  — 高延迟(>150ms) + 高带宽(>2Gbps) 或跨国线路\n"
+    echo ""
+    printf "  ${DIM}提示: BDP = 带宽 × RTT，桶值应 ≥ 2×BDP 才能跑满带宽${PLAIN}\n"
+    echo ""
+
+    local BUCKET_MB
+    while true; do
+        read -rp "  请输入桶值 (4/8/16/32/64) [默认: 16]: " BUCKET_MB
+        BUCKET_MB="${BUCKET_MB:-16}"
+
+        # 验证输入是否合法
+        case "$BUCKET_MB" in
+            4|8|16|32|64)
+                break
+                ;;
+            *)
+                _error_no_exit "无效的桶值: ${BUCKET_MB}，请输入 4, 8, 16, 32 或 64"
+                ;;
+        esac
+    done
+
+    local MAX_BYTES=$(( BUCKET_MB * 1024 * 1024 ))
+    local DEF_R DEF_W
+
+    if [ "$BUCKET_MB" -ge 32 ]; then
+        DEF_R=262144; DEF_W=524288
+    elif [ "$BUCKET_MB" -ge 8 ]; then
+        DEF_R=131072; DEF_W=262144
+    else
+        DEF_R=131072; DEF_W=131072
+    fi
+
+    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=131072 TCP_RMEM_MAX=$MAX_BYTES
+    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=131072 TCP_WMEM_MAX=$MAX_BYTES
+
+    # 检测拥塞算法
+    local CURRENT_CC
+    CURRENT_CC="$(_tcptune_detect_cc)"
+
+    local BACKLOG
+    if [ "$BUCKET_MB" -ge 32 ]; then
+        BACKLOG=16384
+    elif [ "$BUCKET_MB" -ge 16 ]; then
+        BACKLOG=8192
+    else
+        BACKLOG=4096
+    fi
+
+    echo ""
+    _info "拥塞算法: ${CURRENT_CC}"
+    _info "桶值: ${BUCKET_MB} MB"
+
+    # 确认配置
+    echo ""
+    _separator
+    printf "  ${BOLD}配置信息确认${PLAIN}\n"
+    printf "    桶值     : ${CYAN}%s MB${PLAIN}\n" "$BUCKET_MB"
+    printf "    拥塞算法 : ${CYAN}%s${PLAIN}\n" "$CURRENT_CC"
+    printf "    rmem_max : ${CYAN}%s${PLAIN}\n" "$MAX_BYTES"
+    printf "    wmem_max : ${CYAN}%s${PLAIN}\n" "$MAX_BYTES"
+    _separator
+    echo ""
+
+    local CONFIRM
+    read -rp "  是否确认应用该配置？(y/n): " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        _warn "已取消配置，未做任何更改。"
+        _press_any_key
+        return
+    fi
+
+    # 冲突清理
+    echo ""
+    _info "清理冲突配置..."
+    _separator
+    _tcptune_comment_conflicts_in_sysctl_conf
+    _tcptune_comment_conflicts_in_dir "/etc/sysctl.d"
+    _tcptune_scan_conflicts_ro "/usr/local/lib/sysctl.d"
+    _tcptune_scan_conflicts_ro "/usr/lib/sysctl.d"
+    _tcptune_scan_conflicts_ro "/lib/sysctl.d"
+    _tcptune_scan_conflicts_ro "/run/sysctl.d"
+
+    # 写入配置
+    local tmpf
+    tmpf="$(mktemp)"
+    cat >"$tmpf" <<TCPTUNE_EOF
+# Auto-generated by VPSGo TCP Tune (Manual Bucket Mode)
+# Manual Bucket: ${BUCKET_MB} MB
+# Detected CC: ${CURRENT_CC}
+
+# ---- 核心缓冲区 ----
+net.core.rmem_default = ${DEF_R}
+net.core.wmem_default = ${DEF_W}
+net.core.rmem_max = ${MAX_BYTES}
+net.core.wmem_max = ${MAX_BYTES}
+net.core.netdev_max_backlog = ${BACKLOG}
+
+# ---- TCP 缓冲区 ----
+net.ipv4.tcp_rmem = ${TCP_RMEM_MIN} ${TCP_RMEM_DEF} ${TCP_RMEM_MAX}
+net.ipv4.tcp_wmem = ${TCP_WMEM_MIN} ${TCP_WMEM_DEF} ${TCP_WMEM_MAX}
+
+# ---- 通用优化 ----
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+TCPTUNE_EOF
+
+    install -m 0644 "$tmpf" "$_TCPTUNE_SYSCTL_TARGET"
+    rm -f "$tmpf"
+    sysctl --system >/dev/null
+
+    # 显示结果
+    echo ""
+    _header "调优完成 (手动桶值模式)"
+    echo ""
+    printf "  ${BOLD}配置参数${PLAIN}\n"
+    printf "    桶值: ${CYAN}${BUCKET_MB} MB${PLAIN}  CC: ${CYAN}${CURRENT_CC}${PLAIN}\n"
+    echo ""
+    _separator
+    printf "  ${BOLD}核心缓冲区${PLAIN}\n"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "rmem_default"   "$(sysctl -n net.core.rmem_default 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "wmem_default"   "$(sysctl -n net.core.wmem_default 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "rmem_max"       "$(sysctl -n net.core.rmem_max 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "wmem_max"       "$(sysctl -n net.core.wmem_max 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "backlog"        "$(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
+    echo ""
+    printf "  ${BOLD}TCP 缓冲区${PLAIN}\n"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "tcp_rmem"       "$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "tcp_wmem"       "$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)"
+    echo ""
+    printf "  ${BOLD}通用优化${PLAIN}\n"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "mtu_probing"    "$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "fastopen"       "$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "timestamps"     "$(sysctl -n net.ipv4.tcp_timestamps 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "sack"           "$(sysctl -n net.ipv4.tcp_sack 2>/dev/null)"
+    printf "    %-20s ${GREEN}%s${PLAIN}\n" "window_scaling" "$(sysctl -n net.ipv4.tcp_window_scaling 2>/dev/null)"
+    echo ""
+    _separator
+    _info "配置已写入: ${_TCPTUNE_SYSCTL_TARGET}"
+    _info "配置已生效，重启后仍然有效"
+
+    _press_any_key
+}
+
 _tcptune_setup_cake() {
     local CAKE_IFACE="$1"
     local CAKE_SERVICE_FILE="/etc/systemd/system/set-cake.service"
     local CAKE_SCRIPT_FILE="/usr/local/bin/set-cake.sh"
 
-    _header "CAKE 队列 + TCP 缓冲区调优"
+    _header "CAKE 队列 + TCP 缓冲区调优 (自动模式)"
+
+    # ---- 后台启动 RTT 测量 ----
+    _tcptune_rtt_bg_start
 
     # ---- 检测系统内存 ----
     local MEM_G
@@ -1060,6 +1282,7 @@ _tcptune_setup_cake() {
     echo ""
     _info "系统内存: ${MEM_G} GiB"
     _info "网卡接口: ${CAKE_IFACE}"
+    _info "RTT 测量已在后台进行..."
 
     # ---- CAKE: NAT 模式 ----
     local NAT_CHOICE NAT_MODE
@@ -1070,23 +1293,42 @@ _tcptune_setup_cake() {
         *) _info "输入无效，默认使用 nonat"; NAT_MODE="nonat" ;;
     esac
 
+    # ---- CAKE: 链路类型 (默认 ethernet) ----
+    local CAKE_LINK_OPTS="ethernet"
+
+    # ---- CAKE: ACK 过滤 ----
+    echo ""
+    echo "  ACK 过滤 (仅对称链路建议关闭):"
+    _separator
+    printf "    ${GREEN}1${PLAIN}) 关闭 (no-ack-filter)  ${DIM}— 对称链路/默认推荐${PLAIN}\n"
+    printf "    ${GREEN}2${PLAIN}) 开启 (ack-filter)     ${DIM}— 上行带宽显著小于下行时使用${PLAIN}\n"
+    echo ""
+    local ACK_CHOICE CAKE_ACK_OPT
+    read -rp "  请选择 [1-2，默认 1]: " ACK_CHOICE
+    case "${ACK_CHOICE:-1}" in
+        2) CAKE_ACK_OPT="ack-filter" ;;
+        *) CAKE_ACK_OPT="no-ack-filter" ;;
+    esac
+
     # ---- 输入带宽 ----
     local BW_Mbps_INPUT BW_Mbps CAKE_BW
     read -rp "  带宽 (Mbps) [默认 1000]: " BW_Mbps_INPUT
     BW_Mbps="${BW_Mbps_INPUT:-1000}"
     _is_digit "$BW_Mbps" || BW_Mbps=1000
-    CAKE_BW="${BW_Mbps}mbit"
+    # CAKE 整形带宽取实测值 93%，避免队列 overflow
+    local CAKE_BW_VAL
+    CAKE_BW_VAL=$(awk -v bw="$BW_Mbps" 'BEGIN{ printf "%.0f", bw * 0.93 }')
+    CAKE_BW="${CAKE_BW_VAL}mbit"
+    _info "CAKE 整形带宽: ${CAKE_BW} (原始 ${BW_Mbps}Mbps × 93%)"
 
-    # ---- 测量 RTT ----
+    # ---- 收集 RTT 结果 ----
     echo ""
-    _info "正在测量到国内多节点 RTT..."
-    _separator
     local AUTO_RTT
-    AUTO_RTT="$(_tcptune_detect_rtt_china)"
+    AUTO_RTT="$(_tcptune_rtt_bg_collect)"
 
     local RTT_ms RTT_ms_INPUT
     if [ -n "$AUTO_RTT" ]; then
-        read -rp "  RTT (ms) [检测建议 ${AUTO_RTT}]: " RTT_ms_INPUT
+        read -rp "  请输入服务器与你之间的延迟 RTT (ms) [默认 ${AUTO_RTT}]: " RTT_ms_INPUT
         RTT_ms="${RTT_ms_INPUT:-$AUTO_RTT}"
     else
         _warn "RTT 自动检测失败"
@@ -1096,17 +1338,29 @@ _tcptune_setup_cake() {
     _is_digit "$RTT_ms" || RTT_ms=150
 
     # ---- 计算 BDP ----
-    local BDP_BYTES MEM_BYTES TWO_BDP RAM_LIMIT_BYTES CAP64 MAX_NUM_BYTES
+    local BDP_BYTES MEM_BYTES TWO_BDP RAM_LIMIT_BYTES HARD_CAP MAX_NUM_BYTES
     BDP_BYTES=$(awk -v bw="$BW_Mbps" -v rtt="$RTT_ms" 'BEGIN{ printf "%.0f", bw*125*rtt }')
     MEM_BYTES=$(awk -v g="$MEM_G" 'BEGIN{ printf "%.0f", g*1024*1024*1024 }')
     TWO_BDP=$(( BDP_BYTES * 2 ))
-    RAM_LIMIT_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{ limit=m*0.05; if(limit < 33554432) limit=33554432; printf "%.0f", limit }')
-    CAP64=$(( 64 * 1024 * 1024 ))
-    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM_LIMIT_BYTES" -v c="$CAP64" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
+    # 内存限制：RAM ≤ 2GB 用 3%，> 2GB 用 5%，保底 32MB
+    RAM_LIMIT_BYTES=$(awk -v m="$MEM_BYTES" 'BEGIN{
+        if (m <= 2*1024*1024*1024) limit=m*0.03; else limit=m*0.05
+        if (limit < 33554432) limit=33554432
+        printf "%.0f", limit
+    }')
+    # 硬上限分档（代理服务器并发友好）：BW ≤ 1G → 32MB，≤ 4G → 64MB，> 4G → 128MB
+    if [ "$BW_Mbps" -gt 4000 ]; then
+        HARD_CAP=$(( 128 * 1024 * 1024 ))
+    elif [ "$BW_Mbps" -gt 1000 ]; then
+        HARD_CAP=$(( 64 * 1024 * 1024 ))
+    else
+        HARD_CAP=$(( 32 * 1024 * 1024 ))
+    fi
+    MAX_NUM_BYTES=$(awk -v a="$TWO_BDP" -v b="$RAM_LIMIT_BYTES" -v c="$HARD_CAP" 'BEGIN{ m=a; if(b<m)m=b; if(c<m)m=c; printf "%.0f", m }')
 
     local MAX_MB MAX_BYTES
     MAX_MB=$(( MAX_NUM_BYTES / 1024 / 1024 ))
-    [ "$MAX_MB" -lt 4 ] && MAX_MB=4
+    [ "$MAX_MB" -lt 8 ] && MAX_MB=8
     MAX_BYTES=$(( MAX_MB * 1024 * 1024 ))
 
     local DEF_R DEF_W
@@ -1118,8 +1372,8 @@ _tcptune_setup_cake() {
         DEF_R=131072; DEF_W=131072
     fi
 
-    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=87380 TCP_RMEM_MAX=$MAX_BYTES
-    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=65536 TCP_WMEM_MAX=$MAX_BYTES
+    local TCP_RMEM_MIN=4096 TCP_RMEM_DEF=131072 TCP_RMEM_MAX=$MAX_BYTES
+    local TCP_WMEM_MIN=4096 TCP_WMEM_DEF=131072 TCP_WMEM_MAX=$MAX_BYTES
 
     # ---- 检测拥塞算法 ----
     local CURRENT_CC
@@ -1139,8 +1393,21 @@ _tcptune_setup_cake() {
 
     if [ "$IS_BBR" -eq 1 ]; then
         SLOW_START_IDLE=0
-        NOTSENT_LOWAT=""
-        _info "BBR 模式: 禁用 slow_start_after_idle, 不限制 notsent_lowat"
+        # notsent_lowat = clamp(BDP/8, 16KB, 256KB)
+        NOTSENT_LOWAT=$(awk -v bdp="$BDP_BYTES" 'BEGIN{
+            v = bdp / 8
+            if (v < 16384) v = 16384
+            if (v > 262144) v = 262144
+            printf "%.0f", v
+        }')
+        _info "BBR 模式: 禁用 slow_start_after_idle, notsent_lowat=${NOTSENT_LOWAT}"
+        echo ""
+        local LOWAT_SKIP
+        read -rp "  跳过 notsent_lowat 设置 (吞吐优先)? [y/N]: " LOWAT_SKIP
+        if [[ "$LOWAT_SKIP" =~ ^[Yy] ]]; then
+            NOTSENT_LOWAT=""
+            _info "已跳过 notsent_lowat"
+        fi
     else
         _info "非 BBR (${CURRENT_CC}): 仅调缓冲区"
     fi
@@ -1162,12 +1429,14 @@ _tcptune_setup_cake() {
     printf "    NAT 模式 : ${CYAN}%s${PLAIN}\n" "$NAT_MODE"
     printf "    带宽     : ${CYAN}%s${PLAIN}\n" "$CAKE_BW"
     printf "    RTT      : ${CYAN}%s ms${PLAIN}\n" "$RTT_ms"
+    printf "    链路类型 : ${CYAN}%s${PLAIN}\n" "$CAKE_LINK_OPTS"
+    printf "    ACK 过滤 : ${CYAN}%s${PLAIN}\n" "$CAKE_ACK_OPT"
     printf "    桶值     : ${CYAN}%s MB${PLAIN}\n" "$MAX_MB"
     _separator
     echo ""
 
     local CONFIRM
-    read -rp "  是否确认应用该配置？(y=确认 / n=取消): " CONFIRM
+    read -rp "  是否确认应用该配置？(y/n): " CONFIRM
     if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
         _warn "已取消配置，未做任何更改。"
         _press_any_key
@@ -1192,7 +1461,7 @@ _tcptune_setup_cake() {
 # Auto-generated by VPSGo TCP Tune (CAKE mode)
 # Inputs: MEM_G=${MEM_G}GiB, BW=${BW_Mbps}Mbps, RTT=${RTT_ms}ms
 # BDP: ${BDP_BYTES} bytes (~$(awk -v b="$BDP_BYTES" 'BEGIN{ printf "%.2f", b/1024/1024 }') MB)
-# Caps: min(2*BDP, 5%RAM, 64MB) -> Bucket ${MAX_MB} MB
+# Caps: clamp(2*BDP, 8MB, min(RAM_cap, BW_cap)) -> Bucket ${MAX_MB} MB
 # Detected CC: ${CURRENT_CC}, Qdisc: cake
 
 # ---- 核心缓冲区 ----
@@ -1249,14 +1518,12 @@ tc qdisc del dev "\$IFACE" root 2>/dev/null
 tc qdisc add dev "\$IFACE" root cake \\
     bandwidth ${CAKE_BW} \\
     rtt ${RTT_ms}ms \\
-    diffserv3 \\
+    besteffort \\
     ${NAT_MODE} \\
     triple-isolate \\
-    ack-filter \\
+    ${CAKE_ACK_OPT} \\
     split-gso \\
-    raw \\
-    overhead 0 \\
-    mpu 64 \\
+    ${CAKE_LINK_OPTS} \\
     wash
 CAKESCRIPT_EOF
     chmod +x "$CAKE_SCRIPT_FILE"
@@ -1287,10 +1554,10 @@ CAKESERVICE_EOF
     _header "调优完成 (CAKE 模式)"
     echo ""
     printf "  ${BOLD}CAKE 配置${PLAIN}\n"
-    printf "    %-20s ${GREEN}%s${PLAIN}\n" "网卡接口"     "$CAKE_IFACE"
-    printf "    %-20s ${GREEN}%s${PLAIN}\n" "NAT 模式"     "$NAT_MODE"
-    printf "    %-20s ${GREEN}%s${PLAIN}\n" "带宽"         "$CAKE_BW"
-    printf "    %-20s ${GREEN}%s${PLAIN}\n" "RTT"          "${RTT_ms}ms"
+    printf "    网卡接口 : ${GREEN}%s${PLAIN}\n" "$CAKE_IFACE"
+    printf "    NAT 模式 : ${GREEN}%s${PLAIN}\n" "$NAT_MODE"
+    printf "    带宽     : ${GREEN}%s${PLAIN}\n" "$CAKE_BW"
+    printf "    RTT      : ${GREEN}%s${PLAIN}\n" "${RTT_ms}ms"
     echo ""
 
     if command -v tc >/dev/null 2>&1; then
@@ -1343,19 +1610,48 @@ CAKESERVICE_EOF
 }
 
 _tcptune_setup() {
-    local DEFAULT_IFACE CURRENT_QDISC
-    DEFAULT_IFACE="$(_tcptune_default_iface)"
-    CURRENT_QDISC="$(_tcptune_detect_qdisc "$DEFAULT_IFACE")"
+    while true; do
+        _header "TCP 缓冲区调优"
+        echo ""
+        printf "  ${BOLD}请选择调优模式:${PLAIN}\n"
+        _separator
+        printf "    ${GREEN}1${PLAIN}) 自动优化                        ${DIM}— 根据带宽/RTT 自动计算桶值${PLAIN}\n"
+        printf "    ${GREEN}2${PLAIN}) 手动修改桶值                    ${DIM}— 手动指定 TCP 缓冲区大小${PLAIN}\n"
+        echo ""
+        printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+        echo ""
 
-    case "$CURRENT_QDISC" in
-        cake)
-            _info "检测到当前队列算法: ${CURRENT_QDISC}，进入 CAKE 模式调优"
-            _tcptune_setup_cake "$DEFAULT_IFACE"
-            ;;
-        *)
-            _tcptune_setup_fq
-            ;;
-    esac
+        local choice
+        read -rp "  请输入选项 [0-2]: " choice
+
+        case "$choice" in
+            1)
+                local DEFAULT_IFACE CURRENT_QDISC
+                DEFAULT_IFACE="$(_tcptune_default_iface)"
+                CURRENT_QDISC="$(_tcptune_detect_qdisc "$DEFAULT_IFACE")"
+
+                case "$CURRENT_QDISC" in
+                    cake)
+                        _info "检测到当前队列算法: ${CURRENT_QDISC}，进入 CAKE 模式调优"
+                        _tcptune_setup_cake "$DEFAULT_IFACE"
+                        ;;
+                    *)
+                        _tcptune_setup_fq
+                        ;;
+                esac
+                ;;
+            2)
+                _tcptune_manual_bucket
+                ;;
+            0)
+                return
+                ;;
+            *)
+                _error_no_exit "无效选项: ${choice}"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 # --- 7. Docker 日志轮转 ---
@@ -2491,7 +2787,7 @@ _nodequality_setup() {
     _press_any_key
 }
 
-# --- 10. sing-box 安装 ---
+# --- 10. Sing-Box 管理 ---
 
 _singbox_install_apt() {
     _info "使用 APT 官方仓库安装..."
@@ -2586,6 +2882,192 @@ _singbox_setup() {
     fi
 
     _press_any_key
+}
+
+# --- Sing-Box 管理子菜单 ---
+
+_singbox_enable() {
+    _header "Sing-Box 自启动配置"
+
+    if ! command -v sing-box >/dev/null 2>&1; then
+        _error_no_exit "未检测到 sing-box，请先安装"
+        _press_any_key
+        return
+    fi
+
+    local service_file="/etc/systemd/system/sing-box.service"
+
+    if [[ -f "$service_file" ]]; then
+        _warn "systemd 服务文件已存在"
+        local overwrite
+        read -rp "  是否覆盖? [y/N]: " overwrite
+        if [[ ! "$overwrite" =~ ^[Yy] ]]; then
+            _press_any_key
+            return
+        fi
+    fi
+
+    _info "生成 systemd 服务文件..."
+    cat > "$service_file" <<'SINGBOX_SERVICE'
+[Unit]
+Description=Sing-box Service
+After=network.target
+
+[Service]
+User=root
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+SINGBOX_SERVICE
+
+    systemctl daemon-reload
+    systemctl enable sing-box
+    _info "已设置开机自启"
+
+    systemctl start sing-box
+    sleep 1
+    if systemctl is-active --quiet sing-box; then
+        _info "sing-box 已成功启动"
+    else
+        _error_no_exit "sing-box 启动失败，请检查: systemctl status sing-box"
+    fi
+
+    _press_any_key
+}
+
+_singbox_restart() {
+    _header "Sing-Box 重启"
+
+    if ! command -v sing-box >/dev/null 2>&1; then
+        _error_no_exit "未检测到 sing-box，请先安装"
+        _press_any_key
+        return
+    fi
+
+    if systemctl is-enabled sing-box.service &>/dev/null || systemctl is-active sing-box.service &>/dev/null; then
+        _info "通过 systemd 重启 sing-box..."
+        systemctl daemon-reload
+        systemctl restart sing-box
+        sleep 1
+        if systemctl is-active --quiet sing-box; then
+            _info "sing-box 已成功重启"
+        else
+            _error_no_exit "sing-box 重启失败，请检查 systemctl status sing-box"
+        fi
+    else
+        local pid
+        pid=$(pgrep -x sing-box 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            _info "终止旧进程 (PID: $pid)..."
+            kill "$pid" 2>/dev/null
+            sleep 1
+        fi
+        _info "启动 sing-box..."
+        nohup sing-box run -c /etc/sing-box/config.json >/dev/null 2>&1 &
+        sleep 1
+        if pgrep -x sing-box &>/dev/null; then
+            _info "sing-box 已成功启动 (PID: $!)"
+        else
+            _error_no_exit "sing-box 启动失败"
+        fi
+    fi
+
+    _press_any_key
+}
+
+_singbox_status() {
+    _header "Sing-Box 运行状态"
+
+    echo ""
+    if systemctl is-enabled sing-box.service &>/dev/null || systemctl is-active sing-box.service &>/dev/null; then
+        systemctl status sing-box --no-pager
+    else
+        local pid
+        pid=$(pgrep -x sing-box 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
+        else
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
+        fi
+    fi
+
+    _press_any_key
+}
+
+_singbox_log() {
+    _header "Sing-Box 日志"
+
+    echo ""
+    if systemctl is-enabled sing-box.service &>/dev/null || systemctl is-active sing-box.service &>/dev/null; then
+        _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
+        _separator
+        echo ""
+        journalctl -u sing-box --no-pager -n 50
+        echo ""
+        _separator
+        local follow
+        read -rp "  是否实时跟踪日志? [y/N]: " follow
+        if [[ "$follow" =~ ^[Yy] ]]; then
+            echo ""
+            _info "按 Ctrl+C 退出实时日志..."
+            echo ""
+            journalctl -u sing-box -f
+        fi
+    else
+        _warn "sing-box 未使用 systemd 管理，无法通过 journalctl 查看日志"
+        _info "提示: 可以通过选项2「配置自启并启动」来设置 systemd 服务"
+    fi
+
+    _press_any_key
+}
+
+_singbox_manage() {
+    while true; do
+        _header "Sing-Box 管理"
+
+        echo ""
+        if command -v sing-box >/dev/null 2>&1; then
+            local ver
+            ver=$(sing-box version 2>/dev/null | head -1)
+            _info "当前版本: ${ver:-未知}"
+            local pid
+            pid=$(pgrep -x sing-box 2>/dev/null || true)
+            if [[ -n "$pid" ]]; then
+                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
+            else
+                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
+            fi
+        else
+            _info "当前未安装 sing-box"
+        fi
+
+        echo ""
+        _separator
+        printf "    ${GREEN}1${PLAIN}) 安装/更新 Sing-Box\n"
+        printf "    ${GREEN}2${PLAIN}) 配置自启并启动\n"
+        printf "    ${GREEN}3${PLAIN}) 重启 Sing-Box\n"
+        printf "    ${GREEN}4${PLAIN}) 查看状态\n"
+        printf "    ${GREEN}5${PLAIN}) 查看日志\n"
+        echo ""
+        printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+        echo ""
+
+        local choice
+        read -rp "  请输入选项 [0-5]: " choice
+        case "$choice" in
+            1) _singbox_setup ;;
+            2) _singbox_enable ;;
+            3) _singbox_restart ;;
+            4) _singbox_status ;;
+            5) _singbox_log ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; sleep 1 ;;
+        esac
+    done
 }
 
 # --- 11. Swap 管理 ---
@@ -2924,7 +3406,7 @@ _show_main_menu() {
     printf "    ${GREEN}6${PLAIN}) NodeQuality 测试                ${DIM}— vps 测试脚本${PLAIN}\n"
     printf "    ${GREEN}7${PLAIN}) Docker 日志轮转                 ${DIM}— 限制容器日志大小${PLAIN}\n"
     printf "    ${GREEN}8${PLAIN}) Mihomo 管理                     ${DIM}— 安装/配置/重启${PLAIN}\n"
-    printf "    ${GREEN}9${PLAIN}) sing-box 安装                   ${DIM}— 优秀的代理核心${PLAIN}\n"
+    printf "    ${GREEN}9${PLAIN}) Sing-Box 管理                   ${DIM}— 安装/自启/重启${PLAIN}\n"
     printf "  ${BOLD}[ 系统 ]${PLAIN}\n"
     printf "    ${GREEN}10${PLAIN}) Swap 管理                      ${DIM}— 创建/删除 Swap${PLAIN}\n"
     echo ""
@@ -2955,7 +3437,7 @@ main() {
             6) _nodequality_setup ;;
             7) _dockerlog_setup ;;
             8) _mihomo_manage ;;
-            9) _singbox_setup ;;
+            9) _singbox_manage ;;
             10) _swap_setup ;;
             u|U) _self_update ;;
             x|X) _self_uninstall ;;
