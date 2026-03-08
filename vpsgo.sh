@@ -2867,7 +2867,7 @@ _show_main_menu() {
     printf "    ${GREEN}1${PLAIN}) 开启内核自带 BBR                ${DIM}— 安装 BBR${PLAIN}\n"
     printf "    ${GREEN}2${PLAIN}) 设置队列调度算法                ${DIM}— fq/cake/fq_pie${PLAIN}\n"
     printf "    ${GREEN}3${PLAIN}) 设置 IPv4/IPv6 优先级           ${DIM}— 出口协议栈偏好${PLAIN}\n"
-    printf "    ${GREEN}4${PLAIN}) TCP 缓冲区调优                  ${DIM}— 优化连接${PLAIN}\n"
+    printf "    ${GREEN}4${PLAIN}) TCP 缓冲区调优                  ${DIM}— 优化连接(效果不稳定）${PLAIN}\n"
     printf "  ${BOLD}[ 工具 ]${PLAIN}\n"
     printf "    ${GREEN}5${PLAIN}) iPerf3 测速服务端               ${DIM}— 临时启动${PLAIN}\n"
     printf "    ${GREEN}6${PLAIN}) NodeQuality 测试                ${DIM}— vps 测试脚本${PLAIN}\n"
