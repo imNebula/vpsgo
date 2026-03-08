@@ -29,7 +29,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.20"
+VERSION="1.21"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
