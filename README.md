@@ -10,7 +10,9 @@
 
 ```bash
 # 一键安装并运行
-bash <(curl -sL https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh)
+curl -fsSL https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh -o /usr/local/bin/vpsgo
+chmod +x /usr/local/bin/vpsgo
+hash -r && vpsgo
 ```
 ```bash
 # 安装后直接使用
