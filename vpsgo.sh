@@ -721,6 +721,20 @@ _tcptune_detect_mem_gib() {
     fi
 }
 
+_tcptune_rtt_ping_one() {
+    local my_idx="$1"
+    local my_name="$2"
+    local my_ip="$3"
+    local rtt
+    rtt=$(ping -c 3 -W 5 "$my_ip" 2>/dev/null \
+          | awk '/rtt|round-trip/ { split($4,a,"/"); printf "%.1f", a[2] }')
+    if [ -n "$rtt" ] && [ "$rtt" != "0" ] && [ "$rtt" != "0.0" ]; then
+        echo "${my_name}|${rtt}" > "${_RTT_TMPDIR}/${my_idx}.ok"
+    else
+        echo "${my_name}|timeout" > "${_RTT_TMPDIR}/${my_idx}.fail"
+    fi
+}
+
 _tcptune_rtt_bg_start() {
     # 在后台并发 ping 所有节点，结果写入临时文件
     _RTT_TMPDIR=$(mktemp -d)
@@ -740,16 +754,7 @@ _tcptune_rtt_bg_start() {
     for entry in "${entries[@]}"; do
         local ip="${entry%%:*}"
         local name="${entry#*:}"
-        (
-            local rtt
-            rtt=$(ping -c 3 -W 5 "$ip" 2>/dev/null \
-                  | awk '/rtt|round-trip/ { split($4,a,"/"); printf "%.1f", a[2] }')
-            if [ -n "$rtt" ] && [ "$rtt" != "0" ] && [ "$rtt" != "0.0" ]; then
-                echo "${name}|${rtt}" > "${_RTT_TMPDIR}/${idx}.ok"
-            else
-                echo "${name}|timeout" > "${_RTT_TMPDIR}/${idx}.fail"
-            fi
-        ) &
+        _tcptune_rtt_ping_one "$idx" "$name" "$ip" &
         _RTT_BG_PIDS+=($!)
         idx=$((idx+1))
     done
@@ -1970,9 +1975,9 @@ _MIHOMOCONF_CONFIG_DIR="/etc/mihomo"
 _MIHOMOCONF_CONFIG_FILE="/etc/mihomo/config.yaml"
 _MIHOMOCONF_SSL_DIR="/etc/mihomo/ssl"
 
-_mihomoconf_gen_ss_password_128() { head -c 16 /dev/urandom | base64; }
-_mihomoconf_gen_ss_password_256() { head -c 32 /dev/urandom | base64; }
-_mihomoconf_gen_anytls_password()  { head -c 32 /dev/urandom | base64 | tr '/+' 'Aa' | tr -d '=' | head -c 32; echo; }
+_mihomoconf_gen_ss_password_128() { head -c 16 /dev/urandom | base64 | tr -d '\n'; }
+_mihomoconf_gen_ss_password_256() { head -c 32 /dev/urandom | base64 | tr -d '\n'; }
+_mihomoconf_gen_anytls_password()  { head -c 32 /dev/urandom | base64 | tr -d '\n' | tr '/+' 'Aa' | tr -d '=' | head -c 32; }
 
 _mihomoconf_gen_uuid() {
     if command -v uuidgen &>/dev/null; then
