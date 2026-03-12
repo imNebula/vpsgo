@@ -12,7 +12,9 @@
 #   7. Docker 日志轮转配置
 #   8. Mihomo 管理 (安装/配置/重启)
 #   9. Sing-Box 管理 (安装/自启/重启/日志)
-#  10. Swap 管理
+#  10. Akile DNS 解锁检测与配置
+#  11. Linux DNS 管理 (临时/永久修改)
+#  12. Swap 管理
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -29,7 +31,7 @@ fi
 
 set -uo pipefail
 
-VERSION="1.22"
+VERSION="1.29"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -119,6 +121,11 @@ _press_any_key() {
     dd if=/dev/tty bs=1 count=1 2>/dev/null
     stty "$SAVEDSTTY"
     echo ""
+}
+
+_network_reboot_prompt() {
+    echo ""
+    _warn "建议在完成所有的网络调节后，自行重启系统以确保所有配置完全生效。"
 }
 
 # --- 系统信息检测 ---
@@ -367,15 +374,7 @@ _bbr_install_kernel() {
 }
 
 _bbr_reboot_os() {
-    echo ""
-    _warn "系统需要重启以应用新内核。"
-    local is_reboot
-    read -rp "  是否立即重启? [y/N]: " is_reboot
-    if [[ "${is_reboot}" == "y" || "${is_reboot}" == "Y" ]]; then
-        reboot
-    else
-        _info "已取消重启。"
-    fi
+    _network_reboot_prompt
 }
 
 _bbr_install() {
@@ -406,6 +405,7 @@ _bbr_install() {
         echo ""
         _info "当前拥塞算法: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
         _info "当前队列算法: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
+        _network_reboot_prompt
         _press_any_key
         return
     fi
@@ -582,6 +582,7 @@ _qdisc_setup() {
         _warn "可尝试: modprobe ${module} && sysctl -p"
     fi
 
+    _network_reboot_prompt
     _press_any_key
 }
 
@@ -1108,6 +1109,7 @@ TCPTUNE_EOF
     _info "配置已写入: ${_TCPTUNE_SYSCTL_TARGET}"
     _info "配置已生效，重启后仍然有效"
 
+    _network_reboot_prompt
     _press_any_key
 }
 
@@ -1267,6 +1269,7 @@ TCPTUNE_EOF
     _info "配置已写入: ${_TCPTUNE_SYSCTL_TARGET}"
     _info "配置已生效，重启后仍然有效"
 
+    _network_reboot_prompt
     _press_any_key
 }
 
@@ -1611,6 +1614,7 @@ CAKESERVICE_EOF
     printf "    systemctl status set-cake.service  ${DIM}# 查看 CAKE 服务状态${PLAIN}\n"
     printf "    tc -s qdisc show dev %s            ${DIM}# 查看 CAKE 队列统计${PLAIN}\n" "$CAKE_IFACE"
 
+    _network_reboot_prompt
     _press_any_key
 }
 
@@ -2037,6 +2041,60 @@ _mihomoconf_gen_anytls_link() {
     echo "anytls://${password}@${server}:${port}?${params}#${encoded_name}"
 }
 
+_mihomoconf_gen_hy2_link() {
+    local server="$1" port="$2" password="$3" name="$4"
+    local peer="${5:-}" insecure="${6:-0}" obfs="${7:-}" obfs_password="${8:-}" mport="${9:-}"
+    local encoded_name query=""
+    local params=()
+
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    [[ -n "$peer" ]] && params+=("peer=$(_mihomoconf_urlencode "$peer")")
+    [[ "$insecure" == "1" ]] && params+=("insecure=1")
+    if [[ -n "$obfs" ]]; then
+        params+=("obfs=$(_mihomoconf_urlencode "$obfs")")
+        [[ -n "$obfs_password" ]] && params+=("obfs-password=$(_mihomoconf_urlencode "$obfs_password")")
+    fi
+    [[ -n "$mport" ]] && params+=("mport=$(_mihomoconf_urlencode "$mport")")
+
+    if (( ${#params[@]} > 0 )); then
+        local IFS='&'
+        query="?${params[*]}"
+    fi
+    echo "hysteria2://${password}@${server}:${port}${query}#${encoded_name}"
+}
+
+_mihomoconf_get_saved_host() {
+    local config_file="$1"
+    [[ -r "$config_file" ]] || return 0
+    awk '
+        /^# vpsgo-host:[[:space:]]*/ {
+            line=$0
+            sub(/^# vpsgo-host:[[:space:]]*/, "", line)
+            print line
+            exit
+        }
+    ' "$config_file"
+}
+
+_mihomoconf_set_saved_host() {
+    local config_file="$1" host="$2" tmp
+    [[ -n "$host" ]] || return 0
+    tmp=$(mktemp)
+    if grep -q '^# vpsgo-host:' "$config_file" 2>/dev/null; then
+        awk -v h="$host" '
+            /^# vpsgo-host:[[:space:]]*/ { print "# vpsgo-host: " h; next }
+            { print }
+        ' "$config_file" > "$tmp"
+    else
+        awk -v h="$host" '
+            NR == 1 { print; print "# vpsgo-host: " h; next }
+            { print }
+            END { if (NR == 0) print "# vpsgo-host: " h }
+        ' "$config_file" > "$tmp"
+    fi
+    mv "$tmp" "$config_file"
+}
+
 _mihomoconf_has_listener_type() {
     local type="$1"
     grep -q "type: ${type}" "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null
@@ -2084,26 +2142,194 @@ _mihomoconf_remove_listeners_by_type() {
     mv "$tmp" "$_MIHOMOCONF_CONFIG_FILE"
 }
 
+_mihomoconf_read_listener_rows() {
+    local config_file="$1"
+    awk '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function unquote(s) {
+            gsub(/^"/, "", s)
+            gsub(/"$/, "", s)
+            return s
+        }
+        function reset_state() {
+            name=type=port=cipher=password=user_id=user_pass=sni=""
+            hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=""
+            in_users=0
+        }
+        function emit() {
+            if (name == "") return
+            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
+                type, name, port, cipher, password, user_id, user_pass, sni, hy2_up, hy2_down, \
+                hy2_ignore, hy2_obfs, hy2_obfs_password, hy2_masquerade, hy2_mport, hy2_insecure
+        }
+        BEGIN {
+            reset_state()
+        }
+        /^  - name:/ {
+            emit()
+            line=$0
+            sub(/^  - name:[[:space:]]*/, "", line)
+            name=unquote(trim(line))
+            type=port=cipher=password=user_id=user_pass=sni=""
+            hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=""
+            in_users=0
+            next
+        }
+        /^    #[[:space:]]*vpsgo-sni:/ {
+            line=$0
+            sub(/^    #[[:space:]]*vpsgo-sni:[[:space:]]*/, "", line)
+            sni=trim(line)
+            next
+        }
+        /^    #[[:space:]]*vpsgo-peer:/ {
+            line=$0
+            sub(/^    #[[:space:]]*vpsgo-peer:[[:space:]]*/, "", line)
+            sni=trim(line)
+            next
+        }
+        /^    #[[:space:]]*vpsgo-mport:/ {
+            line=$0
+            sub(/^    #[[:space:]]*vpsgo-mport:[[:space:]]*/, "", line)
+            hy2_mport=trim(line)
+            next
+        }
+        /^    #[[:space:]]*vpsgo-insecure:/ {
+            line=$0
+            sub(/^    #[[:space:]]*vpsgo-insecure:[[:space:]]*/, "", line)
+            hy2_insecure=trim(line)
+            next
+        }
+        /^    type:/ {
+            line=$0
+            sub(/^    type:[[:space:]]*/, "", line)
+            type=trim(line)
+            next
+        }
+        /^    port:/ {
+            line=$0
+            sub(/^    port:[[:space:]]*/, "", line)
+            port=trim(line)
+            next
+        }
+        /^    cipher:/ {
+            line=$0
+            sub(/^    cipher:[[:space:]]*/, "", line)
+            cipher=trim(line)
+            next
+        }
+        /^    password:/ {
+            line=$0
+            sub(/^    password:[[:space:]]*/, "", line)
+            password=unquote(trim(line))
+            next
+        }
+        /^    up:/ {
+            line=$0
+            sub(/^    up:[[:space:]]*/, "", line)
+            hy2_up=trim(line)
+            next
+        }
+        /^    down:/ {
+            line=$0
+            sub(/^    down:[[:space:]]*/, "", line)
+            hy2_down=trim(line)
+            next
+        }
+        /^    ignore-client-bandwidth:/ {
+            line=$0
+            sub(/^    ignore-client-bandwidth:[[:space:]]*/, "", line)
+            hy2_ignore=trim(line)
+            next
+        }
+        /^    obfs:/ {
+            line=$0
+            sub(/^    obfs:[[:space:]]*/, "", line)
+            hy2_obfs=trim(line)
+            next
+        }
+        /^    obfs-password:/ {
+            line=$0
+            sub(/^    obfs-password:[[:space:]]*/, "", line)
+            hy2_obfs_password=unquote(trim(line))
+            next
+        }
+        /^    masquerade:/ {
+            line=$0
+            sub(/^    masquerade:[[:space:]]*/, "", line)
+            hy2_masquerade=unquote(trim(line))
+            next
+        }
+        /^    users:/ {
+            in_users=1
+            next
+        }
+        in_users && /^    [^ ]/ {
+            in_users=0
+        }
+        in_users && /^[[:space:]]+[^[:space:]#].*:/ {
+            line=$0
+            sub(/^[[:space:]]+/, "", line)
+            pos=index(line, ":")
+            if (pos > 0) {
+                key=substr(line, 1, pos - 1)
+                val=substr(line, pos + 1)
+                key=unquote(trim(key))
+                if (val !~ /^[[:space:]]*"/) {
+                    sub(/[[:space:]]+#.*/, "", val)
+                }
+                val=unquote(trim(val))
+                if (user_id == "") user_id=key
+                if (user_pass == "") user_pass=val
+            }
+            next
+        }
+        END {
+            emit()
+        }
+    ' "$config_file"
+}
+
 _mihomoconf_setup() {
     _header "Mihomo 配置生成"
 
     local CONFIG_DIR="$_MIHOMOCONF_CONFIG_DIR"
     local CONFIG_FILE="$_MIHOMOCONF_CONFIG_FILE"
     local SSL_DIR="$_MIHOMOCONF_SSL_DIR"
+    local CONFIG_STATUS
+
+    local WRITE_MODE="new"
+    local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_HY2="n"
+    local SS_REPLACE="n" ANYTLS_REPLACE="n" HY2_REPLACE="n"
+
+    local SS_PORT="" SS_CIPHER="" SS_PASSWORD=""
+    local ANYTLS_PORT="" ANYTLS_SNI="" ANYTLS_USER_ID="" ANYTLS_PASSWORD=""
+    local HY2_PORT="" HY2_USER="hy2-user" HY2_PASSWORD="" HY2_UP="" HY2_DOWN=""
+    local HY2_IGNORE_CLIENT_BANDWIDTH="false" HY2_SNI="" HY2_INSECURE="0"
+    local HY2_MPORT="" HY2_OBFS="" HY2_OBFS_PASSWORD="" HY2_MASQUERADE=""
+    local SERVER_IP="" SERVER_HOST="" SAVED_HOST="" host_input=""
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        CONFIG_STATUS="已存在"
+    else
+        CONFIG_STATUS="不存在(生成时自动创建)"
+    fi
+    _info "配置: ${CONFIG_FILE}"
+    _info "状态: ${CONFIG_STATUS}"
+    _info "支持: AnyTLS / SS2022 / HY2"
+    SAVED_HOST=$(_mihomoconf_get_saved_host "$CONFIG_FILE")
+    [[ -n "$SAVED_HOST" ]] && _info "已保存 Host: ${SAVED_HOST}"
 
     # ---- 判断写入模式 ----
-    local WRITE_MODE="new"
     if [[ -f "$CONFIG_FILE" ]]; then
-        echo ""
-        _info "检测到已有配置: ${CONFIG_FILE}"
-        echo ""
-        echo "  请选择操作:"
+        echo "  请选择操作(已有配置):"
         _separator
         printf "    ${GREEN}1${PLAIN}) 追加新节点到现有配置\n"
         printf "    ${GREEN}2${PLAIN}) 覆盖，重新生成配置\n"
-        echo ""
         printf "    ${RED}0${PLAIN}) 返回主菜单\n"
-        echo ""
         local file_action
         read -rp "  请选择 [0-2]: " file_action
         case "$file_action" in
@@ -2115,63 +2341,64 @@ _mihomoconf_setup() {
     fi
 
     # ---- 选择协议 ----
-    echo ""
     echo "  请选择要添加的协议 (可多选，空格分隔):"
     _separator
-    printf "    ${GREEN}1${PLAIN}) Shadowsocks\n"
+    printf "    ${GREEN}1${PLAIN}) SS2022\n"
     printf "    ${GREEN}2${PLAIN}) AnyTLS\n"
-    echo ""
+    printf "    ${GREEN}3${PLAIN}) HY2\n"
     local PROTOCOL_CHOICES
     read -rp "  请输入选项 (如 \"1 2\" 表示两个都添加): " -a PROTOCOL_CHOICES
 
-    local ENABLE_SS="n" ENABLE_ANYTLS="n"
     for ch in "${PROTOCOL_CHOICES[@]}"; do
         case "$ch" in
             1) ENABLE_SS="y" ;;
             2) ENABLE_ANYTLS="y" ;;
+            3) ENABLE_HY2="y" ;;
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$ENABLE_SS" == "n" && "$ENABLE_ANYTLS" == "n" ]]; then
+    if [[ "$ENABLE_SS" == "n" && "$ENABLE_ANYTLS" == "n" && "$ENABLE_HY2" == "n" ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
     fi
 
     # ---- 追加模式: 检查已有同协议节点 ----
-    local SS_REPLACE="n" ANYTLS_REPLACE="n"
     if [[ "$WRITE_MODE" == "append" ]]; then
         if [[ "$ENABLE_SS" == "y" ]] && _mihomoconf_has_listener_type "shadowsocks"; then
-            echo ""
-            _warn "配置中已存在 Shadowsocks 节点:"
+            _warn "配置中已存在 SS2022 节点:"
             _mihomoconf_list_listeners "shadowsocks"
-            echo ""
-            printf "    ${GREEN}1${PLAIN}) 覆盖已有 SS 节点\n"
+            printf "    ${GREEN}1${PLAIN}) 覆盖已有 SS2022 节点\n"
             printf "    ${GREEN}2${PLAIN}) 保留已有，继续添加\n"
             local ss_action
             read -rp "  请选择 [1/2，默认 2]: " ss_action
             [[ "${ss_action:-2}" == "1" ]] && SS_REPLACE="y"
         fi
         if [[ "$ENABLE_ANYTLS" == "y" ]] && _mihomoconf_has_listener_type "anytls"; then
-            echo ""
             _warn "配置中已存在 AnyTLS 节点:"
             _mihomoconf_list_listeners "anytls"
-            echo ""
             printf "    ${GREEN}1${PLAIN}) 覆盖已有 AnyTLS 节点\n"
             printf "    ${GREEN}2${PLAIN}) 保留已有，继续添加\n"
             local anytls_action
             read -rp "  请选择 [1/2，默认 2]: " anytls_action
             [[ "${anytls_action:-2}" == "1" ]] && ANYTLS_REPLACE="y"
         fi
+        if [[ "$ENABLE_HY2" == "y" ]] && _mihomoconf_has_listener_type "hysteria2"; then
+            _warn "配置中已存在 HY2 节点:"
+            _mihomoconf_list_listeners "hysteria2"
+            printf "    ${GREEN}1${PLAIN}) 覆盖已有 HY2 节点\n"
+            printf "    ${GREEN}2${PLAIN}) 保留已有，继续添加\n"
+            local hy2_action
+            read -rp "  请选择 [1/2，默认 2]: " hy2_action
+            [[ "${hy2_action:-2}" == "1" ]] && HY2_REPLACE="y"
+        fi
     fi
 
-    # ---- Shadowsocks 配置 ----
-    local SS_PORT SS_CIPHER SS_PASSWORD
+    # ---- SS2022 配置 ----
     if [[ "$ENABLE_SS" == "y" ]]; then
-        echo ""
-        printf "  ${BOLD}Shadowsocks 配置${PLAIN}\n"
+        printf "  ${BOLD}SS2022 配置${PLAIN}\n"
         _separator
-        read -rp "    SS 监听端口 [默认 12353]: " SS_PORT
+        read -rp "    SS2022 监听端口 [默认 12353]: " SS_PORT
         SS_PORT="${SS_PORT:-12353}"
         if ! _is_valid_port "$SS_PORT"; then
             _error_no_exit "端口无效，请输入 1-65535 范围的数字"
@@ -2189,13 +2416,11 @@ _mihomoconf_setup() {
             2) SS_CIPHER="2022-blake3-aes-256-gcm"; SS_PASSWORD=$(_mihomoconf_gen_ss_password_256) ;;
             *) _error_no_exit "无效选项"; _press_any_key; return ;;
         esac
-        _info "SS 密码已随机生成"
+        _info "SS2022 密码已随机生成"
     fi
 
     # ---- AnyTLS 配置 ----
-    local ANYTLS_PORT ANYTLS_SNI ANYTLS_USER_ID ANYTLS_PASSWORD
     if [[ "$ENABLE_ANYTLS" == "y" ]]; then
-        echo ""
         printf "  ${BOLD}AnyTLS 配置${PLAIN}\n"
         _separator
         read -rp "    AnyTLS 监听端口 [默认 443]: " ANYTLS_PORT
@@ -2210,20 +2435,102 @@ _mihomoconf_setup() {
         ANYTLS_USER_ID=$(_mihomoconf_gen_uuid)
         ANYTLS_PASSWORD=$(_mihomoconf_gen_anytls_password)
         _info "AnyTLS 用户 ID 和密码已随机生成"
+    fi
 
-        # SSL 证书检查
-        mkdir -p "$SSL_DIR"
-        echo ""
-        if [[ -f "${SSL_DIR}/cert.crt" && -f "${SSL_DIR}/cert.key" ]]; then
-            _info "已检测到 SSL 证书: ${SSL_DIR}/"
+    # ---- HY2 配置 ----
+    if [[ "$ENABLE_HY2" == "y" ]]; then
+        printf "  ${BOLD}HY2 配置${PLAIN}\n"
+        _separator
+        read -rp "    HY2 监听端口 [默认 8080]: " HY2_PORT
+        HY2_PORT="${HY2_PORT:-8080}"
+        if ! _is_valid_port "$HY2_PORT"; then
+            _error_no_exit "端口无效，请输入 1-65535 范围的数字"
+            _press_any_key
+            return
+        fi
+
+        if [[ -n "${ANYTLS_SNI:-}" ]]; then
+            read -rp "    HY2 SNI 域名 [默认复用 AnyTLS: ${ANYTLS_SNI}]: " HY2_SNI
+            HY2_SNI="${HY2_SNI:-$ANYTLS_SNI}"
         else
-            _warn "AnyTLS 需要 SSL 证书才能正常运行!"
+            read -rp "    HY2 SNI 域名 (留空则用 IP): " HY2_SNI
+            HY2_SNI="${HY2_SNI:-}"
+        fi
+
+        read -rp "    up 上传速率 [默认 1000 Mbps]: " HY2_UP
+        HY2_UP="${HY2_UP:-1000}"
+        if ! _is_digit "$HY2_UP" || [[ "$HY2_UP" -le 0 ]]; then
+            _error_no_exit "up 必须为正整数"
+            _press_any_key
+            return
+        fi
+
+        read -rp "    down 下载速率 [默认 1000 Mbps]: " HY2_DOWN
+        HY2_DOWN="${HY2_DOWN:-1000}"
+        if ! _is_digit "$HY2_DOWN" || [[ "$HY2_DOWN" -le 0 ]]; then
+            _error_no_exit "down 必须为正整数"
+            _press_any_key
+            return
+        fi
+
+        local hy2_ignore_input
+        read -rp "    忽略客户端带宽声明? [y/N]: " hy2_ignore_input
+        [[ "$hy2_ignore_input" =~ ^[Yy] ]] && HY2_IGNORE_CLIENT_BANDWIDTH="true" || HY2_IGNORE_CLIENT_BANDWIDTH="false"
+
+        local hy2_enable_hop hy2_hop_size hy2_end_port
+        read -rp "    开启端口跳跃? [y/N]: " hy2_enable_hop
+        if [[ "$hy2_enable_hop" =~ ^[Yy] ]]; then
+            read -rp "    端口跳跃大小 [默认 1000]: " hy2_hop_size
+            hy2_hop_size="${hy2_hop_size:-1000}"
+            if ! _is_digit "$hy2_hop_size" || [[ "$hy2_hop_size" -le 0 ]]; then
+                _error_no_exit "端口跳跃大小必须为正整数"
+                _press_any_key
+                return
+            fi
+            hy2_end_port=$((HY2_PORT + hy2_hop_size - 1))
+            if (( hy2_end_port > 65535 )); then
+                _error_no_exit "端口跳跃范围超出 65535，请减小跳跃大小"
+                _press_any_key
+                return
+            fi
+            HY2_MPORT="${HY2_PORT}-${hy2_end_port}"
+        fi
+
+        local hy2_insecure_input
+        read -rp "    允许客户端跳过证书验证? [y/N]: " hy2_insecure_input
+        [[ "$hy2_insecure_input" =~ ^[Yy] ]] && HY2_INSECURE="1" || HY2_INSECURE="0"
+
+        local hy2_obfs_enable hy2_obfs_pass_input
+        read -rp "    启用 salamander 混淆? [y/N]: " hy2_obfs_enable
+        if [[ "$hy2_obfs_enable" =~ ^[Yy] ]]; then
+            HY2_OBFS="salamander"
+            read -rp "    obfs 密码 [留空自动生成]: " hy2_obfs_pass_input
+            HY2_OBFS_PASSWORD="${hy2_obfs_pass_input:-$(_mihomoconf_gen_anytls_password)}"
+        fi
+
+        local hy2_masquerade_input
+        read -rp "    masquerade URL [默认 https://bing.com，输入 none 关闭]: " hy2_masquerade_input
+        case "${hy2_masquerade_input:-}" in
+            "") HY2_MASQUERADE="https://bing.com" ;;
+            none|None|NONE) HY2_MASQUERADE="" ;;
+            *) HY2_MASQUERADE="$hy2_masquerade_input" ;;
+        esac
+
+        HY2_PASSWORD=$(_mihomoconf_gen_anytls_password)
+        _info "HY2 密码已随机生成(与 AnyTLS 独立)"
+    fi
+
+    # ---- TLS 证书检查 (AnyTLS / HY2 共用) ----
+    if [[ "$ENABLE_ANYTLS" == "y" || "$ENABLE_HY2" == "y" ]]; then
+        mkdir -p "$SSL_DIR"
+        if [[ -f "${SSL_DIR}/cert.crt" && -f "${SSL_DIR}/cert.key" ]]; then
+            _info "已检测到 TLS 证书: ${SSL_DIR}/"
+        else
+            _warn "AnyTLS/HY2 需要 TLS 证书才能正常运行!"
             _warn "请将证书文件放到以下路径:"
             printf "    证书: ${YELLOW}${SSL_DIR}/cert.crt${PLAIN}\n"
             printf "    私钥: ${YELLOW}${SSL_DIR}/cert.key${PLAIN}\n"
-            echo ""
             _info "目录 ${SSL_DIR}/ 已自动创建"
-            echo ""
             printf "${YELLOW}  按任意键继续...${PLAIN}"
             local SAVEDSTTY
             SAVEDSTTY=$(stty -g)
@@ -2234,6 +2541,18 @@ _mihomoconf_setup() {
         fi
     fi
 
+    _info "正在获取服务器公网 IP..."
+    SERVER_IP=$(_mihomoconf_get_server_ip)
+    _info "服务器 IP: ${SERVER_IP}"
+    if [[ -n "$SAVED_HOST" ]]; then
+        read -rp "  链接/JSON Host [默认 ${SAVED_HOST}，可填域名]: " host_input
+        SERVER_HOST="${host_input:-$SAVED_HOST}"
+    else
+        read -rp "  链接/JSON Host [默认 ${SERVER_IP}，可填域名]: " host_input
+        SERVER_HOST="${host_input:-$SERVER_IP}"
+    fi
+    _info "导出 Host: ${SERVER_HOST}"
+
     # ---- 写入配置 ----
     mkdir -p "$CONFIG_DIR"
 
@@ -2242,7 +2561,7 @@ _mihomoconf_setup() {
         local _target_file="$1"
         if [[ "$ENABLE_SS" == "y" ]]; then
             cat >> "$_target_file" <<MIHOMOCONF_SS_EOF
-  - name: ss-in-${SS_PORT}
+  - name: ss2022-in-${SS_PORT}
     type: shadowsocks
     port: ${SS_PORT}
     listen: "::"
@@ -2257,11 +2576,43 @@ MIHOMOCONF_SS_EOF
     type: anytls
     port: ${ANYTLS_PORT}
     listen: "::"
+    # vpsgo-sni: ${ANYTLS_SNI}
     certificate: "${SSL_DIR}/cert.crt"
     private-key: "${SSL_DIR}/cert.key"
     users:
       "${ANYTLS_USER_ID}": "${ANYTLS_PASSWORD}"
 MIHOMOCONF_AT_EOF
+        fi
+        if [[ "$ENABLE_HY2" == "y" ]]; then
+            cat >> "$_target_file" <<MIHOMOCONF_HY2_EOF
+  - name: hy2-in-${HY2_PORT}
+    type: hysteria2
+    port: ${HY2_PORT}
+    listen: "::"
+    # vpsgo-peer: ${HY2_SNI}
+    # vpsgo-mport: ${HY2_MPORT}
+    # vpsgo-insecure: ${HY2_INSECURE}
+    users:
+      "${HY2_USER}": "${HY2_PASSWORD}"
+    up: ${HY2_UP}
+    down: ${HY2_DOWN}
+    ignore-client-bandwidth: ${HY2_IGNORE_CLIENT_BANDWIDTH}
+MIHOMOCONF_HY2_EOF
+            if [[ -n "$HY2_OBFS" ]]; then
+                cat >> "$_target_file" <<MIHOMOCONF_HY2_OBFS_EOF
+    obfs: ${HY2_OBFS}
+    obfs-password: "${HY2_OBFS_PASSWORD}"
+MIHOMOCONF_HY2_OBFS_EOF
+            fi
+            if [[ -n "$HY2_MASQUERADE" ]]; then
+                printf "    masquerade: \"%s\"\n" "$HY2_MASQUERADE" >> "$_target_file"
+            fi
+            cat >> "$_target_file" <<MIHOMOCONF_HY2_TLS_EOF
+    alpn:
+      - h3
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_HY2_TLS_EOF
         fi
     }
 
@@ -2276,16 +2627,14 @@ ipv6: true
 dns:
   enable: true
   ipv6: true
-  nameserver:
-    - 8.8.8.8
-    - 208.67.222.222
 
 listeners:
 MIHOMOCONF_HEADER
         _mihomoconf_append_listeners_to "$CONFIG_FILE"
     else
-        [[ "$SS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "shadowsocks" && _info "已移除旧的 SS 节点"
+        [[ "$SS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "shadowsocks" && _info "已移除旧的 SS2022 节点"
         [[ "$ANYTLS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "anytls" && _info "已移除旧的 AnyTLS 节点"
+        [[ "$HY2_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "hysteria2" && _info "已移除旧的 HY2 节点"
         if grep -q '^listeners:' "$CONFIG_FILE" 2>/dev/null; then
             # 将新 listener 内容插入到 listeners: 块末尾（下一个顶级键之前）
             local _tmplistener
@@ -2305,42 +2654,32 @@ MIHOMOCONF_HEADER
             _mihomoconf_append_listeners_to "$CONFIG_FILE"
         fi
     fi
-
-    # ---- 获取服务器 IP ----
-    _info "正在获取服务器公网 IP..."
-    local SERVER_IP
-    SERVER_IP=$(_mihomoconf_get_server_ip)
-    _info "服务器 IP: ${SERVER_IP}"
+    _mihomoconf_set_saved_host "$CONFIG_FILE" "$SERVER_HOST"
 
     # ---- 输出结果 ----
-    echo ""
     _header "配置生成完成"
-    echo ""
     _info "配置文件: ${CONFIG_FILE}"
     _info "写入模式: $( [[ "$WRITE_MODE" == "new" ]] && echo "全新生成" || echo "追加到现有配置" )"
 
-    # SS 输出
+    # SS2022 输出
     if [[ "$ENABLE_SS" == "y" ]]; then
-        echo ""
-        printf "  ${BOLD}Shadowsocks 连接信息${PLAIN}\n"
+        printf "  ${BOLD}SS2022 连接信息${PLAIN}\n"
         _separator
-        printf "    服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_IP"
+        printf "    服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
         printf "    端口   : ${GREEN}%s${PLAIN}\n" "$SS_PORT"
         printf "    加密   : ${GREEN}%s${PLAIN}\n" "$SS_CIPHER"
         printf "    密码   : ${GREEN}%s${PLAIN}\n" "$SS_PASSWORD"
-        echo ""
         local SS_LINK
-        SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_IP" "$SS_PORT" "$SS_CIPHER" "$SS_PASSWORD" "mihomo-ss-${SS_PORT}")
-        printf "  ${BOLD}SS 分享链接:${PLAIN}\n"
+        SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_HOST" "$SS_PORT" "$SS_CIPHER" "$SS_PASSWORD" "mihomo-ss2022-${SS_PORT}")
+        printf "  ${BOLD}SS2022 分享链接:${PLAIN}\n"
         printf "  ${GREEN}%s${PLAIN}\n" "$SS_LINK"
-        echo ""
         printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
         _separator
         cat <<MIHOMOCONF_SS_YAML
     proxies:
-      - name: "mihomo-ss-${SS_PORT}"
+      - name: "mihomo-ss2022-${SS_PORT}"
         type: ss
-        server: ${SERVER_IP}
+        server: ${SERVER_HOST}
         port: ${SS_PORT}
         cipher: ${SS_CIPHER}
         password: "${SS_PASSWORD}"
@@ -2352,29 +2691,17 @@ MIHOMOCONF_SS_YAML
 
     # AnyTLS 输出
     if [[ "$ENABLE_ANYTLS" == "y" ]]; then
-        echo ""
-        printf "  ${BOLD}AnyTLS 连接信息${PLAIN}\n"
-        _separator
-        printf "    服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_IP"
-        printf "    端口   : ${GREEN}%s${PLAIN}\n" "$ANYTLS_PORT"
-        printf "    用户ID : ${GREEN}%s${PLAIN}\n" "$ANYTLS_USER_ID"
-        printf "    密码   : ${GREEN}%s${PLAIN}\n" "$ANYTLS_PASSWORD"
-        if [[ -n "$ANYTLS_SNI" ]]; then
-            printf "    SNI    : ${GREEN}%s${PLAIN}\n" "$ANYTLS_SNI"
-        fi
-        echo ""
         local ANYTLS_LINK
-        ANYTLS_LINK=$(_mihomoconf_gen_anytls_link "$SERVER_IP" "$ANYTLS_PORT" "$ANYTLS_PASSWORD" "mihomo-anytls-${ANYTLS_PORT}" "$ANYTLS_SNI")
+        ANYTLS_LINK=$(_mihomoconf_gen_anytls_link "$SERVER_HOST" "$ANYTLS_PORT" "$ANYTLS_PASSWORD" "mihomo-anytls-${ANYTLS_PORT}" "$ANYTLS_SNI")
         printf "  ${BOLD}AnyTLS 分享链接:${PLAIN}\n"
         printf "  ${GREEN}%s${PLAIN}\n" "$ANYTLS_LINK"
-        echo ""
         printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
         _separator
         cat <<MIHOMOCONF_AT_YAML
     proxies:
       - name: "mihomo-anytls-${ANYTLS_PORT}"
         type: anytls
-        server: ${SERVER_IP}
+        server: ${SERVER_HOST}
         port: ${ANYTLS_PORT}
         password: "${ANYTLS_PASSWORD}"
         udp: true
@@ -2387,9 +2714,46 @@ MIHOMOCONF_AT_YAML
         fi
     fi
 
-    echo ""
+    # HY2 输出
+    if [[ "$ENABLE_HY2" == "y" ]]; then
+        printf "  ${BOLD}HY2 连接信息${PLAIN}\n"
+        _separator
+        printf "    服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+        printf "    端口   : ${GREEN}%s${PLAIN}\n" "$HY2_PORT"
+        printf "    用户   : ${GREEN}%s${PLAIN}\n" "$HY2_USER"
+        printf "    密码   : ${GREEN}%s${PLAIN}\n" "$HY2_PASSWORD"
+        printf "    up/down: ${GREEN}%s/%s Mbps${PLAIN}\n" "$HY2_UP" "$HY2_DOWN"
+        [[ -n "$HY2_SNI" ]] && printf "    SNI    : ${GREEN}%s${PLAIN}\n" "$HY2_SNI"
+        [[ -n "$HY2_MPORT" ]] && printf "    跳跃端口: ${GREEN}%s${PLAIN}\n" "$HY2_MPORT"
+        [[ "$HY2_INSECURE" == "1" ]] && printf "    insecure: ${YELLOW}开启${PLAIN}\n"
+        [[ -n "$HY2_OBFS" ]] && printf "    obfs    : ${GREEN}%s${PLAIN}\n" "$HY2_OBFS"
+        [[ -n "$HY2_MASQUERADE" ]] && printf "    masquerade: ${GREEN}%s${PLAIN}\n" "$HY2_MASQUERADE"
+        local HY2_LINK
+        HY2_LINK=$(_mihomoconf_gen_hy2_link "$SERVER_HOST" "$HY2_PORT" "$HY2_PASSWORD" "mihomo-hy2-${HY2_PORT}" "$HY2_SNI" "$HY2_INSECURE" "$HY2_OBFS" "$HY2_OBFS_PASSWORD" "$HY2_MPORT")
+        printf "  ${BOLD}HY2 分享链接:${PLAIN}\n"
+        printf "  ${GREEN}%s${PLAIN}\n" "$HY2_LINK"
+        printf "  ${BOLD}HY2 JSON:${PLAIN}\n"
+        _separator
+        cat <<MIHOMOCONF_HY2_JSON
+    {
+      "type": "hysteria2",
+      "tag": "mihomo-hy2-${HY2_PORT}",
+      "server": "${SERVER_HOST}",
+      "server_port": ${HY2_PORT},
+      "password": "${HY2_PASSWORD}",
+      "sni": "${HY2_SNI}",
+      "insecure": ${HY2_INSECURE},
+      "up_mbps": ${HY2_UP},
+      "down_mbps": ${HY2_DOWN},
+      "mport": "${HY2_MPORT}",
+      "obfs": "${HY2_OBFS}",
+      "obfs_password": "${HY2_OBFS_PASSWORD}"
+    }
+MIHOMOCONF_HY2_JSON
+    fi
+
     _separator
-    _warn "请妥善保存以上凭据和链接，密码不会再次显示!"
+    _info "可在 Mihomo 管理菜单中通过「读取配置并生成节点」随时生成链接/JSON"
     _info "启动命令: mihomo -d ${CONFIG_DIR}"
 
     _press_any_key
@@ -2538,11 +2902,160 @@ _mihomo_log() {
     _press_any_key
 }
 
+_mihomo_read_config() {
+    _header "Mihomo 节点导出"
+
+    local config_file="$_MIHOMOCONF_CONFIG_FILE"
+    local server_ip
+    local saved_host
+    local total_count=0
+    local export_count=0
+    local type name port cipher password user_id user_pass sni
+    local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure
+
+    if [[ ! -f "$config_file" ]]; then
+        _error_no_exit "未找到配置文件: ${config_file}"
+        _info "请先通过选项2「生成配置」创建配置文件"
+        _press_any_key
+        return
+    fi
+
+    if [[ ! -r "$config_file" ]]; then
+        _error_no_exit "配置文件不可读: ${config_file}"
+        _press_any_key
+        return
+    fi
+
+    _info "配置文件: ${config_file}"
+    _info "仅支持导出 AnyTLS / SS2022 / HY2 节点"
+    saved_host=$(_mihomoconf_get_saved_host "$config_file")
+    if [[ -n "$saved_host" ]]; then
+        server_ip="$saved_host"
+        _info "导出 Host(配置中): ${server_ip}"
+    else
+        _info "正在获取服务器公网 IP..."
+        server_ip=$(_mihomoconf_get_server_ip)
+        _info "导出 Host(公网IP): ${server_ip}"
+    fi
+
+    while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure; do
+        [[ -z "${name:-}" ]] && continue
+        total_count=$((total_count + 1))
+
+        case "$type" in
+            shadowsocks)
+                if [[ "$cipher" != 2022-* ]]; then
+                    _warn "跳过 ${name}: 非 SS2022 节点 (cipher=${cipher})"
+                    continue
+                fi
+                if [[ -z "$port" || -z "$password" ]]; then
+                    _warn "跳过 ${name}: 节点字段不完整"
+                    continue
+                fi
+                export_count=$((export_count + 1))
+                local ss_link
+                ss_link=$(_mihomoconf_gen_ss_link "$server_ip" "$port" "$cipher" "$password" "$name")
+                _separator
+                printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$name"
+                printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_link"
+                printf "    JSON:\n"
+                cat <<MIHOMO_SS2022_JSON
+    {
+      "type": "shadowsocks",
+      "tag": "${name}",
+      "server": "${server_ip}",
+      "server_port": ${port},
+      "method": "${cipher}",
+      "password": "${password}",
+      "udp_over_tcp": { "enabled": true }
+    }
+MIHOMO_SS2022_JSON
+                ;;
+            anytls)
+                if [[ -z "$port" || -z "$user_pass" ]]; then
+                    _warn "跳过 ${name}: 节点字段不完整"
+                    continue
+                fi
+                export_count=$((export_count + 1))
+                local anytls_link
+                anytls_link=$(_mihomoconf_gen_anytls_link "$server_ip" "$port" "$user_pass" "$name" "$sni")
+                _separator
+                printf "  ${BOLD}[AnyTLS] %s${PLAIN}\n" "$name"
+                printf "    链接: ${GREEN}%s${PLAIN}\n" "$anytls_link"
+                [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
+                printf "    JSON:\n"
+                cat <<MIHOMO_ANYTLS_JSON
+    {
+      "type": "anytls",
+      "tag": "${name}",
+      "server": "${server_ip}",
+      "server_port": ${port},
+      "password": "${user_pass}",
+      "sni": "${sni}",
+      "udp": true,
+      "tfo": true
+    }
+MIHOMO_ANYTLS_JSON
+                ;;
+            hysteria2)
+                if [[ -z "$port" || -z "$user_pass" ]]; then
+                    _warn "跳过 ${name}: 节点字段不完整"
+                    continue
+                fi
+                export_count=$((export_count + 1))
+                local hy2_link
+                hy2_link=$(_mihomoconf_gen_hy2_link "$server_ip" "$port" "$user_pass" "$name" "$sni" "${hy2_insecure:-0}" "$hy2_obfs" "$hy2_obfs_password" "$hy2_mport")
+                _separator
+                printf "  ${BOLD}[HY2] %s${PLAIN}\n" "$name"
+                printf "    链接: ${GREEN}%s${PLAIN}\n" "$hy2_link"
+                [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
+                [[ -n "$hy2_mport" ]] && printf "    端口跳跃: ${GREEN}%s${PLAIN}\n" "$hy2_mport"
+                [[ -n "$hy2_up" || -n "$hy2_down" ]] && printf "    up/down: ${GREEN}%s/%s Mbps${PLAIN}\n" "${hy2_up:-1000}" "${hy2_down:-1000}"
+                [[ -n "$hy2_obfs" ]] && printf "    obfs: ${GREEN}%s${PLAIN}\n" "$hy2_obfs"
+                [[ -n "$hy2_masquerade" ]] && printf "    masquerade: ${GREEN}%s${PLAIN}\n" "$hy2_masquerade"
+                printf "    JSON:\n"
+                cat <<MIHOMO_HY2_JSON
+    {
+      "type": "hysteria2",
+      "tag": "${name}",
+      "server": "${server_ip}",
+      "server_port": ${port},
+      "password": "${user_pass}",
+      "sni": "${sni}",
+      "insecure": ${hy2_insecure:-0},
+      "up_mbps": ${hy2_up:-1000},
+      "down_mbps": ${hy2_down:-1000},
+      "mport": "${hy2_mport}",
+      "obfs": "${hy2_obfs}",
+      "obfs_password": "${hy2_obfs_password}"
+    }
+MIHOMO_HY2_JSON
+                ;;
+            *)
+                _warn "跳过 ${name}: 暂不支持类型 ${type}"
+                ;;
+        esac
+    done < <(_mihomoconf_read_listener_rows "$config_file")
+
+    _separator
+    if [[ "$total_count" -eq 0 ]]; then
+        _warn "未在配置中检测到 listeners 节点"
+    elif [[ "$export_count" -eq 0 ]]; then
+        _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/SS2022/HY2 节点"
+    else
+        _info "共读取 ${total_count} 个节点，已导出 ${export_count} 个节点"
+    fi
+
+    _press_any_key
+}
+
 _mihomo_manage() {
     while true; do
         _header "Mihomo 管理"
+        local config_dir="$_MIHOMOCONF_CONFIG_DIR"
+        local config_file="$_MIHOMOCONF_CONFIG_FILE"
 
-        echo ""
         if command -v mihomo >/dev/null 2>&1; then
             local ver
             ver=$(mihomo -v 2>/dev/null | head -1)
@@ -2557,26 +3070,32 @@ _mihomo_manage() {
         else
             _info "当前未安装 mihomo"
         fi
+        _info "配置目录: ${config_dir}"
+        _info "配置文件: ${config_file}"
+        if [[ -f "$config_file" ]]; then
+            printf "${GREEN}  ✔ ${PLAIN}配置状态: ${GREEN}已存在${PLAIN}\n"
+        else
+            printf "${GREEN}  ✔ ${PLAIN}配置状态: ${YELLOW}不存在${PLAIN} (可通过选项 2 生成)\n"
+        fi
 
-        echo ""
         _separator
         printf "    ${GREEN}1${PLAIN}) 安装/更新 Mihomo\n"
-        printf "    ${GREEN}2${PLAIN}) 生成配置 ${DIM}(SS / AnyTLS)${PLAIN}\n"
+        printf "    ${GREEN}2${PLAIN}) 生成配置 ${DIM}(SS2022 / AnyTLS / HY2)${PLAIN}\n"
         printf "    ${GREEN}3${PLAIN}) 配置自启并启动\n"
         printf "    ${GREEN}4${PLAIN}) 重启 Mihomo\n"
         printf "    ${GREEN}5${PLAIN}) 查看日志\n"
-        echo ""
+        printf "    ${GREEN}6${PLAIN}) 读取配置并生成节点\n"
         printf "    ${RED}0${PLAIN}) 返回主菜单\n"
-        echo ""
 
         local choice
-        read -rp "  请输入选项 [0-5]: " choice
+        read -rp "  请输入选项 [0-6]: " choice
         case "$choice" in
             1) _mihomo_setup ;;
             2) _mihomoconf_setup ;;
             3) _mihomo_enable ;;
             4) _mihomo_restart ;;
             5) _mihomo_log ;;
+            6) _mihomo_read_config ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
@@ -3075,7 +3594,938 @@ _singbox_manage() {
     done
 }
 
-# --- 11. Swap 管理 ---
+# --- 10. Akile DNS 解锁检测与配置 ---
+
+_akdns_install_deps() {
+    local need_install=0
+    local required_deps=(dig curl ip awk grep sed chattr lsattr mktemp readlink)
+    local optional_deps=(nmcli resolvectl netplan)
+    local missing_required=()
+    local missing_optional=()
+    local cmd
+
+    for cmd in "${required_deps[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_required+=("$cmd")
+        fi
+    done
+    for cmd in "${optional_deps[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_optional+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_required[@]} -eq 0 ] && [ ${#missing_optional[@]} -eq 0 ]; then
+        _info "Akile DNS 依赖已就绪"
+        return 0
+    fi
+
+    need_install=1
+    [ ${#missing_required[@]} -gt 0 ] && _warn "检测到缺失核心依赖: ${missing_required[*]}"
+    [ ${#missing_optional[@]} -gt 0 ] && _warn "检测到缺失可选依赖: ${missing_optional[*]}"
+    _info "正在尝试自动安装依赖..."
+
+    local packages=()
+    local unmapped_required=()
+    local unmapped_optional=()
+    local add_pkg
+    add_pkg() {
+        local p="$1"
+        [[ " ${packages[*]} " == *" ${p} "* ]] || packages+=("$p")
+    }
+
+    local all_missing=("${missing_required[@]}" "${missing_optional[@]}")
+    for cmd in "${all_missing[@]}"; do
+        local mapped=1
+        case "$cmd" in
+            dig)
+                if command -v apt-get >/dev/null 2>&1; then add_pkg dnsutils
+                elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; then add_pkg bind-utils
+                elif command -v apk >/dev/null 2>&1; then add_pkg bind-tools
+                elif command -v pacman >/dev/null 2>&1; then add_pkg bind
+                else mapped=0; fi
+                ;;
+            curl) add_pkg curl ;;
+            ip)
+                if command -v apt-get >/dev/null 2>&1 || command -v apk >/dev/null 2>&1; then add_pkg iproute2
+                elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; then add_pkg iproute
+                elif command -v pacman >/dev/null 2>&1; then add_pkg iproute2
+                else mapped=0; fi
+                ;;
+            awk) add_pkg gawk ;;
+            grep) add_pkg grep ;;
+            sed) add_pkg sed ;;
+            chattr|lsattr) add_pkg e2fsprogs ;;
+            mktemp|readlink) add_pkg coreutils ;;
+            nmcli)
+                if command -v apt-get >/dev/null 2>&1; then add_pkg network-manager
+                elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; then add_pkg NetworkManager
+                elif command -v pacman >/dev/null 2>&1; then add_pkg networkmanager
+                elif command -v apk >/dev/null 2>&1; then add_pkg networkmanager
+                else mapped=0; fi
+                ;;
+            resolvectl)
+                if command -v apt-get >/dev/null 2>&1 || command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; then add_pkg systemd
+                elif command -v pacman >/dev/null 2>&1; then add_pkg systemd
+                elif command -v apk >/dev/null 2>&1; then add_pkg openresolv
+                else mapped=0; fi
+                ;;
+            netplan)
+                if command -v apt-get >/dev/null 2>&1; then add_pkg netplan.io
+                elif command -v apk >/dev/null 2>&1; then add_pkg netplan
+                elif command -v pacman >/dev/null 2>&1; then add_pkg netplan
+                else mapped=0; fi
+                ;;
+            *) mapped=0 ;;
+        esac
+
+        if [ "$mapped" -eq 0 ]; then
+            if [[ " ${missing_required[*]} " == *" ${cmd} "* ]]; then
+                unmapped_required+=("$cmd")
+            else
+                unmapped_optional+=("$cmd")
+            fi
+        fi
+    done
+
+    if [ ${#unmapped_required[@]} -gt 0 ]; then
+        _error_no_exit "核心依赖无法自动映射安装，请手动安装: ${unmapped_required[*]}"
+        return 1
+    fi
+    [ ${#unmapped_optional[@]} -gt 0 ] && _warn "可选依赖无法自动映射安装，将继续执行: ${unmapped_optional[*]}"
+
+    if [ ${#packages[@]} -gt 0 ]; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq "${packages[@]}"
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y "${packages[@]}"
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y "${packages[@]}"
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -Sy --noconfirm "${packages[@]}"
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache "${packages[@]}"
+        elif command -v zypper >/dev/null 2>&1; then
+            zypper install -y "${packages[@]}"
+        elif [ ${#missing_required[@]} -gt 0 ]; then
+            _error_no_exit "无法识别包管理器，请手动安装核心依赖: ${missing_required[*]}"
+            return 1
+        else
+            _warn "无法识别包管理器，可选依赖将跳过安装: ${missing_optional[*]}"
+        fi
+    fi
+
+    local still_missing_required=()
+    local still_missing_optional=()
+    for cmd in "${required_deps[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            still_missing_required+=("$cmd")
+        fi
+    done
+    for cmd in "${optional_deps[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            still_missing_optional+=("$cmd")
+        fi
+    done
+
+    if [ ${#still_missing_required[@]} -gt 0 ]; then
+        _error_no_exit "核心依赖安装不完整，请手动安装: ${still_missing_required[*]}"
+        return 1
+    fi
+    [ ${#still_missing_optional[@]} -gt 0 ] && _warn "可选依赖仍缺失，将继续执行: ${still_missing_optional[*]}"
+
+    if [ "$need_install" -eq 1 ]; then
+        _info "Akile DNS 依赖检查完成"
+    fi
+    return 0
+}
+
+_akdns_setup() {
+    _header "Akile DNS 解锁检测与配置"
+    
+    echo ""
+    _warn "在操作之前，请务必前往 https://dns.akile.ai 添加本机的 IP！"
+    _warn "如果不添加 IP，解锁设置将无法生效！"
+    echo ""
+    
+    local confirm
+    read -rp "  是否已在 https://dns.akile.ai 添加本机 IP? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "请先前往网站添加 IP，然后再返回继续操作。"
+        _press_any_key
+        return
+    fi
+    
+    echo ""
+    if ! _akdns_install_deps; then
+        _press_any_key
+        return
+    fi
+
+    _info "正在启动 Akile DNS 脚本..."
+    echo ""
+
+    # 运行 Akile DNS 测试及配置脚本
+    wget -qO- https://raw.githubusercontent.com/akile-network/aktools/refs/heads/main/akdns.sh | bash
+    
+    _press_any_key
+}
+
+# --- 11. Linux DNS 管理 ---
+
+_DNS_SERVERS=()
+_DNS_V4_SERVERS=()
+_DNS_V6_SERVERS=()
+_DNS_RESTART_SERVICES=()
+_DNS_CLEAR_EXISTING=1
+
+_dns_validate_ipv4() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+
+    local IFS='.'
+    local o
+    read -r -a octets <<< "$ip"
+    [ "${#octets[@]}" -eq 4 ] || return 1
+
+    for o in "${octets[@]}"; do
+        [[ "$o" =~ ^[0-9]+$ ]] || return 1
+        [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
+    done
+    return 0
+}
+
+_dns_validate_ipv6() {
+    local ip="$1"
+    [[ "$ip" == *:* ]] || return 1
+    [[ "$ip" =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+    return 0
+}
+
+_dns_add_server() {
+    local token="$1"
+    [ -n "$token" ] || return 1
+
+    token="${token#[}"
+    token="${token%]}"
+    token="${token%,}"
+
+    if _dns_validate_ipv4 "$token"; then
+        if [[ " ${_DNS_SERVERS[*]} " != *" ${token} "* ]]; then
+            _DNS_SERVERS+=("$token")
+            _DNS_V4_SERVERS+=("$token")
+        fi
+        return 0
+    fi
+
+    if _dns_validate_ipv6 "$token"; then
+        if [[ " ${_DNS_SERVERS[*]} " != *" ${token} "* ]]; then
+            _DNS_SERVERS+=("$token")
+            _DNS_V6_SERVERS+=("$token")
+        fi
+        return 0
+    fi
+
+    return 1
+}
+
+_dns_parse_servers() {
+    local raw="$1"
+    local token
+
+    _DNS_SERVERS=()
+    _DNS_V4_SERVERS=()
+    _DNS_V6_SERVERS=()
+
+    raw="${raw//，/,}"
+    raw="${raw//;/ }"
+    raw="${raw//,/ }"
+    raw="${raw//$'\n'/ }"
+
+    for token in $raw; do
+        [ -z "$token" ] && continue
+
+        if ! _dns_add_server "$token"; then
+            _error_no_exit "无效 DNS 地址: ${token}"
+            return 1
+        fi
+    done
+
+    if [ ${#_DNS_SERVERS[@]} -eq 0 ]; then
+        _error_no_exit "请至少输入一个有效 DNS 地址"
+        return 1
+    fi
+    return 0
+}
+
+_dns_merge_existing_servers() {
+    local token merged=0
+
+    while IFS= read -r token; do
+        [ -n "$token" ] || continue
+        if _dns_add_server "$token"; then
+            merged=$((merged + 1))
+        fi
+    done < <(awk '/^[[:space:]]*nameserver[[:space:]]+/ {print $2}' /etc/resolv.conf 2>/dev/null)
+
+    if command -v resolvectl >/dev/null 2>&1 && resolvectl status >/dev/null 2>&1; then
+        while IFS= read -r token; do
+            [ -n "$token" ] || continue
+            if _dns_add_server "$token"; then
+                merged=$((merged + 1))
+            fi
+        done < <(resolvectl dns 2>/dev/null | tr ' ' '\n' | sed 's/%.*//' )
+    fi
+
+    if [ "$merged" -gt 0 ]; then
+        _info "已保留并合并现有 DNS"
+    else
+        _warn "未获取到可合并的现有 DNS，继续仅使用新 DNS"
+    fi
+}
+
+_dns_force_runtime_servers() {
+    local iface
+    command -v resolvectl >/dev/null 2>&1 || return 0
+    resolvectl status >/dev/null 2>&1 || return 0
+
+    while IFS= read -r iface; do
+        [ -n "$iface" ] || continue
+        resolvectl dns "$iface" "${_DNS_SERVERS[@]}" >/dev/null 2>&1 || true
+        resolvectl domain "$iface" "~." >/dev/null 2>&1 || true
+    done < <(resolvectl status 2>/dev/null | sed -n 's/^Link [0-9]\+ (\([^)]*\)).*$/\1/p')
+
+    resolvectl flush-caches >/dev/null 2>&1 || true
+}
+
+_dns_default_iface() {
+    local iface
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [ -z "$iface" ]; then
+        iface=$(ip -o link show 2>/dev/null | awk -F': ' '$2 !~ /^lo$/ {print $2; exit}')
+    fi
+    printf '%s' "$iface"
+}
+
+_dns_service_exists() {
+    local svc="$1"
+    if command -v systemctl >/dev/null 2>&1; then
+        local state
+        state=$(systemctl show -p LoadState --value "${svc}.service" 2>/dev/null || true)
+        [ -n "$state" ] && [ "$state" != "not-found" ]
+        return
+    fi
+    if command -v service >/dev/null 2>&1; then
+        service "$svc" status >/dev/null 2>&1
+        return
+    fi
+    return 1
+}
+
+_dns_mark_service_for_restart() {
+    local svc="$1"
+    [ -z "$svc" ] && return
+    _dns_service_exists "$svc" || return
+    if [[ " ${_DNS_RESTART_SERVICES[*]} " != *" ${svc} "* ]]; then
+        _DNS_RESTART_SERVICES+=("$svc")
+    fi
+}
+
+_dns_restart_service() {
+    local svc="$1"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart "$svc" >/dev/null 2>&1
+        return $?
+    fi
+    if command -v service >/dev/null 2>&1; then
+        service "$svc" restart >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
+_dns_restart_related_services() {
+    local svc
+    if [ ${#_DNS_RESTART_SERVICES[@]} -eq 0 ]; then
+        _warn "未检测到需要重启的 DNS 相关组件，继续验证解析结果。"
+        return 0
+    fi
+
+    _info "正在重启相关组件: ${_DNS_RESTART_SERVICES[*]}"
+    for svc in "${_DNS_RESTART_SERVICES[@]}"; do
+        if _dns_restart_service "$svc"; then
+            _info "已重启服务: ${svc}"
+        else
+            _warn "服务 ${svc} 重启失败，请手动检查"
+        fi
+    done
+    return 0
+}
+
+_dns_clear_resolv_immutable() {
+    if command -v lsattr >/dev/null 2>&1 && command -v chattr >/dev/null 2>&1 && [ -e /etc/resolv.conf ]; then
+        if lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q 'i'; then
+            chattr -i /etc/resolv.conf >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+_dns_write_resolv_conf() {
+    local backup="/etc/resolv.conf.vpsgo.bak"
+    local dns
+
+    if [ -e /etc/resolv.conf ] && [ ! -e "$backup" ]; then
+        cp -a /etc/resolv.conf "$backup" >/dev/null 2>&1 || true
+    fi
+
+    _dns_clear_resolv_immutable
+    if [ -L /etc/resolv.conf ]; then
+        rm -f /etc/resolv.conf
+    fi
+
+    {
+        printf "# Generated by VPSGo at %s\n" "$(date '+%F %T %Z')"
+        for dns in "${_DNS_SERVERS[@]}"; do
+            printf "nameserver %s\n" "$dns"
+        done
+        printf "options timeout:2 attempts:2 rotate\n"
+    } > /etc/resolv.conf
+
+    _info "已写入 /etc/resolv.conf"
+    return 0
+}
+
+_dns_apply_permanent_resolvconf_head() {
+    local head="/etc/resolvconf/resolv.conf.d/head"
+    local backup="${head}.vpsgo.bak"
+    local dns
+
+    [ -d /etc/resolvconf/resolv.conf.d ] || return 1
+
+    [ -f "$head" ] && [ ! -f "$backup" ] && cp -a "$head" "$backup" >/dev/null 2>&1 || true
+    [ -f "$head" ] && sed -i '/^# VPSGO DNS BEGIN$/,/^# VPSGO DNS END$/d' "$head"
+
+    {
+        printf "# VPSGO DNS BEGIN\n"
+        for dns in "${_DNS_SERVERS[@]}"; do
+            printf "nameserver %s\n" "$dns"
+        done
+        printf "# VPSGO DNS END\n"
+    } >> "$head"
+
+    if command -v resolvconf >/dev/null 2>&1; then
+        resolvconf -u >/dev/null 2>&1 || true
+    fi
+    _dns_mark_service_for_restart "resolvconf"
+    _info "已写入 resolvconf 持久化配置: ${head}"
+    return 0
+}
+
+_dns_apply_permanent_dhcp_overrides() {
+    local dns_csv dhclient_conf dhcpcd_conf backup
+    dns_csv=$(IFS=,; echo "${_DNS_SERVERS[*]}")
+
+    dhclient_conf="/etc/dhcp/dhclient.conf"
+    if [ -f "$dhclient_conf" ]; then
+        backup="${dhclient_conf}.vpsgo.bak"
+        [ -f "$backup" ] || cp -a "$dhclient_conf" "$backup" >/dev/null 2>&1 || true
+        sed -i '/^[[:space:]]*supersede[[:space:]]\+domain-name-servers[[:space:]]\+/d' "$dhclient_conf"
+        printf "supersede domain-name-servers %s;\n" "$dns_csv" >> "$dhclient_conf"
+        _info "已写入 DHCP 持久化配置: ${dhclient_conf}"
+    fi
+
+    dhcpcd_conf="/etc/dhcpcd.conf"
+    if [ -f "$dhcpcd_conf" ]; then
+        backup="${dhcpcd_conf}.vpsgo.bak"
+        [ -f "$backup" ] || cp -a "$dhcpcd_conf" "$backup" >/dev/null 2>&1 || true
+        sed -i '/^[[:space:]]*static[[:space:]]\+domain_name_servers=/d' "$dhcpcd_conf"
+        printf "static domain_name_servers=%s\n" "${_DNS_SERVERS[*]}" >> "$dhcpcd_conf"
+        _info "已写入 dhcpcd 持久化配置: ${dhcpcd_conf}"
+    fi
+}
+
+_dns_apply_runtime_resolved() {
+    local iface
+    command -v resolvectl >/dev/null 2>&1 || return 1
+
+    if _dns_service_exists "systemd-resolved" && command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet systemd-resolved || systemctl start systemd-resolved >/dev/null 2>&1 || true
+    fi
+    resolvectl status >/dev/null 2>&1 || return 1
+
+    iface="$(_dns_default_iface)"
+    [ -n "$iface" ] || return 1
+
+    if resolvectl dns "$iface" "${_DNS_SERVERS[@]}" >/dev/null 2>&1; then
+        resolvectl domain "$iface" "~." >/dev/null 2>&1 || true
+        resolvectl flush-caches >/dev/null 2>&1 || true
+        _info "已通过 systemd-resolved 临时应用 DNS (接口: ${iface})"
+        return 0
+    fi
+
+    return 1
+}
+
+_dns_apply_permanent_resolved() {
+    local conf_dir conf_file dns_line
+
+    _dns_service_exists "systemd-resolved" || return 1
+
+    conf_dir="/etc/systemd/resolved.conf.d"
+    conf_file="${conf_dir}/99-vpsgo-dns.conf"
+    dns_line="${_DNS_SERVERS[*]}"
+
+    mkdir -p "$conf_dir"
+    [ -f "$conf_file" ] && cp -a "$conf_file" "${conf_file}.bak.$(date +%Y%m%d%H%M%S)" >/dev/null 2>&1 || true
+
+    {
+        printf "[Resolve]\n"
+        printf "DNS=%s\n" "$dns_line"
+        printf "FallbackDNS=\n"
+        printf "Domains=~.\n"
+    } > "$conf_file"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable systemd-resolved >/dev/null 2>&1 || true
+    fi
+
+    _dns_clear_resolv_immutable
+    if [ -e /run/systemd/resolve/resolv.conf ]; then
+        ln -snf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    elif [ -e /run/systemd/resolve/stub-resolv.conf ]; then
+        ln -snf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    fi
+
+    _dns_mark_service_for_restart "systemd-resolved"
+    _info "已写入 systemd-resolved 持久化配置: ${conf_file}"
+    return 0
+}
+
+_dns_apply_permanent_nm() {
+    local dns_v4 dns_v6 conn changed conn_changed
+    local connections=()
+    local unique_connections=()
+
+    command -v nmcli >/dev/null 2>&1 || return 1
+    nmcli -t -f RUNNING general status 2>/dev/null | grep -q '^running$' || return 1
+
+    while IFS= read -r conn; do
+        [ -n "$conn" ] && connections+=("$conn")
+    done < <(nmcli -t -f NAME connection show --active 2>/dev/null)
+
+    if [ ${#connections[@]} -eq 0 ]; then
+        while IFS= read -r conn; do
+            [ -n "$conn" ] && connections+=("$conn")
+        done < <(nmcli -t -f NAME connection show 2>/dev/null)
+    fi
+    [ ${#connections[@]} -gt 0 ] || return 1
+
+    for conn in "${connections[@]}"; do
+        [[ " ${unique_connections[*]} " == *" ${conn} "* ]] || unique_connections+=("$conn")
+    done
+    connections=("${unique_connections[@]}")
+
+    dns_v4="${_DNS_V4_SERVERS[*]}"
+    dns_v6="${_DNS_V6_SERVERS[*]}"
+    changed=0
+
+    for conn in "${connections[@]}"; do
+        conn_changed=0
+
+        if [ "$_DNS_CLEAR_EXISTING" -eq 1 ]; then
+            nmcli connection modify "$conn" ipv4.ignore-auto-dns yes >/dev/null 2>&1 && conn_changed=1
+            nmcli connection modify "$conn" ipv6.ignore-auto-dns yes >/dev/null 2>&1 && conn_changed=1
+            [ -z "$dns_v4" ] && nmcli connection modify "$conn" ipv4.dns "" >/dev/null 2>&1 && conn_changed=1
+            [ -z "$dns_v6" ] && nmcli connection modify "$conn" ipv6.dns "" >/dev/null 2>&1 && conn_changed=1
+        fi
+
+        if [ -n "$dns_v4" ]; then
+            nmcli connection modify "$conn" ipv4.ignore-auto-dns yes ipv4.dns "$dns_v4" >/dev/null 2>&1 && conn_changed=1
+        fi
+        if [ -n "$dns_v6" ]; then
+            nmcli connection modify "$conn" ipv6.ignore-auto-dns yes ipv6.dns "$dns_v6" >/dev/null 2>&1 && conn_changed=1
+        fi
+        [ "$conn_changed" -eq 1 ] && changed=1
+        nmcli connection up "$conn" >/dev/null 2>&1 || true
+    done
+
+    if [ "$changed" -eq 1 ]; then
+        nmcli connection reload >/dev/null 2>&1 || true
+        _dns_mark_service_for_restart "NetworkManager"
+        _info "已写入 NetworkManager 持久化 DNS 配置"
+        return 0
+    fi
+    return 1
+}
+
+_dns_apply_temporary() {
+    _DNS_RESTART_SERVICES=()
+    _info "正在临时修改 DNS..."
+
+    if _dns_apply_runtime_resolved; then
+        [ "$_DNS_CLEAR_EXISTING" -eq 1 ] && _dns_force_runtime_servers
+        _dns_mark_service_for_restart "nscd"
+        _dns_mark_service_for_restart "dnsmasq"
+        _dns_restart_related_services
+        _info "临时 DNS 修改完成（系统重启或网络重连后可能失效）"
+        return 0
+    fi
+
+    if _dns_write_resolv_conf; then
+        _dns_mark_service_for_restart "nscd"
+        _dns_mark_service_for_restart "dnsmasq"
+        _dns_restart_related_services
+        _info "临时 DNS 修改完成（系统重启后可能失效）"
+        return 0
+    fi
+
+    _error_no_exit "临时 DNS 修改失败"
+    return 1
+}
+
+_dns_apply_permanent() {
+    local methods=()
+    _DNS_RESTART_SERVICES=()
+
+    _info "正在写入永久 DNS 配置..."
+
+    if _dns_apply_permanent_resolved; then
+        methods+=("systemd-resolved")
+    fi
+
+    if _dns_apply_permanent_nm; then
+        methods+=("NetworkManager")
+    fi
+
+    if [ ${#methods[@]} -eq 0 ]; then
+        if _dns_apply_permanent_resolvconf_head; then
+            methods+=("resolvconf")
+        fi
+        if _dns_write_resolv_conf; then
+            methods+=("/etc/resolv.conf")
+        fi
+        _dns_apply_permanent_dhcp_overrides
+        _dns_mark_service_for_restart "networking"
+        _dns_mark_service_for_restart "dhcpcd"
+    fi
+
+    _dns_mark_service_for_restart "nscd"
+    _dns_mark_service_for_restart "dnsmasq"
+
+    _info "永久 DNS 应用方式: ${methods[*]}"
+    _dns_restart_related_services
+    if [ "$_DNS_CLEAR_EXISTING" -eq 1 ]; then
+        _dns_force_runtime_servers
+    fi
+    return 0
+}
+
+_dns_ensure_lookup_tool() {
+    if command -v dig >/dev/null 2>&1 || command -v nslookup >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _warn "未检测到 dig/nslookup，尝试自动安装 DNS 查询工具..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -qq dnsutils
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y bind-utils
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y bind-utils
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm bind
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache bind-tools
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y bind-utils
+    fi
+
+    if command -v dig >/dev/null 2>&1 || command -v nslookup >/dev/null 2>&1; then
+        _info "DNS 查询工具安装完成"
+        return 0
+    fi
+    _warn "无法自动安装 dig/nslookup，将跳过验证"
+    return 1
+}
+
+_dns_show_current_config() {
+    local resolv_nameserver_line=""
+    local resolved_line=""
+
+    while IFS= read -r line; do
+        [ -n "$line" ] && resolv_nameserver_line="${resolv_nameserver_line}${line} "
+    done < <(awk '/^[[:space:]]*nameserver[[:space:]]+/ {print $2}' /etc/resolv.conf 2>/dev/null)
+    resolv_nameserver_line="${resolv_nameserver_line%" "}"
+
+    if command -v resolvectl >/dev/null 2>&1 && resolvectl status >/dev/null 2>&1; then
+        while IFS= read -r line; do
+            [ -n "$line" ] && resolved_line="${resolved_line}${line} "
+        done < <(resolvectl dns 2>/dev/null | sed -n 's/^.*: //p')
+        resolved_line="${resolved_line%" "}"
+    fi
+
+    echo ""
+    printf "  ${BOLD}[ 当前 DNS 配置 ]${PLAIN}\n"
+    if [ -n "$resolv_nameserver_line" ]; then
+        printf "    /etc/resolv.conf: ${CYAN}%s${PLAIN}\n" "$resolv_nameserver_line"
+    else
+        printf "    /etc/resolv.conf: ${YELLOW}未检测到 nameserver${PLAIN}\n"
+    fi
+    if [ -n "$resolved_line" ]; then
+        printf "    systemd-resolved: ${CYAN}%s${PLAIN}\n" "$resolved_line"
+    fi
+}
+
+_dns_verify_resolution() {
+    local test_domain="cloudflare.com"
+    local out server answer
+
+    _dns_ensure_lookup_tool || true
+    _info "正在使用系统默认解析器验证 DNS..."
+
+    if command -v dig >/dev/null 2>&1; then
+        out=$(dig +time=3 +tries=1 "$test_domain" 2>/dev/null || true)
+        server=$(echo "$out" | awk -F': ' '/^;; SERVER:/{print $2; exit}')
+        answer=$(echo "$out" | awk '/^[^;].*[[:space:]]IN[[:space:]]A[[:space:]]/ {print $5; exit}')
+        if [ -n "$server" ]; then
+            printf "    dig SERVER: ${CYAN}%s${PLAIN}\n" "$server"
+        fi
+        if [ -n "$answer" ]; then
+            _info "dig 解析成功: ${test_domain} -> ${answer}"
+            return 0
+        fi
+        _warn "dig 未返回 A 记录，继续尝试 nslookup..."
+    fi
+
+    if command -v nslookup >/dev/null 2>&1; then
+        out=$(nslookup "$test_domain" 2>/dev/null || true)
+        server=$(echo "$out" | awk '/^Server:/{print $2; exit}')
+        answer=$(echo "$out" | awk '/^Address: /{print $2}' | tail -1)
+        if [ -n "$server" ]; then
+            printf "    nslookup Server: ${CYAN}%s${PLAIN}\n" "$server"
+        fi
+        if [ -n "$answer" ]; then
+            _info "nslookup 解析成功: ${test_domain} -> ${answer}"
+            return 0
+        fi
+    fi
+
+    _warn "DNS 验证未返回有效结果，请检查网络连通性或手动执行 dig/nslookup 复核。"
+    return 1
+}
+
+_dns_benchmark_query_time() {
+    local server="$1"
+    local domain="$2"
+    local out status query_time
+
+    out=$(dig "@${server}" "${domain}" A +time=2 +tries=1 2>/dev/null || true)
+    status=$(echo "$out" | awk -F'status: ' '/status:/{print $2; exit}' | cut -d',' -f1)
+    query_time=$(echo "$out" | awk '/Query time:/{print $4; exit}')
+
+    if [ "$status" = "NOERROR" ] && _is_digit "${query_time:-}"; then
+        printf '%s' "$query_time"
+        return 0
+    fi
+
+    printf '%s' "timeout"
+    return 1
+}
+
+_dns_benchmark_show_ms() {
+    local ms="$1"
+    if _is_digit "$ms"; then
+        printf "%s ms" "$ms"
+    else
+        printf "timeout"
+    fi
+}
+
+_dns_benchmark_print_group_table() {
+    local title="$1"
+    local test_domain="$2"
+    shift 2
+    local entries=("$@")
+    local tmp_file entry name server query_time ecs_flag score
+    local ms_show ecs_show
+
+    tmp_file=$(mktemp)
+
+    echo ""
+    printf "  ${BOLD}[ %s ]${PLAIN}\n" "$title"
+    printf "    测试域名: ${CYAN}%s${PLAIN}\n" "$test_domain"
+    _separator
+    printf "    %-16s %-16s %-12s %-8s\n" "DNS" "地址" "延迟" "ECS"
+
+    for entry in "${entries[@]}"; do
+        name="${entry%%|*}"
+        server="${entry#*|}"
+        server="${server%%|*}"
+        ecs_flag="${entry##*|}"
+        query_time=$(_dns_benchmark_query_time "$server" "$test_domain")
+        if _is_digit "$query_time"; then
+            score="$query_time"
+        else
+            score="99999"
+        fi
+        printf '%s|%s|%s|%s|%s\n' "$score" "$name" "$server" "$query_time" "$ecs_flag" >> "$tmp_file"
+    done
+
+    while IFS='|' read -r score name server query_time ecs_flag; do
+        ms_show=$(_dns_benchmark_show_ms "$query_time")
+        if [ "$ecs_flag" = "yes" ]; then
+            ecs_show="支持"
+        else
+            ecs_show="-"
+        fi
+        printf "    %-16s %-16s %-12s %-8s\n" "$name" "$server" "$ms_show" "$ecs_show"
+    done < <(sort -t'|' -k1,1n -k2,2 "$tmp_file")
+
+    rm -f "$tmp_file"
+}
+
+_dns_benchmark_mainstream() {
+    local cn_dns=(
+        "AliDNS|223.5.5.5|yes"
+        "AliDNS-2|223.6.6.6|yes"
+        "DNSPod|119.29.29.29|yes"
+        "114DNS|114.114.114.114|no"
+        "114DNS-2|114.114.115.115|no"
+        "BaiduDNS|180.76.76.76|no"
+    )
+
+    local global_dns=(
+        "Google|8.8.8.8|yes"
+        "Google-2|8.8.4.4|yes"
+        "Cloudflare|1.1.1.1|no"
+        "Cloudflare-2|1.0.0.1|no"
+        "Quad9|9.9.9.9|no"
+        "OpenDNS|208.67.222.222|no"
+        "AdGuard|94.140.14.14|no"
+    )
+
+    local ecs_dns=(
+        "AliDNS-ECS|223.5.5.5|yes"
+        "AliDNS-ECS2|223.6.6.6|yes"
+        "DNSPod-ECS|119.29.29.29|yes"
+        "Google-ECS|8.8.8.8|yes"
+        "Google-ECS2|8.8.4.4|yes"
+    )
+
+    echo ""
+    _info "DNS 测速基于 dig 请求延迟（单位 ms）"
+    _warn "结果受线路、运营商缓存、网络波动影响，建议多测几次取平均。"
+
+    _dns_ensure_lookup_tool || true
+    if ! command -v dig >/dev/null 2>&1; then
+        _error_no_exit "测速依赖 dig，当前环境不可用，请先安装后重试。"
+        _press_any_key
+        return
+    fi
+
+    while true; do
+        echo ""
+        printf "  请选择测速分组:\n"
+        _separator
+        printf "    ${GREEN}1${PLAIN}) 国内 DNS 组                     ${DIM}— 测试域名: qq.com${PLAIN}\n"
+        printf "    ${GREEN}2${PLAIN}) 国外 DNS 组                     ${DIM}— 测试域名: google.com${PLAIN}\n"
+        printf "    ${GREEN}3${PLAIN}) ECS DNS 组                      ${DIM}— 常见支持 ECS 的 DNS${PLAIN}\n"
+        echo ""
+        printf "    ${RED}0${PLAIN}) 返回上一层\n"
+        echo ""
+
+        local group_choice
+        read -rp "  请输入选项 [0-3]: " group_choice
+        case "$group_choice" in
+            1)
+                _dns_benchmark_print_group_table "国内 DNS 组测速（ECS 标记）" "qq.com" "${cn_dns[@]}"
+                _press_any_key
+                return
+                ;;
+            2)
+                _dns_benchmark_print_group_table "国外 DNS 组测速（ECS 标记，含 9.9.9.9）" "google.com" "${global_dns[@]}"
+                _press_any_key
+                return
+                ;;
+            3)
+                _dns_benchmark_print_group_table "ECS DNS 组测速（qq.com）" "qq.com" "${ecs_dns[@]}"
+                _dns_benchmark_print_group_table "ECS DNS 组测速（google.com）" "google.com" "${ecs_dns[@]}"
+                _press_any_key
+                return
+                ;;
+            0) return ;;
+            *) _error_no_exit "无效选项: ${group_choice}"; sleep 1 ;;
+        esac
+    done
+}
+
+_dns_change_flow() {
+    local mode="$1"
+    local dns_input clear_existing
+
+    echo ""
+    read -rp "  是否清除现有 DNS，仅保留你输入的新 DNS? [Y/n]: " clear_existing
+    echo ""
+    read -rp "  请输入 DNS（空格/逗号分隔，如 1.1.1.1,8.8.8.8）: " dns_input
+    if ! _dns_parse_servers "$dns_input"; then
+        _press_any_key
+        return
+    fi
+
+    _DNS_CLEAR_EXISTING=1
+    if [[ "$clear_existing" =~ ^([Nn]|[Nn][Oo])$ ]]; then
+        _DNS_CLEAR_EXISTING=0
+        _dns_merge_existing_servers
+    fi
+
+    _info "将应用 DNS: ${_DNS_SERVERS[*]}"
+    echo ""
+    if [ "$mode" = "temporary" ]; then
+        _dns_apply_temporary || true
+    else
+        _dns_apply_permanent || true
+    fi
+
+    _dns_show_current_config
+    echo ""
+    _dns_verify_resolution || true
+    _press_any_key
+}
+
+_dns_manage() {
+    while true; do
+        _header "Linux DNS 管理"
+        _dns_show_current_config
+
+        echo ""
+        printf "  请选择操作:\n"
+        _separator
+        printf "    ${GREEN}1${PLAIN}) 临时修改 DNS                    ${DIM}— 重启或重连后可能失效${PLAIN}\n"
+        printf "    ${GREEN}2${PLAIN}) 永久修改 DNS                    ${DIM}— 持久化并重启相关组件${PLAIN}\n"
+        printf "    ${GREEN}3${PLAIN}) 仅验证当前 DNS                  ${DIM}— 使用 dig/nslookup 测试${PLAIN}\n"
+        printf "    ${GREEN}4${PLAIN}) 主流 DNS 测速                   ${DIM}— 先选国内/国外/ECS 分组${PLAIN}\n"
+        echo ""
+        printf "    ${RED}0${PLAIN}) 返回主菜单\n"
+        echo ""
+
+        local choice
+        read -rp "  请输入选项 [0-4]: " choice
+        case "$choice" in
+            1) _dns_change_flow "temporary" ;;
+            2) _dns_change_flow "permanent" ;;
+            3)
+                echo ""
+                _dns_verify_resolution || true
+                _press_any_key
+                ;;
+            4) _dns_benchmark_mainstream ;;
+            0) return ;;
+            *) _error_no_exit "无效选项: ${choice}"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- 12. Swap 管理 ---
 
 _swap_human_readable() {
     local bytes=$1
@@ -3412,8 +4862,10 @@ _show_main_menu() {
     printf "    ${GREEN}7${PLAIN}) Docker 日志轮转                 ${DIM}— 限制容器日志大小${PLAIN}\n"
     printf "    ${GREEN}8${PLAIN}) Mihomo 管理                     ${DIM}— 安装/配置/重启${PLAIN}\n"
     printf "    ${GREEN}9${PLAIN}) Sing-Box 管理                   ${DIM}— 安装/自启/重启${PLAIN}\n"
+    printf "    ${GREEN}10${PLAIN}) Akile DNS 解锁检测             ${DIM}— DNS 媒体解锁测速${PLAIN}\n"
+    printf "    ${GREEN}11${PLAIN}) Linux DNS 管理                 ${DIM}— 临时/永久修改 DNS${PLAIN}\n"
     printf "  ${BOLD}[ 系统 ]${PLAIN}\n"
-    printf "    ${GREEN}10${PLAIN}) Swap 管理                      ${DIM}— 创建/删除 Swap${PLAIN}\n"
+    printf "    ${GREEN}12${PLAIN}) Swap 管理                      ${DIM}— 创建/删除 Swap${PLAIN}\n"
     echo ""
     printf "    ${GREEN}u${PLAIN}) 更新 VPSGo                      ${DIM}— 从 GitHub 拉取最新版${PLAIN}\n"
     printf "    ${RED}x${PLAIN}) 卸载 VPSGo                      ${DIM}— 卸载${PLAIN}\n"
@@ -3443,7 +4895,9 @@ main() {
             7) _dockerlog_setup ;;
             8) _mihomo_manage ;;
             9) _singbox_manage ;;
-            10) _swap_setup ;;
+            10) _akdns_setup ;;
+            11) _dns_manage ;;
+            12) _swap_setup ;;
             u|U) _self_update ;;
             x|X) _self_uninstall ;;
             0)
