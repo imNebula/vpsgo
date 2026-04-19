@@ -1,0 +1,27 @@
+# mihomo 服务端配置
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: true
+
+dns:
+  enable: true
+  ipv6: true
+  nameserver:
+    - system
+
+listeners:
+  - name: ss2022-in-443
+    tag: "ss_relay_9e60db34"
+    type: shadowsocks
+    port: 443
+    listen: "::"
+    cipher: 2022-blake3-aes-128-gcm
+    password: "+WMkhygar2hXzlr7kr36jw=="
+    users:
+      "direct": "+WMkhygar2hXzlr7kr36jw=="
+    udp: true
+
+rules:
+  - MATCH,DIRECT
+# vpsgo-ipv4-google: off
