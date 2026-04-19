@@ -34,7 +34,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.27"
+VERSION="2.28"
 
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
@@ -4046,7 +4046,7 @@ _mihomoconf_setup() {
     local SS_COUNT=0 ANYTLS_COUNT=0 HY2_COUNT=0
     local SS_REPLACE="n" ANYTLS_REPLACE="n" HY2_REPLACE="n"
 
-    local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
+    local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=() SS_SERVER_PASSWORDS=()
     local SS_CIPHER=""
     local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0"
     local -a ANYTLS_PORTS=() ANYTLS_TAGS=() ANYTLS_USER_ROWS=()
@@ -4417,6 +4417,7 @@ _mihomoconf_setup() {
                 _ss_tag="${SS_TAGS[$i]}"
                 _ss_primary_pass=""
                 _ss_server_pass=$(_mihomoconf_gen_ss_password_for_cipher "$SS_CIPHER")
+                SS_SERVER_PASSWORDS[$i]="$_ss_server_pass"
                 _ss_has_user=0
                 cat >> "$_target_file" <<MIHOMOCONF_SS_EOF
   - name: ss2022-in-${_ss_port}
@@ -4604,7 +4605,11 @@ MIHOMOCONF_HEADER
                 [[ "$_li" == "$i" ]] || continue
                 _user_idx=$((_user_idx + 1))
                 _ss_client_name="${_ss_name}-${_u_name}"
-                SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_HOST" "$_ss_port" "$SS_CIPHER" "$_u_pass" "$_ss_client_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
+                local _client_pass="${_u_pass}"
+                if [[ "$SS_CIPHER" == *"2022"* ]]; then
+                    _client_pass="${SS_SERVER_PASSWORDS[$i]}:${_u_pass}"
+                fi
+                SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_HOST" "$_ss_port" "$SS_CIPHER" "$_client_pass" "$_ss_client_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_user_idx" "$_u_name"
                 printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
                 printf "  ${BOLD}SS2022 分享链接:${PLAIN}\n"
@@ -4617,7 +4622,7 @@ MIHOMOCONF_HEADER
         server: ${SERVER_HOST}
         port: ${_ss_port}
         cipher: ${SS_CIPHER}
-        password: "${_u_pass}"
+        password: "${_client_pass}"
 MIHOMOCONF_SS_YAML
                 printf "        udp: %s\n" "$_ss_udp_bool"
                 printf "        tfo: true\n"
@@ -5381,14 +5386,18 @@ _mihomo_read_config() {
                     [[ "$SS_EXPORT_UOT" == "1" ]] && SS_EXPORT_UOT_BOOL="true" || SS_EXPORT_UOT_BOOL="false"
                     SS_EXPORT_ASKED="1"
                 fi
-                local ss_found=0 ss_link ss_name ss_user ss_pass
+                local ss_found=0 ss_link ss_name ss_user ss_pass ss_client_pass
                 while IFS=$'\x1f' read -r ss_user ss_pass; do
                     [[ -z "${ss_user:-}" || -z "${ss_pass:-}" ]] && continue
                     ss_found=1
+                    ss_client_pass="$ss_pass"
+                    if [[ "$cipher" == *"2022"* ]]; then
+                        ss_client_pass="${password}:${ss_pass}"
+                    fi
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
                     ss_name="$(_mihomoconf_make_node_name "SS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${ss_user}"
-                    ss_link=$(_mihomoconf_gen_ss_link "$server_ip" "$port" "$cipher" "$ss_pass" "$ss_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
+                    ss_link=$(_mihomoconf_gen_ss_link "$server_ip" "$port" "$cipher" "$ss_client_pass" "$ss_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
                     _separator
                     printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$ss_name"
                     printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
@@ -5402,7 +5411,7 @@ _mihomo_read_config() {
       "server": "${server_ip}",
       "server_port": ${port},
       "method": "${cipher}",
-      "password": "${ss_pass}",
+      "password": "${ss_client_pass}",
       "udp": ${SS_EXPORT_UDP_BOOL},
       "udp_over_tcp": { "enabled": ${SS_EXPORT_UOT_BOOL}, "version": 2 }
     }
