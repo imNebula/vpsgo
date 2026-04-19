@@ -34,7 +34,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.29"
+VERSION="2.30"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -4045,7 +4045,7 @@ _mihomoconf_setup() {
     local SS_COUNT=0 ANYTLS_COUNT=0 HY2_COUNT=0
     local SS_REPLACE="n" ANYTLS_REPLACE="n" HY2_REPLACE="n"
 
-    local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=() SS_SERVER_PASSWORDS=()
+    local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
     local SS_CIPHER=""
     local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0"
     local -a ANYTLS_PORTS=() ANYTLS_TAGS=() ANYTLS_USER_ROWS=()
@@ -4209,22 +4209,23 @@ _mihomoconf_setup() {
             2) SS_CIPHER="2022-blake3-aes-256-gcm" ;;
             *) _error_no_exit "无效选项"; _press_any_key; return ;;
         esac
-        local i _user_rows _u_name _u_pass _ss_user_total=0 _ss_pw_style
-        if [[ "$SS_CIPHER" == "2022-blake3-aes-128-gcm" ]]; then
-            _ss_pw_style="ss128"
-        else
-            _ss_pw_style="ss256"
-        fi
+        local i _u_name _u_pass
         for i in "${!SS_PORTS[@]}"; do
             SS_TAGS+=("$(_mihomoconf_gen_listener_tag "ss_relay")")
-            _user_rows=$(_mihomoconf_collect_users_input "SS2022 #$((i + 1))" "" "$_ss_pw_style")
-            while IFS=$'\t' read -r _u_name _u_pass; do
-                [[ -z "${_u_name:-}" || -z "${_u_pass:-}" ]] && continue
-                SS_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_pass}")
-                _ss_user_total=$((_ss_user_total + 1))
-            done <<< "$_user_rows"
+            read -rp "    SS2022 #$((i + 1)) 用户名 [留空自动生成]: " _u_name < /dev/tty
+            _u_name=$(_mihomoconf_trim "${_u_name:-}")
+            if [[ -z "$_u_name" ]]; then
+                _u_name="user-$(_mihomoconf_gen_uuid | cut -d'-' -f1)"
+                _info "已自动生成用户名: ${_u_name}"
+            elif ! _mihomoconf_is_valid_username "$_u_name"; then
+                _warn "用户名无效，仅支持字母/数字/.-_，已自动生成"
+                _u_name="user-$(_mihomoconf_gen_uuid | cut -d'-' -f1)"
+                _info "自动生成用户名: ${_u_name}"
+            fi
+            _u_pass=$(_mihomoconf_gen_ss_password_for_cipher "$SS_CIPHER")
+            SS_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_pass}")
         done
-        _info "SS2022 已生成 ${#SS_PORTS[@]} 个入站，共 ${_ss_user_total} 个 user"
+        _info "SS2022 已生成 ${#SS_PORTS[@]} 个入站节点"
     fi
 
     # ---- AnyTLS 配置 ----
@@ -4409,43 +4410,30 @@ _mihomoconf_setup() {
         local _ss_port _ss_tag
         local _anytls_port _anytls_tag
         local _hy2_port _hy2_tag _hy2_mport _hy2_obfs_password
-        local _row _li _u_name _u_pass _ss_primary_pass _ss_server_pass _ss_has_user
+        local _row _li _u_name _u_pass
         if [[ "$ENABLE_SS" == "y" ]]; then
             for i in "${!SS_PORTS[@]}"; do
                 _ss_port="${SS_PORTS[$i]}"
                 _ss_tag="${SS_TAGS[$i]}"
-                _ss_primary_pass=""
-                _ss_server_pass=$(_mihomoconf_gen_ss_password_for_cipher "$SS_CIPHER")
-                SS_SERVER_PASSWORDS[$i]="$_ss_server_pass"
-                _ss_has_user=0
+                _u_name="" _u_pass=""
+                for _row in "${SS_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                    [[ "$_li" == "$i" ]] && break
+                done
+                if [[ -z "$_u_pass" ]]; then
+                    _u_pass=$(_mihomoconf_gen_ss_password_for_cipher "$SS_CIPHER")
+                    _u_name="direct"
+                fi
                 cat >> "$_target_file" <<MIHOMOCONF_SS_EOF
-  - name: ss2022-in-${_ss_port}
+  - name: ss2022-${_u_name}-${_ss_port}
     tag: "${_ss_tag}"
     type: shadowsocks
     port: ${_ss_port}
     listen: "::"
     cipher: ${SS_CIPHER}
+    password: "${_u_pass}"
+    udp: true
 MIHOMOCONF_SS_EOF
-                for _row in "${SS_USER_ROWS[@]}"; do
-                    IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
-                    [[ "$_li" == "$i" ]] || continue
-                    [[ -n "$_u_pass" && -z "$_ss_primary_pass" ]] && _ss_primary_pass="$_u_pass"
-                done
-                if [[ -z "$_ss_primary_pass" ]]; then
-                    _ss_primary_pass=$(_mihomoconf_gen_ss_password_for_cipher "$SS_CIPHER")
-                fi
-                printf "    password: \"%s\"\n" "$_ss_server_pass" >> "$_target_file"
-                printf "    users:\n" >> "$_target_file"
-                for _row in "${SS_USER_ROWS[@]}"; do
-                    IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
-                    [[ "$_li" == "$i" ]] || continue
-                    _ss_has_user=1
-                    printf "      \"%s\": \"%s\"\n" "$_u_name" "$_u_pass" >> "$_target_file"
-                done
-                if [[ "$_ss_has_user" -eq 0 ]]; then
-                    printf "      \"direct\": \"%s\"\n" "$_ss_primary_pass" >> "$_target_file"
-                fi
-                printf "    udp: true\n" >> "$_target_file"
             done
         fi
         if [[ "$ENABLE_ANYTLS" == "y" ]]; then
@@ -4587,51 +4575,47 @@ MIHOMOCONF_HEADER
         [[ "$SS_EXPORT_UOT" == "1" ]] && _ss_uot_bool="true" || _ss_uot_bool="false"
 
         printf "  ${BOLD}SS2022 连接信息 (%s 个)${PLAIN}\n" "${#SS_PORTS[@]}"
-        local i SS_LINK _ss_port _ss_tag _ss_name _ss_client_name _row _li _u_name _u_pass _user_idx
+        local i SS_LINK _ss_port _ss_tag _ss_name _ss_client_name _row _li _u_name _u_pass
         for i in "${!SS_PORTS[@]}"; do
             _ss_port="${SS_PORTS[$i]}"
             _ss_tag="${SS_TAGS[$i]}"
             _ss_name=$(_mihomoconf_make_node_name "SS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _u_name="" _u_pass=""
+            for _row in "${SS_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                [[ "$_li" == "$i" ]] && break
+            done
+            if [[ -z "$_u_pass" ]]; then
+                _warn "  SS2022 入站 ${_ss_tag} 未配置用户，已跳过导出"
+                continue
+            fi
+            _ss_client_name="${_ss_name}-${_u_name}"
+            SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_HOST" "$_ss_port" "$SS_CIPHER" "$_u_pass" "$_ss_client_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
             _separator
-            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_ss_name"
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_ss_client_name"
             printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_ss_tag"
             printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
             printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_ss_port"
             printf "      加密   : ${GREEN}%s${PLAIN}\n" "$SS_CIPHER"
-            _user_idx=0
-            for _row in "${SS_USER_ROWS[@]}"; do
-                IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
-                [[ "$_li" == "$i" ]] || continue
-                _user_idx=$((_user_idx + 1))
-                _ss_client_name="${_ss_name}-${_u_name}"
-                local _client_pass="${_u_pass}"
-                if [[ "$SS_CIPHER" == *"2022"* ]]; then
-                    _client_pass="${_u_pass}:${SS_SERVER_PASSWORDS[$i]}"
-                fi
-                SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_HOST" "$_ss_port" "$SS_CIPHER" "$_client_pass" "$_ss_client_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
-                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_user_idx" "$_u_name"
-                printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
-                printf "  ${BOLD}SS2022 分享链接:${PLAIN}\n"
-                printf "  ${GREEN}%s${PLAIN}\n" "$SS_LINK"
-                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
-                cat <<MIHOMOCONF_SS_YAML
+            printf "      用户   : ${GREEN}%s${PLAIN}\n" "$_u_name"
+            printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
+            printf "  ${BOLD}SS2022 分享链接:${PLAIN}\n"
+            printf "  ${GREEN}%s${PLAIN}\n" "$SS_LINK"
+            printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+            cat <<MIHOMOCONF_SS_YAML
     proxies:
       - name: "${_ss_client_name}"
         type: ss
         server: ${SERVER_HOST}
         port: ${_ss_port}
         cipher: ${SS_CIPHER}
-        password: "${_client_pass}"
+        password: "${_u_pass}"
 MIHOMOCONF_SS_YAML
-                printf "        udp: %s\n" "$_ss_udp_bool"
-                printf "        tfo: true\n"
-                printf "        udp-over-tcp: %s\n" "$_ss_uot_bool"
-                if [[ "$SS_EXPORT_UOT" == "1" ]]; then
-                    printf "        udp-over-tcp-version: 2\n"
-                fi
-            done
-            if [[ "$_user_idx" -eq 0 ]]; then
-                _warn "  SS2022 入站 ${_ss_tag} 未配置 user，已跳过导出"
+            printf "        udp: %s\n" "$_ss_udp_bool"
+            printf "        tfo: true\n"
+            printf "        udp-over-tcp: %s\n" "$_ss_uot_bool"
+            if [[ "$SS_EXPORT_UOT" == "1" ]]; then
+                printf "        udp-over-tcp-version: 2\n"
             fi
         done
     fi
@@ -5385,53 +5369,26 @@ _mihomo_read_config() {
                     [[ "$SS_EXPORT_UOT" == "1" ]] && SS_EXPORT_UOT_BOOL="true" || SS_EXPORT_UOT_BOOL="false"
                     SS_EXPORT_ASKED="1"
                 fi
-                local ss_found=0 ss_link ss_name ss_user ss_pass ss_client_pass
-                while IFS=$'\x1f' read -r ss_user ss_pass; do
-                    [[ -z "${ss_user:-}" || -z "${ss_pass:-}" ]] && continue
-                    ss_found=1
-                    ss_client_pass="$ss_pass"
-                    if [[ "$cipher" == *"2022"* ]]; then
-                        ss_client_pass="${ss_pass}:${password}"
-                    fi
-                    export_count=$((export_count + 1))
-                    listener_export=$((listener_export + 1))
-                    ss_name="$(_mihomoconf_make_node_name "SS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${ss_user}"
-                    ss_link=$(_mihomoconf_gen_ss_link "$server_ip" "$port" "$cipher" "$ss_client_pass" "$ss_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
-                    _separator
-                    printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$ss_name"
-                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
-                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$ss_user"
-                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_link"
-                    printf "    JSON:\n"
-                    cat <<MIHOMO_SS2022_JSON
-    {
-      "type": "shadowsocks",
-      "tag": "${ss_name}",
-      "server": "${server_ip}",
-      "server_port": ${port},
-      "method": "${cipher}",
-      "password": "${ss_client_pass}",
-      "udp": ${SS_EXPORT_UDP_BOOL},
-      "udp_over_tcp": { "enabled": ${SS_EXPORT_UOT_BOOL}, "version": 2 }
-    }
-MIHOMO_SS2022_JSON
-                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
-                if [[ "$ss_found" -eq 0 ]]; then
-                    # 兼容历史单密码配置
-                    if [[ -z "$password" ]]; then
-                        _warn "跳过 ${name}: 未配置可用 user/密码"
-                        continue
-                    fi
-                    export_count=$((export_count + 1))
-                    listener_export=$((listener_export + 1))
-                    ss_name=$(_mihomoconf_make_node_name "SS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
-                    ss_link=$(_mihomoconf_gen_ss_link "$server_ip" "$port" "$cipher" "$password" "$ss_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
-                    _separator
-                    printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$ss_name"
-                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
-                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_link"
-                    printf "    JSON:\n"
-                    cat <<MIHOMO_SS2022_JSON
+                local ss_link ss_name ss_user_name
+                if [[ -z "$password" ]]; then
+                    _warn "跳过 ${name}: 未配置密码"
+                    continue
+                fi
+                # 从 listener name 解析用户名 (ss2022-<user>-<port>)
+                ss_user_name="${name#ss2022-}"
+                ss_user_name="${ss_user_name%-*}"
+                [[ -z "$ss_user_name" || "$ss_user_name" == "$name" ]] && ss_user_name="$name"
+                export_count=$((export_count + 1))
+                listener_export=$((listener_export + 1))
+                ss_name="$(_mihomoconf_make_node_name "SS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${ss_user_name}"
+                ss_link=$(_mihomoconf_gen_ss_link "$server_ip" "$port" "$cipher" "$password" "$ss_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
+                _separator
+                printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$ss_name"
+                printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                printf "    用户: ${GREEN}%s${PLAIN}\n" "$ss_user_name"
+                printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_link"
+                printf "    JSON:\n"
+                cat <<MIHOMO_SS2022_JSON
     {
       "type": "shadowsocks",
       "tag": "${ss_name}",
@@ -5443,8 +5400,6 @@ MIHOMO_SS2022_JSON
       "udp_over_tcp": { "enabled": ${SS_EXPORT_UOT_BOOL}, "version": 2 }
     }
 MIHOMO_SS2022_JSON
-                    _warn "提示: 该 SS2022 入站为旧 password 模式，建议迁移到 users 模式"
-                fi
                 ;;
             anytls)
                 if [[ -z "$port" ]]; then
@@ -6352,14 +6307,8 @@ _mihomochain_add_or_update_user_rule() {
     fi
 
     if [[ "$resolved_type" == "shadowsocks" ]]; then
-        user_pass=$(_mihomoconf_user_password_by_tag "$config_file" "$resolved_tag" "$username" 2>/dev/null || true)
-        [[ -n "$user_pass" ]] || return 1
-        _mihomoconf_add_or_update_listener_user "$config_file" "$resolved_tag" "$username" "$user_pass" >/dev/null 2>&1 || return 1
-        resolved_user_count=$(_mihomoconf_count_users_by_tag "$config_file" "$resolved_tag")
-        if [[ "${resolved_user_count:-0}" == "1" ]]; then
-            _mihomochain_add_or_update_rule "$resolved_tag" "$out_tag"
-            return $?
-        fi
+        _mihomochain_add_or_update_rule "$resolved_tag" "$out_tag"
+        return $?
     fi
 
     tmp_other=$(mktemp)
@@ -6399,12 +6348,7 @@ _mihomochain_normalize_rules_for_compat() {
             if IFS=$'\x1f' read -r listener_tag listener_name listener_type listener_cipher listener_password \
                 < <(_mihomoconf_listener_meta_by_tag "$config_file" "$listener_tag"); then
                 if [[ "$listener_type" == "shadowsocks" ]]; then
-                    user_pass=$(_mihomoconf_user_password_by_tag "$config_file" "$listener_tag" "$username" 2>/dev/null || true)
-                    if [[ -n "$user_pass" ]]; then
-                        _mihomoconf_add_or_update_listener_user "$config_file" "$listener_tag" "$username" "$user_pass" >/dev/null 2>&1 || true
-                    fi
-                    user_count=$(_mihomoconf_count_users_by_tag "$config_file" "$listener_tag")
-                    if [[ "${user_count:-0}" == "1" && -n "$listener_name" ]]; then
+                    if [[ -n "$listener_name" ]]; then
                         tmp_rewrite=$(mktemp)
                         awk -F'\037' -v n="$listener_name" '$1!=n { print }' "$tmp_name_new" > "$tmp_rewrite"
                         mv "$tmp_rewrite" "$tmp_name_new"
@@ -7690,7 +7634,7 @@ _mihomo_chain_proxy_manage() {
                     l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag; do
                     [[ -z "${l_name:-}" ]] && continue
                     case "$l_type" in
-                        shadowsocks|anytls|hysteria2|hy2) ;;
+                        anytls|hysteria2|hy2) ;;
                         *) continue ;;
                     esac
                     l_listener_tag="${l_listener_tag:-$l_name}"
@@ -7708,7 +7652,7 @@ _mihomo_chain_proxy_manage() {
                         "$idx" "$l_name" "$l_type" "${l_port:-N/A}" "$user_count"
                 done < <(_mihomoconf_read_listener_rows "$config_file")
                 if (( ${#add_listener_tags[@]} == 0 )); then
-                    _warn "未找到支持 users 的入站节点 (SS2022/AnyTLS/HY2)"
+                    _warn "未找到支持 users 的入站节点 (AnyTLS/HY2)"
                     _press_any_key
                     continue
                 fi
@@ -7772,7 +7716,7 @@ _mihomo_chain_proxy_manage() {
                 if [[ "$add_result" -ne 0 ]]; then
                     case "$add_result" in
                         2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
-                        3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 SS2022/AnyTLS/HY2）" ;;
+                        3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2）" ;;
                         *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
                     esac
                     _press_any_key
