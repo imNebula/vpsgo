@@ -34,8 +34,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.28"
-
+VERSION="2.29"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -4607,7 +4606,7 @@ MIHOMOCONF_HEADER
                 _ss_client_name="${_ss_name}-${_u_name}"
                 local _client_pass="${_u_pass}"
                 if [[ "$SS_CIPHER" == *"2022"* ]]; then
-                    _client_pass="${SS_SERVER_PASSWORDS[$i]}:${_u_pass}"
+                    _client_pass="${_u_pass}:${SS_SERVER_PASSWORDS[$i]}"
                 fi
                 SS_LINK=$(_mihomoconf_gen_ss_link "$SERVER_HOST" "$_ss_port" "$SS_CIPHER" "$_client_pass" "$_ss_client_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_user_idx" "$_u_name"
@@ -5392,7 +5391,7 @@ _mihomo_read_config() {
                     ss_found=1
                     ss_client_pass="$ss_pass"
                     if [[ "$cipher" == *"2022"* ]]; then
-                        ss_client_pass="${password}:${ss_pass}"
+                        ss_client_pass="${ss_pass}:${password}"
                     fi
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
