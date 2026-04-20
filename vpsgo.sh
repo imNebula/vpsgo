@@ -34,7 +34,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.33"
+VERSION="2.34"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -1474,6 +1474,7 @@ _TCPTUNE_CAKE_OPENRC_SERVICE_NAME="vpsgo-tc-cake"
 _TCPTUNE_CAKE_OPENRC_SERVICE_FILE="/etc/init.d/${_TCPTUNE_CAKE_OPENRC_SERVICE_NAME}"
 _TCPTUNE_CAKE_APPLY_SCRIPT="/usr/local/bin/vpsgo-apply-cake.sh"
 _TCPTUNE_LAST_BACKUP_FILE=""
+_TCPTUNE_LAST_BACKUP_DIR=""
 _TCPTUNE_LAST_IFACE=""
 _TCPTUNE_LAST_CEILING_BYTES=$((64 * 1024 * 1024))
 _TCPTUNE_LAST_QDISC_MODE="fq"
@@ -1867,10 +1868,82 @@ _tcptune_ensure_bbr_available() {
     return 1
 }
 
+_tcptune_backup_safe_name() {
+    printf '%s' "$1" | sed 's#^/##; s#[/ ]#_#g; s#[^A-Za-z0-9._-]#_#g'
+}
+
+_tcptune_backup_meta_get() {
+    local backup_dir="$1" key="$2" default="${3:-}" meta_file value
+    meta_file="${backup_dir}/meta.env"
+    [[ -r "$meta_file" ]] || {
+        printf '%s' "$default"
+        return 0
+    }
+    value=$(awk -F= -v k="$key" '$1 == k { print substr($0, index($0, "=") + 1) }' "$meta_file" 2>/dev/null | tail -n1)
+    if [[ -z "${value:-}" ]]; then
+        value="$default"
+    fi
+    printf '%s' "$value"
+}
+
+_tcptune_backup_manifest_has_path() {
+    local backup_dir="$1" path="$2" manifest
+    manifest="${backup_dir}/file_manifest.tsv"
+    [[ -r "$manifest" ]] || return 1
+    awk -F'\t' -v p="$path" '$1 == p { found=1 } END { exit(found ? 0 : 1) }' "$manifest"
+}
+
+_tcptune_backup_register_file() {
+    local backup_dir="$1" path="$2" manifest files_dir rel_name
+    [[ -n "$backup_dir" && -n "$path" ]] || return 0
+    manifest="${backup_dir}/file_manifest.tsv"
+    files_dir="${backup_dir}/files"
+
+    if _tcptune_backup_manifest_has_path "$backup_dir" "$path"; then
+        return 0
+    fi
+
+    mkdir -p "$files_dir" || return 1
+    rel_name=$(_tcptune_backup_safe_name "$path")
+    if [ -f "$path" ]; then
+        cp -p "$path" "${files_dir}/${rel_name}" 2>/dev/null || cp "$path" "${files_dir}/${rel_name}" || return 1
+        printf '%s\tpresent\tfiles/%s\n' "$path" "$rel_name" >> "$manifest"
+    else
+        printf '%s\tabsent\t-\n' "$path" >> "$manifest"
+    fi
+}
+
+_tcptune_detect_cake_bandwidth() {
+    local iface="$1" qdisc_output bw value unit
+    [ -n "$iface" ] || return 1
+    command -v tc >/dev/null 2>&1 || return 1
+
+    qdisc_output=$(tc qdisc show dev "$iface" 2>/dev/null || true)
+    bw=$(printf '%s\n' "$qdisc_output" | sed -nE 's/.*\bcake\b.*\bbandwidth[[:space:]]+([0-9]+)([KMG])bit.*/\1 \2/p' | head -n1)
+    [ -n "$bw" ] || return 1
+
+    value="${bw%% *}"
+    unit="${bw##* }"
+    case "$unit" in
+        G) printf '%s' $((value * 1000)) ;;
+        M) printf '%s' "$value" ;;
+        K) printf '%s' $((value / 1000)) ;;
+        *) return 1 ;;
+    esac
+}
+
 _tcptune_backup_runtime() {
-    local iface="$1" backup_file
+    local iface="$1" backup_dir backup_file meta_file qdisc_mode cake_bw
     mkdir -p "$_TCPTUNE_BACKUP_DIR"
-    backup_file="${_TCPTUNE_BACKUP_DIR}/sysctl_backup_$(date +%Y%m%d_%H%M%S).conf"
+    backup_dir="${_TCPTUNE_BACKUP_DIR}/backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$backup_dir" || return 1
+    backup_file="${backup_dir}/sysctl_snapshot.conf"
+    meta_file="${backup_dir}/meta.env"
+    qdisc_mode=$(_tcptune_detect_qdisc_mode "$iface")
+    cake_bw=$(_tcptune_detect_cake_bandwidth "$iface" 2>/dev/null || true)
+    if ! _is_digit "${cake_bw:-}" || [ "$cake_bw" -le 0 ]; then
+        cake_bw=0
+    fi
     {
         printf "# TCP Tuning Backup - %s\n" "$(date)"
         printf "# Kernel: %s\n" "$(uname -r)"
@@ -1879,8 +1952,21 @@ _tcptune_backup_runtime() {
         sysctl -a 2>/dev/null | grep -E "^net\.(core\.(rmem|wmem|somaxconn|netdev_max_backlog|netdev_budget|default_qdisc|busy_(poll|read)|optmem_max)|ipv4\.tcp_(rmem|wmem|congestion|frto|slow_start|notsent|window_scaling|timestamps|sack|moderate|mtu_probing|limit_output_bytes|fastopen|fin_timeout|keepalive|max_tw|tw_reuse|max_syn|syncookies|max_orphans|adv_win)|ipv4\.ip_local_port_range)" | sort
         printf "fs.file-max = %s\n" "$(_tcptune_sysctl_get fs.file-max)"
     } > "$backup_file"
+    {
+        printf 'CREATED_AT=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+        printf 'KERNEL=%s\n' "$(uname -r)"
+        printf 'INTERFACE=%s\n' "${iface:-}"
+        printf 'QDISC_MODE=%s\n' "${qdisc_mode:-fq}"
+        printf 'CAKE_BW_MBIT=%s\n' "${cake_bw:-0}"
+        printf 'SYSCTL_SNAPSHOT=%s\n' "$backup_file"
+    } > "$meta_file"
+    _tcptune_backup_register_file "$backup_dir" "$_TCPTUNE_SYSCTL_FILE" || true
+    _tcptune_backup_register_file "$backup_dir" "$_TCPTUNE_CAKE_SERVICE_FILE" || true
+    _tcptune_backup_register_file "$backup_dir" "$_TCPTUNE_CAKE_OPENRC_SERVICE_FILE" || true
+    _tcptune_backup_register_file "$backup_dir" "$_TCPTUNE_CAKE_APPLY_SCRIPT" || true
+    _TCPTUNE_LAST_BACKUP_DIR="$backup_dir"
     _TCPTUNE_LAST_BACKUP_FILE="$backup_file"
-    _success "已备份当前配置: ${backup_file}"
+    _success "已备份当前配置: ${backup_dir}"
 }
 
 _tcptune_write_sysctl_conf() {
@@ -2029,6 +2115,7 @@ _tcptune_cleanup_conflicts() {
             key_esc=$(_tcptune_escape_ere "$key")
             if grep -qE "^[[:space:]]*${key_esc}[[:space:]]*=" "$file" 2>/dev/null; then
                 if [ "$file_changed" -eq 0 ]; then
+                    [ -n "$_TCPTUNE_LAST_BACKUP_DIR" ] && _tcptune_backup_register_file "$_TCPTUNE_LAST_BACKUP_DIR" "$file" || true
                     backup="${file}.bak.vpsgo.$(date +%Y%m%d%H%M%S)"
                     cp "$file" "$backup" 2>/dev/null || true
                     _info "已备份冲突文件: ${backup}"
@@ -2303,8 +2390,9 @@ _tcptune_print_verify_hint() {
     _separator
     printf "    配置文件: %s\n" "$_TCPTUNE_SYSCTL_FILE"
     if [ -n "$_TCPTUNE_LAST_BACKUP_FILE" ]; then
-        printf "    运行前备份: %s\n" "$_TCPTUNE_LAST_BACKUP_FILE"
-        printf "    回滚命令: sysctl --load=%s\n" "$_TCPTUNE_LAST_BACKUP_FILE"
+        printf "    运行前备份目录: %s\n" "${_TCPTUNE_LAST_BACKUP_DIR:-$(dirname "$_TCPTUNE_LAST_BACKUP_FILE")}"
+        printf "    运行前快照: %s\n" "$_TCPTUNE_LAST_BACKUP_FILE"
+        printf "    恢复方式: TCP 调优菜单 -> 从备份恢复\n"
     fi
 
     echo ""
@@ -2380,6 +2468,169 @@ _tcptune_print_verify_hint() {
             printf "    若必须 HTB 分类限速，记得在 class 下挂 fq 子队列。\n"
         fi
     fi
+}
+
+_tcptune_list_backup_dirs() {
+    local d
+    [ -d "$_TCPTUNE_BACKUP_DIR" ] || return 0
+    for d in "$_TCPTUNE_BACKUP_DIR"/backup_*; do
+        [ -d "$d" ] && printf '%s\n' "$d"
+    done | sort -r
+}
+
+_tcptune_show_backups() {
+    local backups=() backup_dir idx created iface qdisc cake_bw
+    while IFS= read -r backup_dir; do
+        [ -n "$backup_dir" ] && backups+=("$backup_dir")
+    done < <(_tcptune_list_backup_dirs)
+
+    echo ""
+    printf "  ${BOLD}TCP 调优备份列表${PLAIN}\n"
+    _separator
+    if [ "${#backups[@]}" -eq 0 ]; then
+        _info "当前没有可用备份。"
+        return 1
+    fi
+
+    for idx in "${!backups[@]}"; do
+        backup_dir="${backups[$idx]}"
+        created=$(_tcptune_backup_meta_get "$backup_dir" "CREATED_AT" "$(basename "$backup_dir")")
+        iface=$(_tcptune_backup_meta_get "$backup_dir" "INTERFACE" "-")
+        qdisc=$(_tcptune_backup_meta_get "$backup_dir" "QDISC_MODE" "-")
+        cake_bw=$(_tcptune_backup_meta_get "$backup_dir" "CAKE_BW_MBIT" "0")
+        printf "  [%d] %s\n" "$((idx + 1))" "$created"
+        printf "      iface=%s qdisc=%s" "$iface" "$qdisc"
+        if _is_digit "${cake_bw:-}" && [ "$cake_bw" -gt 0 ]; then
+            printf " cake=%sMbps" "$cake_bw"
+        fi
+        printf "\n"
+        printf "      %s\n" "$backup_dir"
+    done
+    return 0
+}
+
+_tcptune_select_backup() {
+    local backups=() backup_dir choice
+    while IFS= read -r backup_dir; do
+        [ -n "$backup_dir" ] && backups+=("$backup_dir")
+    done < <(_tcptune_list_backup_dirs)
+
+    [ "${#backups[@]}" -gt 0 ] || return 1
+    _tcptune_show_backups || return 1
+    echo ""
+    read -rp "  选择备份编号 [1-${#backups[@]}，0 返回]: " choice
+    if [ "${choice:-0}" = "0" ]; then
+        return 1
+    fi
+    if ! _is_digit "${choice:-}" || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#backups[@]}" ]; then
+        _warn "无效编号。"
+        return 1
+    fi
+    printf '%s' "${backups[$((choice - 1))]}"
+}
+
+_tcptune_restore_files_from_manifest() {
+    local backup_dir="$1" manifest path state rel src
+    manifest="${backup_dir}/file_manifest.tsv"
+    [ -r "$manifest" ] || return 0
+
+    while IFS=$'\t' read -r path state rel; do
+        [ -n "$path" ] || continue
+        case "$state" in
+            present)
+                src="${backup_dir}/${rel}"
+                mkdir -p "$(dirname "$path")" || return 1
+                cp -p "$src" "$path" 2>/dev/null || cp "$src" "$path" || return 1
+                ;;
+            absent)
+                rm -f "$path"
+                ;;
+        esac
+    done < "$manifest"
+
+    if _has_systemd; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+
+_tcptune_restore_backup() {
+    local backup_dir="$1"
+    local snapshot iface qdisc_mode cake_bw created confirm
+
+    snapshot="${backup_dir}/sysctl_snapshot.conf"
+    if [ ! -d "$backup_dir" ] || [ ! -f "$snapshot" ]; then
+        _error_no_exit "备份目录无效: ${backup_dir}"
+        return 1
+    fi
+
+    created=$(_tcptune_backup_meta_get "$backup_dir" "CREATED_AT" "$(basename "$backup_dir")")
+    iface=$(_tcptune_backup_meta_get "$backup_dir" "INTERFACE" "$(_tcptune_guess_iface)")
+    qdisc_mode=$(_tcptune_backup_meta_get "$backup_dir" "QDISC_MODE" "fq")
+    cake_bw=$(_tcptune_backup_meta_get "$backup_dir" "CAKE_BW_MBIT" "0")
+
+    echo ""
+    printf "  ${BOLD}准备恢复 TCP 调优备份${PLAIN}\n"
+    _separator
+    _status_kv "备份时间" "$created" "green" 18
+    _status_kv "接口" "${iface:-N/A}" "green" 18
+    _status_kv "qdisc" "$qdisc_mode" "green" 18
+    if _is_digit "${cake_bw:-}" && [ "$cake_bw" -gt 0 ]; then
+        _status_kv "cake" "${cake_bw} Mbps" "green" 18
+    fi
+    echo ""
+    _warn "将恢复 TCP 调优修改过的配置文件、sysctl 参数，以及 qdisc 持久化状态。"
+    read -rp "  确认恢复该备份? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        _info "已取消。"
+        return 1
+    fi
+
+    _tcptune_restore_files_from_manifest "$backup_dir" || {
+        _error_no_exit "恢复备份文件失败。"
+        return 1
+    }
+
+    if ! sysctl -p "$snapshot" >/dev/null 2>&1; then
+        _warn "sysctl 快照恢复返回非 0，可能是容器/权限限制。"
+    else
+        _success "sysctl 参数已恢复。"
+    fi
+
+    if [ -n "$iface" ]; then
+        case "$qdisc_mode" in
+            cake)
+                if _is_digit "${cake_bw:-}" && [ "$cake_bw" -gt 0 ]; then
+                    _tcptune_verify_cake_qdisc "$iface" "$cake_bw" || true
+                    _tcptune_enable_cake_persist "$iface" "$cake_bw" || true
+                    _TCPTUNE_LAST_CAKE_BW_MBIT="$cake_bw"
+                else
+                    _warn "备份中未记录有效 CAKE 带宽，已恢复 sysctl/文件，但未主动重放 CAKE qdisc。"
+                fi
+                ;;
+            *)
+                _tcptune_verify_fq_qdisc "$iface" || true
+                _tcptune_disable_cake_persist
+                _TCPTUNE_LAST_CAKE_BW_MBIT=0
+                ;;
+        esac
+    fi
+
+    _TCPTUNE_LAST_BACKUP_DIR="$backup_dir"
+    _TCPTUNE_LAST_BACKUP_FILE="$snapshot"
+    _TCPTUNE_LAST_IFACE="$iface"
+    _TCPTUNE_LAST_QDISC_MODE="$qdisc_mode"
+
+    echo ""
+    _success "TCP 调优已恢复到备份状态。"
+    _tcptune_show_current
+    return 0
+}
+
+_tcptune_restore_from_menu() {
+    local backup_dir
+    backup_dir=$(_tcptune_select_backup) || return 0
+    _tcptune_restore_backup "$backup_dir"
+    _press_any_key
 }
 
 _tcptune_run_v2() {
@@ -2508,14 +2759,17 @@ _tcptune_setup() {
 
         _separator
         _menu_pair "1" "应用 TCP 调优" "一键应用并验证" "green" "2" "查看验证命令" "iperf3/ss/tc/nstat" "cyan"
+        _menu_pair "3" "查看备份列表" "恢复前可先确认内容" "cyan" "4" "从备份恢复" "回滚被修改项" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
 
         local choice
-        read -rp "  选择 [0-2]: " choice
+        read -rp "  选择 [0-4]: " choice
         case "$choice" in
             1) _tcptune_run_v2 ;;
             2) _tcptune_print_verify_hint "$(_tcptune_guess_iface)" "$_TCPTUNE_LAST_CEILING_BYTES" "$_TCPTUNE_LAST_QDISC_MODE" "$_TCPTUNE_LAST_CAKE_BW_MBIT"; _press_any_key ;;
+            3) _tcptune_show_backups; _press_any_key ;;
+            4) _tcptune_restore_from_menu ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${choice}"; _press_any_key ;;
         esac
