@@ -34,7 +34,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.34"
+VERSION="2.35"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -9658,6 +9658,78 @@ _snell_configure() {
     _press_any_key
 }
 
+_snell_export_node_config() {
+    _header "导出 Snell Surge 配置"
+
+    if [[ ! -f "$_SNELL_CONFIG_FILE" ]]; then
+        _error_no_exit "未找到配置文件: ${_SNELL_CONFIG_FILE}"
+        _info "请先执行「配置并启动 Snell」"
+        _press_any_key
+        return
+    fi
+
+    local listen_port current_listen psk_value
+    local host_default host_input client_host
+    local node_name node_name_input surge_line
+    local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
+    local GEO_LOOKUP_IP=""
+
+    listen_port=$(_snell_conf_get_value "port" 2>/dev/null || true)
+    if ! _is_valid_port "${listen_port:-}"; then
+        current_listen=$(_snell_conf_get_value "listen" 2>/dev/null || true)
+        listen_port=$(_snell_parse_port_from_listen "$current_listen" 2>/dev/null || true)
+    fi
+    psk_value=$(_snell_conf_get_value "psk" 2>/dev/null || true)
+
+    if ! _is_valid_port "${listen_port:-}"; then
+        _error_no_exit "配置中的端口无效，请先重新配置"
+        _press_any_key
+        return
+    fi
+    if [[ -z "$psk_value" ]]; then
+        _error_no_exit "配置缺少 PSK，请先重新配置"
+        _press_any_key
+        return
+    fi
+
+    host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
+    [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
+    [[ -z "$host_default" ]] && host_default="YOUR_SERVER_IP"
+
+    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
+    if [[ -z "$client_host" ]]; then
+        _error_no_exit "客户端连接地址不能为空"
+        _press_any_key
+        return
+    fi
+
+    GEO_LOOKUP_IP="$client_host"
+    if [[ ! "$GEO_LOOKUP_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        GEO_LOOKUP_IP=$(_mihomoconf_get_server_ip)
+    fi
+    IFS=$'\x1f' read -r NODE_COUNTRY NODE_CITY NODE_COUNTRY_CODE NODE_FLAG < <(_mihomoconf_get_geo_profile "$GEO_LOOKUP_IP")
+    if [[ -n "$NODE_CITY" ]]; then
+        _info "地区识别: ${NODE_COUNTRY} ${NODE_CITY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    else
+        _info "地区识别: ${NODE_COUNTRY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    fi
+
+    node_name=$(_mihomoconf_make_node_name "Sn" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+    read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
+    node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
+    [[ -z "$node_name" ]] && node_name=$(_mihomoconf_make_node_name "Sn" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+
+    surge_line=$(printf '%s = snell, %s, %s, psk = %s, version = 5, reuse = true, tfo = true' \
+        "$node_name" "$client_host" "$listen_port" "$psk_value")
+
+    echo ""
+    _success "Snell Surge v5 配置如下"
+    printf "  ${BOLD}Surge V5 配置${PLAIN}\n"
+    printf "  %s\n" "$surge_line"
+    _press_any_key
+}
+
 _snell_restart() {
     _header "Snell 重启"
 
@@ -9859,19 +9931,21 @@ _snell_manage() {
         _separator
         _menu_pair "1" "安装/更新 Snell V5" "官方 snell-server" "green" "2" "配置并启动 Snell" "含端口冲突检查" "green"
         _menu_pair "3" "重启 Snell" "" "green" "4" "查看状态" "" "green"
-        _menu_pair "5" "查看日志" "" "green" "6" "卸载 Snell" "可选删除配置" "yellow"
+        _menu_pair "5" "导出 Surge V5 配置" "直接输出配置行" "green" "6" "查看日志" "" "green"
+        _menu_item "7" "卸载 Snell" "可选删除配置" "yellow"
         _menu_item "0" "返回上级菜单" "" "red"
         _separator
 
         local ch
-        read -rp "  选择 [0-6]: " ch
+        read -rp "  选择 [0-7]: " ch
         case "$ch" in
             1) _snell_install_latest ;;
             2) _snell_configure ;;
             3) _snell_restart ;;
             4) _snell_status ;;
-            5) _snell_log ;;
-            6) _snell_uninstall ;;
+            5) _snell_export_node_config ;;
+            6) _snell_log ;;
+            7) _snell_uninstall ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac

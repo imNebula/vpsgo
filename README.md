@@ -70,7 +70,7 @@ hash -r
 | 7 | Docker 日志轮转 | 配置 json-file 日志驱动，限制容器日志大小；支持 systemd/OpenRC 重启 Docker |
 | 8 | Mihomo 管理 | 安装/更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志 |
 | 9 | sing-box 安装 | Debian/Ubuntu 使用官方 APT 源，其他发行版使用安装脚本；自启动支持 systemd/OpenRC |
-| 10 | Snell V5 管理 | 官方工具安装/更新、配置与启动、日志/状态、卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC |
+| 10 | Snell V5 管理 | 官方工具安装/更新、配置与启动、Surge V5 配置导出、日志/状态、卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC |
 | 11 | WireGuard 原生节点 | 原生内核方案，一键部署/重建、支持新增多个客户端（不重建服务端）、客户端配置导出、服务状态/重启/卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC 持久化 |
 | 12 | Shadowsocks-Rust 管理 | 官方 releases 安装/更新、配置并启动、自启动、日志/状态、卸载；支持 systemd/OpenRC，适合 LXC/容器环境 |
 
