@@ -34,7 +34,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.35"
+VERSION="2.36"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -9569,6 +9569,9 @@ _snell_configure() {
     local install_confirm current_listen current_port current_psk current_ipv6 current_egress
     local listen_port psk_input psk_value ipv6_input ipv6_flag listen_addr egress_iface
     local host_default host_input client_host
+    local node_name
+    local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
+    local GEO_LOOKUP_IP=""
 
     if [[ ! -x "$_SNELL_BIN" ]]; then
         read -rp "  未检测到 snell-server，是否先安装最新版? [Y/n]: " install_confirm
@@ -9649,12 +9652,29 @@ _snell_configure() {
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
     read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
+    if [[ -z "$client_host" ]]; then
+        _error_no_exit "客户端连接地址不能为空"
+        _press_any_key
+        return
+    fi
+
+    GEO_LOOKUP_IP="$client_host"
+    if [[ ! "$GEO_LOOKUP_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        GEO_LOOKUP_IP=$(_mihomoconf_get_server_ip)
+    fi
+    IFS=$'\x1f' read -r NODE_COUNTRY NODE_CITY NODE_COUNTRY_CODE NODE_FLAG < <(_mihomoconf_get_geo_profile "$GEO_LOOKUP_IP")
+    if [[ -n "$NODE_CITY" ]]; then
+        _info "地区识别: ${NODE_COUNTRY} ${NODE_CITY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    else
+        _info "地区识别: ${NODE_COUNTRY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    fi
+    node_name=$(printf '[Sn]%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
 
     echo ""
     _separator
     printf "  ${BOLD}Snell V5 Surge 配置${PLAIN}\n"
     _separator
-    printf "  Snell-V5 = snell, %s, %s, psk = %s, version = 5, reuse = true, tfo = true\n" "$client_host" "$listen_port" "$psk_value"
+    printf "  %s=snell,%s,%s,psk=%s,version=5,reuse=true,tfo=true\n" "$node_name" "$client_host" "$listen_port" "$psk_value"
     _press_any_key
 }
 
@@ -9715,12 +9735,12 @@ _snell_export_node_config() {
         _info "地区识别: ${NODE_COUNTRY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
     fi
 
-    node_name=$(_mihomoconf_make_node_name "Sn" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+    node_name=$(printf '[Sn]%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
     read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
     node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
-    [[ -z "$node_name" ]] && node_name=$(_mihomoconf_make_node_name "Sn" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+    [[ -z "$node_name" ]] && node_name=$(printf '[Sn]%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
 
-    surge_line=$(printf '%s = snell, %s, %s, psk = %s, version = 5, reuse = true, tfo = true' \
+    surge_line=$(printf '%s=snell,%s,%s,psk=%s,version=5,reuse=true,tfo=true' \
         "$node_name" "$client_host" "$listen_port" "$psk_value")
 
     echo ""
