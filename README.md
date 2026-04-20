@@ -33,7 +33,7 @@ sudo apk add --no-cache bash curl
 
 首次运行会自动安装到 `/usr/local/bin/vpsgo`，之后输入 `vpsgo` 即可启动。
 
-首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.com/`，会自动作用到脚本自更新、Mihomo、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载/API 请求。
+首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.org/`，会自动作用到脚本自更新、Mihomo、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载。
 
 如果出现 `-ash: vpsgo: Permission denied`，可执行：
 
@@ -84,7 +84,7 @@ hash -r
 
 | 快捷键 | 功能 |
 |--------|------|
-| g | GitHub 代理开关（gh-proxy.com） |
+| g | GitHub 代理开关（gh-proxy.org） |
 | u | 从 GitHub 更新到最新版 |
 | x | 卸载 VPSGo |
 | 0 | 退出脚本 |

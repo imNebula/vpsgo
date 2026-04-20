@@ -34,13 +34,13 @@ fi
 
 set -uo pipefail
 
-VERSION="2.32"
+VERSION="2.33"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
 UPDATE_URL="https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
 VPSGO_CONFIG_FILE="${VPSGO_CONFIG_FILE:-/etc/vpsgo/config}"
-_GITHUB_PROXY_DEFAULT_BASE="https://gh-proxy.com"
+_GITHUB_PROXY_DEFAULT_BASE="https://gh-proxy.org"
 _GITHUB_PROXY_ENABLED="0"
 _GITHUB_PROXY_BASE="$_GITHUB_PROXY_DEFAULT_BASE"
 
@@ -98,6 +98,9 @@ _load_runtime_config() {
     local file_enabled file_base
     file_enabled=$(_config_read_value "VPSGO_GITHUB_PROXY" "0")
     file_base=$(_config_read_value "VPSGO_GITHUB_PROXY_BASE" "$_GITHUB_PROXY_DEFAULT_BASE")
+    if [[ "$file_base" == "https://gh-proxy.com" ]] || [[ "$file_base" == "gh-proxy.com" ]]; then
+        file_base="$_GITHUB_PROXY_DEFAULT_BASE"
+    fi
 
     _GITHUB_PROXY_ENABLED="${VPSGO_GITHUB_PROXY:-$file_enabled}"
     _GITHUB_PROXY_BASE="${VPSGO_GITHUB_PROXY_BASE:-$file_base}"
@@ -151,7 +154,7 @@ _github_proxy_supports_url() {
     host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
 
     case "$host" in
-        github.com|www.github.com|api.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
+        github.com|www.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
             return 0
             ;;
     esac
@@ -219,7 +222,7 @@ _toggle_github_proxy() {
     if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
         _success "GitHub 代理已开启"
         _info "代理入口: ${_GITHUB_PROXY_BASE}"
-        _info "GitHub Releases / Raw / API / 自更新将自动走代理"
+        _info "GitHub Releases / Raw / 自更新将自动走代理"
     else
         _success "GitHub 代理已关闭"
         _info "后续 GitHub 相关下载将恢复直连"
@@ -2713,8 +2716,8 @@ _mihomo_detect_arch() {
 _mihomo_get_latest_version() {
     local version latest_url api_url latest_release_url
 
-    api_url=$(_github_proxy_url "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")
-    latest_release_url=$(_github_proxy_url "https://github.com/MetaCubeX/mihomo/releases/latest")
+    api_url="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+    latest_release_url="https://github.com/MetaCubeX/mihomo/releases/latest"
 
     version=$(curl -fsSL "$api_url" 2>/dev/null \
         | awk -F'"' '$2=="tag_name"{print $4; exit}')
