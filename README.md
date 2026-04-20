@@ -14,6 +14,13 @@ sudo curl -fsSL https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main
 sudo chmod 0755 /usr/local/bin/vpsgo
 hash -r
 ```
+
+```bash
+# 国内网络可选：通过 gh-proxy 安装
+sudo curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh -o /usr/local/bin/vpsgo
+sudo chmod 0755 /usr/local/bin/vpsgo
+hash -r
+```
 ```bash
 # 安装后直接使用
 vpsgo
@@ -25,6 +32,8 @@ sudo apk add --no-cache bash curl
 ```
 
 首次运行会自动安装到 `/usr/local/bin/vpsgo`，之后输入 `vpsgo` 即可启动。
+
+首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.com/`，会自动作用到脚本自更新、Mihomo、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载/API 请求。
 
 如果出现 `-ash: vpsgo: Permission denied`，可执行：
 
@@ -75,6 +84,7 @@ hash -r
 
 | 快捷键 | 功能 |
 |--------|------|
+| g | GitHub 代理开关（gh-proxy.com） |
 | u | 从 GitHub 更新到最新版 |
 | x | 卸载 VPSGo |
 | 0 | 退出脚本 |
@@ -88,6 +98,8 @@ hash -r
 ## 更新
 
 在脚本菜单中输入 `u` 即可自动从 GitHub 拉取最新版本并重启。
+
+如果在国内网络下访问较慢，可先在首页按 `g` 开启 GitHub 代理后再更新或安装相关组件。
 
 ## License
 

@@ -34,11 +34,15 @@ fi
 
 set -uo pipefail
 
-VERSION="2.31"
+VERSION="2.32"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
 UPDATE_URL="https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
+VPSGO_CONFIG_FILE="${VPSGO_CONFIG_FILE:-/etc/vpsgo/config}"
+_GITHUB_PROXY_DEFAULT_BASE="https://gh-proxy.com"
+_GITHUB_PROXY_ENABLED="0"
+_GITHUB_PROXY_BASE="$_GITHUB_PROXY_DEFAULT_BASE"
 
 # 颜色
 RED='\033[1;31m'
@@ -50,6 +54,178 @@ MAGENTA='\033[1;35m'
 DIM='\033[2m'
 BOLD='\033[1m'
 PLAIN='\033[0m'
+
+_trim_trailing_slashes() {
+    local s="${1:-}"
+    while [[ "$s" == */ ]]; do
+        s="${s%/}"
+    done
+    printf '%s' "$s"
+}
+
+_is_truthy() {
+    local value
+    value=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+    case "$value" in
+        1|y|yes|on|true|enable|enabled) return 0 ;;
+    esac
+    return 1
+}
+
+_config_read_value() {
+    local key="$1" default="${2:-}" value
+    [[ -r "$VPSGO_CONFIG_FILE" ]] || {
+        printf '%s' "$default"
+        return 0
+    }
+    value=$(awk -F= -v k="$key" '$1 == k { print substr($0, index($0, "=") + 1) }' "$VPSGO_CONFIG_FILE" 2>/dev/null | tail -n1)
+    if [[ -z "${value:-}" ]]; then
+        value="$default"
+    fi
+    printf '%s' "$value"
+}
+
+_github_proxy_normalize_base() {
+    local base="${1:-$_GITHUB_PROXY_DEFAULT_BASE}"
+    if [[ "$base" != http://* && "$base" != https://* ]]; then
+        base="https://${base}"
+    fi
+    base=$(_trim_trailing_slashes "$base")
+    printf '%s' "$base"
+}
+
+_load_runtime_config() {
+    local file_enabled file_base
+    file_enabled=$(_config_read_value "VPSGO_GITHUB_PROXY" "0")
+    file_base=$(_config_read_value "VPSGO_GITHUB_PROXY_BASE" "$_GITHUB_PROXY_DEFAULT_BASE")
+
+    _GITHUB_PROXY_ENABLED="${VPSGO_GITHUB_PROXY:-$file_enabled}"
+    _GITHUB_PROXY_BASE="${VPSGO_GITHUB_PROXY_BASE:-$file_base}"
+    _GITHUB_PROXY_BASE=$(_github_proxy_normalize_base "$_GITHUB_PROXY_BASE")
+}
+
+_save_runtime_config() {
+    local cfg_dir tmp_file enabled_value
+    cfg_dir="$(dirname "$VPSGO_CONFIG_FILE")"
+    tmp_file=$(mktemp /tmp/vpsgo-config.XXXXXX) || return 1
+    _GITHUB_PROXY_BASE=$(_github_proxy_normalize_base "$_GITHUB_PROXY_BASE")
+    enabled_value="0"
+    _is_truthy "$_GITHUB_PROXY_ENABLED" && enabled_value="1"
+
+    mkdir -p "$cfg_dir" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+
+    {
+        printf '# Managed by VPSGo\n'
+        printf 'VPSGO_GITHUB_PROXY=%s\n' "$enabled_value"
+        printf 'VPSGO_GITHUB_PROXY_BASE=%s\n' "$_GITHUB_PROXY_BASE"
+    } > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+
+    chmod 0644 "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$VPSGO_CONFIG_FILE"
+}
+
+_github_proxy_base_label() {
+    local base
+    base=$(_github_proxy_normalize_base "$_GITHUB_PROXY_BASE")
+    base="${base#https://}"
+    base="${base#http://}"
+    printf '%s' "$base"
+}
+
+_github_proxy_supports_url() {
+    local url="$1" rest host
+    case "$url" in
+        http://*|https://*) ;;
+        *) return 1 ;;
+    esac
+
+    rest="${url#*://}"
+    host="${rest%%/*}"
+    host="${host%%\?*}"
+    host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+
+    case "$host" in
+        github.com|www.github.com|api.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+_github_proxy_url() {
+    local url="${1:-}" base
+    [[ -n "$url" ]] || {
+        printf '%s' "$url"
+        return 0
+    }
+    if ! _is_truthy "$_GITHUB_PROXY_ENABLED"; then
+        printf '%s' "$url"
+        return 0
+    fi
+
+    base=$(_github_proxy_normalize_base "$_GITHUB_PROXY_BASE")
+    if [[ "$url" == "${base}/"* ]] || ! _github_proxy_supports_url "$url"; then
+        printf '%s' "$url"
+        return 0
+    fi
+    printf '%s/%s' "$base" "$url"
+}
+
+_github_proxy_status_text() {
+    if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
+        printf '开启 (%s)' "$(_github_proxy_base_label)"
+    else
+        printf '关闭'
+    fi
+}
+
+_github_proxy_status_desc() {
+    if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
+        printf '已开启，按 g 关闭'
+    else
+        printf '已关闭，按 g 开启国内加速'
+    fi
+}
+
+_github_proxy_status_tone() {
+    if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
+        printf 'green'
+    else
+        printf 'dim'
+    fi
+}
+
+_toggle_github_proxy() {
+    _header "GitHub 代理设置"
+
+    if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
+        _GITHUB_PROXY_ENABLED="0"
+    else
+        _GITHUB_PROXY_ENABLED="1"
+    fi
+
+    if ! _save_runtime_config; then
+        _error_no_exit "保存配置失败: ${VPSGO_CONFIG_FILE}"
+        _press_any_key
+        return
+    fi
+
+    if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
+        _success "GitHub 代理已开启"
+        _info "代理入口: ${_GITHUB_PROXY_BASE}"
+        _info "GitHub Releases / Raw / API / 自更新将自动走代理"
+    else
+        _success "GitHub 代理已关闭"
+        _info "后续 GitHub 相关下载将恢复直连"
+    fi
+    _press_any_key
+}
 
 # --- 通用工具函数 ---
 _red()    { printf "${RED}%b${PLAIN}" "$1"; }
@@ -413,11 +589,13 @@ _detect_virt() {
 }
 
 _show_sys_info() {
-    local opsy arch kern virt cols text_max
+    local opsy arch kern virt gh_proxy gh_tone cols text_max
     opsy="$(_os_full)"
     arch="$(uname -m) ($(getconf LONG_BIT) Bit)"
     kern="$(uname -r)"
     virt="$(_detect_virt)"
+    gh_proxy="$(_github_proxy_status_text)"
+    gh_tone="$(_github_proxy_status_tone)"
 
     cols=$(_ui_term_cols)
     text_max=$((cols - 18))
@@ -427,6 +605,7 @@ _show_sys_info() {
     arch=$(_ui_truncate_text "$arch" "$text_max")
     kern=$(_ui_truncate_text "$kern" "$text_max")
     virt=$(_ui_truncate_text "$virt" "$text_max")
+    gh_proxy=$(_ui_truncate_text "$gh_proxy" "$text_max")
 
     printf "  ${BOLD}系统信息${PLAIN}\n"
     _separator
@@ -434,6 +613,7 @@ _show_sys_info() {
     _status_kv "Arch" "$arch" "dim" 8
     _status_kv "Kernel" "$kern" "dim" 8
     _status_kv "Virt" "$virt" "dim" 8
+    _status_kv "GitHub" "$gh_proxy" "$gh_tone" 8
     _separator
 }
 
@@ -2465,16 +2645,17 @@ _dockerlog_setup() {
 # --- 8. Mihomo 安装 ---
 
 _mihomo_download() {
-    local url="$1" output="$2"
+    local url="$1" output="$2" fetch_url
+    fetch_url=$(_github_proxy_url "$url")
     rm -f "$output"
     if command -v curl >/dev/null 2>&1; then
-        if curl -fL --retry 2 --connect-timeout 10 -o "$output" "$url"; then
+        if curl -fL --retry 2 --connect-timeout 10 -o "$output" "$fetch_url"; then
             [[ -s "$output" ]] && return 0
         fi
         rm -f "$output"
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget -q --show-progress -O "$output" "$url"; then
+        if wget -q --show-progress -O "$output" "$fetch_url"; then
             [[ -s "$output" ]] && return 0
         fi
         rm -f "$output"
@@ -2530,16 +2711,19 @@ _mihomo_detect_arch() {
 }
 
 _mihomo_get_latest_version() {
-    local version latest_url
+    local version latest_url api_url latest_release_url
 
-    version=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest 2>/dev/null \
+    api_url=$(_github_proxy_url "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")
+    latest_release_url=$(_github_proxy_url "https://github.com/MetaCubeX/mihomo/releases/latest")
+
+    version=$(curl -fsSL "$api_url" 2>/dev/null \
         | awk -F'"' '$2=="tag_name"{print $4; exit}')
     if [[ -n "${version:-}" ]] && [[ "$version" =~ ^v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]]; then
         printf '%s' "$version"
         return 0
     fi
 
-    latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/MetaCubeX/mihomo/releases/latest 2>/dev/null || true)
+    latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_release_url" 2>/dev/null || true)
     if [[ "$latest_url" == *"/releases/tag/"* ]]; then
         version="${latest_url##*/}"
         if [[ -n "${version:-}" ]] && [[ "$version" =~ ^v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]]; then
@@ -9791,7 +9975,7 @@ _ssrust_install_latest_core() {
     prefer_musl="0"
     _ssrust_is_musl && prefer_musl="1"
 
-    latest_json=$(curl -fsSL "$_SSRUST_RELEASE_API" 2>/dev/null || true)
+    latest_json=$(curl -fsSL "$(_github_proxy_url "$_SSRUST_RELEASE_API")" 2>/dev/null || true)
     if [[ -z "$latest_json" ]]; then
         _error_no_exit "无法获取 shadowsocks-rust 最新版本信息"
         return 1
@@ -12594,7 +12778,9 @@ _akdns_setup() {
     echo ""
 
     # 运行 Akile DNS 测试及配置脚本
-    wget -qO- https://raw.githubusercontent.com/akile-network/aktools/refs/heads/main/akdns.sh | bash
+    if ! bash <(curl -fsSL "$(_github_proxy_url "https://raw.githubusercontent.com/akile-network/aktools/refs/heads/main/akdns.sh")"); then
+        _error_no_exit "Akile DNS 脚本执行失败"
+    fi
     
     _press_any_key
 }
@@ -13829,10 +14015,12 @@ _self_update() {
     _info "正在检查更新..."
 
     local tmp_file
+    local update_url
+    update_url=$(_github_proxy_url "$UPDATE_URL")
     tmp_file=$(mktemp /tmp/vpsgo.XXXXXX.sh)
-    if ! curl -fsSL -o "$tmp_file" "$UPDATE_URL"; then
+    if ! curl -fsSL -o "$tmp_file" "$update_url"; then
         rm -f "$tmp_file"
-        _error_no_exit "下载失败，请检查网络连接"
+        _error_no_exit "下载失败，请检查网络连接，或在首页按 g 开启 GitHub 代理"
         _press_any_key
         return
     fi
@@ -13996,6 +14184,7 @@ _show_main_menu() {
     _menu_item "3" "系统优化" "日志轮转/Swap" "green"
     _menu_item "4" "代理工具助手" "Mihomo/Sing-Box/SSR/WireGuard" "green"
     _separator
+    _menu_item "g" "GitHub 代理" "$(_github_proxy_status_desc)" "cyan"
     _menu_item "u" "更新 VPSGo" "从 Github 更新" "cyan"
     _menu_item "x" "卸载 VPSGo" "" "red"
     _menu_item "0" "退出脚本" "" "red"
@@ -14091,6 +14280,7 @@ _proxy_tools_menu() {
 main() {
     [[ $EUID -ne 0 ]] && _error "此脚本需要 root 权限，请使用 sudo vpsgo 运行"
 
+    _load_runtime_config
     _self_install
 
     while true; do
@@ -14105,6 +14295,7 @@ main() {
             2) _script_tools_menu ;;
             3) _system_opt_menu ;;
             4) _proxy_tools_menu ;;
+            g|G) _toggle_github_proxy ;;
             u|U) _self_update ;;
             x|X) _self_uninstall ;;
             0)
