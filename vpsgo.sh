@@ -3141,6 +3141,21 @@ _MIHOMO_OPENRC_ERR_FILE="/var/log/mihomo.error.log"
 _mihomoconf_gen_ss_password_128() { head -c 16 /dev/urandom | base64 | tr -d '\n'; }
 _mihomoconf_gen_ss_password_256() { head -c 32 /dev/urandom | base64 | tr -d '\n'; }
 _mihomoconf_gen_anytls_password()  { head -c 32 /dev/urandom | base64 | tr -d '\n' | tr '/+' 'Aa' | tr -d '=' | head -c 32; }
+_mihomoconf_gen_reality_short_id() { head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
+_mihomoconf_gen_reality_keypair() {
+    local output private_key public_key
+
+    if ! command -v mihomo >/dev/null 2>&1; then
+        return 1
+    fi
+
+    output=$(mihomo generate reality-keypair 2>/dev/null) || return 1
+    private_key=$(printf '%s\n' "$output" | awk -F': *' '/^PrivateKey:/ {print $2; exit}')
+    public_key=$(printf '%s\n' "$output" | awk -F': *' '/^PublicKey:/ {print $2; exit}')
+    [[ -n "$private_key" && -n "$public_key" ]] || return 1
+    printf '%s\t%s\n' "$private_key" "$public_key"
+}
 
 _mihomoconf_gen_ss_password_for_cipher() {
     local cipher="${1:-}"
@@ -3253,6 +3268,29 @@ _mihomoconf_gen_hy2_link() {
         query="?${params[*]}"
     fi
     echo "hysteria2://${password}@${server}:${port}${query}#${encoded_name}"
+}
+
+_mihomoconf_gen_vless_link() {
+    local server="$1" port="$2" uuid="$3" name="$4" servername="$5" public_key="$6" short_id="$7"
+    local flow="${8:-xtls-rprx-vision}" client_fingerprint="${9:-chrome}"
+    local encoded_name query=""
+    local -a params=()
+
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    params+=("encryption=none")
+    [[ -n "$flow" ]] && params+=("flow=$(_mihomoconf_urlencode "$flow")")
+    params+=("security=reality")
+    params+=("type=tcp")
+    [[ -n "$servername" ]] && params+=("sni=$(_mihomoconf_urlencode "$servername")")
+    [[ -n "$client_fingerprint" ]] && params+=("fp=$(_mihomoconf_urlencode "$client_fingerprint")")
+    [[ -n "$public_key" ]] && params+=("pbk=$(_mihomoconf_urlencode "$public_key")")
+    [[ -n "$short_id" ]] && params+=("sid=$(_mihomoconf_urlencode "$short_id")")
+
+    if (( ${#params[@]} > 0 )); then
+        local IFS='&'
+        query="?${params[*]}"
+    fi
+    echo "vless://${uuid}@${server}:${port}${query}#${encoded_name}"
 }
 
 _mihomoconf_parse_port_list() {
@@ -3548,18 +3586,31 @@ _mihomoconf_read_listener_rows() {
             gsub(/"$/, "", s)
             return s
         }
+        function flush_vless_user() {
+            if (current_vless_username == "") return
+            if (user_id == "") user_id=current_vless_username
+            if (user_pass == "") user_pass=current_vless_uuid
+            if (vless_flow == "") vless_flow=current_vless_flow
+            current_vless_username=""
+            current_vless_uuid=""
+            current_vless_flow=""
+        }
         function reset_state() {
             name=tag=type=port=cipher=password=user_id=user_pass=sni=""
             hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=""
+            vless_public_key=vless_short_id=vless_flow=vless_client_fingerprint=""
             in_users=0
             item_indent=-1
             users_indent=-1
+            current_vless_username=current_vless_uuid=current_vless_flow=""
         }
         function emit() {
             if (name == "") return
-            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
+            flush_vless_user()
+            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
                 type, name, port, cipher, password, user_id, user_pass, sni, hy2_up, hy2_down, \
-                hy2_ignore, hy2_obfs, hy2_obfs_password, hy2_masquerade, hy2_mport, hy2_insecure, tag
+                hy2_ignore, hy2_obfs, hy2_obfs_password, hy2_masquerade, hy2_mport, hy2_insecure, tag, \
+                vless_public_key, vless_short_id, vless_flow, vless_client_fingerprint
         }
         BEGIN {
             in_listeners=0
@@ -3589,7 +3640,24 @@ _mihomoconf_read_listener_rows() {
         in_users {
             curr_indent=lindent($0)
             if (curr_indent <= users_indent) {
+                flush_vless_user()
                 in_users=0
+            } else if ($0 ~ /^[[:space:]]*-[[:space:]]*username:/) {
+                flush_vless_user()
+                line=$0
+                sub(/^[[:space:]]*-[[:space:]]*username:[[:space:]]*/, "", line)
+                current_vless_username=unquote(trim(line))
+                next
+            } else if (current_vless_username != "" && $0 ~ /^[[:space:]]+uuid:/) {
+                line=$0
+                sub(/^[[:space:]]+uuid:[[:space:]]*/, "", line)
+                current_vless_uuid=unquote(trim(line))
+                next
+            } else if (current_vless_username != "" && $0 ~ /^[[:space:]]+flow:/) {
+                line=$0
+                sub(/^[[:space:]]+flow:[[:space:]]*/, "", line)
+                current_vless_flow=unquote(trim(line))
+                next
             } else if ($0 ~ /^[[:space:]]+[^[:space:]#].*:/) {
                 line=$0
                 sub(/^[[:space:]]+/, "", line)
@@ -3632,6 +3700,14 @@ _mihomoconf_read_listener_rows() {
             sni=unquote(line)
             next
         }
+        /^[[:space:]]+#[[:space:]]*vpsgo-server-name:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-server-name:[[:space:]]*/, "", line)
+            line=trim(line)
+            sub(/\r$/, "", line)
+            sni=unquote(line)
+            next
+        }
         /^[[:space:]]+#[[:space:]]*vpsgo-mport:/ {
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-mport:[[:space:]]*/, "", line)
@@ -3642,6 +3718,30 @@ _mihomoconf_read_listener_rows() {
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-insecure:[[:space:]]*/, "", line)
             hy2_insecure=trim(line)
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-reality-public-key:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-reality-public-key:[[:space:]]*/, "", line)
+            vless_public_key=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-reality-short-id:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-reality-short-id:[[:space:]]*/, "", line)
+            vless_short_id=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-vless-flow:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-flow:[[:space:]]*/, "", line)
+            vless_flow=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-vless-client-fingerprint:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-client-fingerprint:[[:space:]]*/, "", line)
+            vless_client_fingerprint=unquote(trim(line))
             next
         }
         /^[[:space:]]+type:/ {
@@ -3795,6 +3895,7 @@ _mihomoconf_collect_users_input() {
     local username password
     for username in "${users[@]}"; do
         case "$password_style" in
+            vless) password=$(_mihomoconf_gen_uuid) ;;
             ss128) password=$(_mihomoconf_gen_ss_password_128) ;;
             ss256) password=$(_mihomoconf_gen_ss_password_256) ;;
             *) password=$(_mihomoconf_gen_anytls_password) ;;
@@ -3821,15 +3922,24 @@ _mihomoconf_read_users_by_tag() {
             gsub(/"$/, "", s)
             return s
         }
+        function flush_vless_user() {
+            if (current_vless_username == "") return
+            printf "%s\037%s\n", current_vless_username, current_vless_uuid
+            current_vless_username=""
+            current_vless_uuid=""
+        }
         function update_match() {
             matched = ((tag != "" && tag == target) || (name != "" && name == target))
         }
         function reset_listener() {
+            flush_vless_user()
             name=""
             tag=""
             in_users=0
             matched=0
             users_indent=-1
+            current_vless_username=""
+            current_vless_uuid=""
         }
         BEGIN {
             in_listeners=0
@@ -3867,7 +3977,21 @@ _mihomoconf_read_users_by_tag() {
         in_users {
             curr_indent=lindent($0)
             if (curr_indent <= users_indent) {
+                flush_vless_user()
                 in_users=0
+            } else if ($0 ~ /^[[:space:]]*-[[:space:]]*username:/) {
+                flush_vless_user()
+                line=$0
+                sub(/^[[:space:]]*-[[:space:]]*username:[[:space:]]*/, "", line)
+                current_vless_username=unquote(trim(line))
+                next
+            } else if (current_vless_username != "" && $0 ~ /^[[:space:]]+uuid:/) {
+                line=$0
+                sub(/^[[:space:]]+uuid:[[:space:]]*/, "", line)
+                current_vless_uuid=unquote(trim(line))
+                next
+            } else if (current_vless_username != "" && $0 ~ /^[[:space:]]+flow:/) {
+                next
             } else if ($0 ~ /^[[:space:]]+[^[:space:]#].*:/) {
                 line=$0
                 sub(/^[[:space:]]+/, "", line)
@@ -3887,6 +4011,9 @@ _mihomoconf_read_users_by_tag() {
                 next
             }
         }
+        END {
+            flush_vless_user()
+        }
     ' "$config_file"
 }
 
@@ -3894,9 +4021,11 @@ _mihomoconf_read_listener_user_rows() {
     local config_file="$1"
     local type name port cipher password user_id user_pass sni
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag
+    local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     local username passwd
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
-        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag; do
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
         [[ -z "${name:-}" ]] && continue
         listener_tag="${listener_tag:-$name}"
         while IFS=$'\x1f' read -r username passwd; do
@@ -3911,9 +4040,11 @@ _mihomoconf_listener_meta_by_tag() {
     local config_file="$1" listener_tag="$2"
     local type name port cipher password user_id user_pass sni
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure tag
+    local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     local resolved_tag
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
-        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure tag; do
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure tag \
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
         [[ -n "${name:-}" ]] || continue
         resolved_tag="${tag:-$name}"
         if [[ "$resolved_tag" == "$listener_tag" || "$name" == "$listener_tag" ]]; then
@@ -4482,15 +4613,17 @@ _mihomoconf_setup() {
     local CONFIG_STATUS
 
     local WRITE_MODE="new"
-    local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_HY2="n"
-    local SS_COUNT=0 ANYTLS_COUNT=0 HY2_COUNT=0
-    local SS_REPLACE="n" ANYTLS_REPLACE="n" HY2_REPLACE="n"
+    local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n"
+    local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0
+    local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n"
 
     local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
     local SS_CIPHER=""
     local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0"
     local -a ANYTLS_PORTS=() ANYTLS_TAGS=() ANYTLS_USER_ROWS=()
     local ANYTLS_SNI=""
+    local -a VLESS_PORTS=() VLESS_TAGS=() VLESS_USER_ROWS=() VLESS_PRIVATE_KEYS=() VLESS_PUBLIC_KEYS=() VLESS_SHORT_IDS=()
+    local VLESS_REALITY_SERVER_NAME="" VLESS_FLOW="xtls-rprx-vision" VLESS_CLIENT_FINGERPRINT="chrome"
     local -a HY2_PORTS=() HY2_TAGS=() HY2_MPORTS=() HY2_OBFS_PASSWORDS=() HY2_USER_ROWS=()
     local -a RESERVED_PORTS=() NEW_PORTS=()
     local HY2_UP="" HY2_DOWN=""
@@ -4507,7 +4640,7 @@ _mihomoconf_setup() {
     fi
     _info "配置: ${CONFIG_FILE}"
     _info "状态: ${CONFIG_STATUS}"
-    _info "支持: AnyTLS / SS2022 / HY2"
+    _info "支持: AnyTLS / VLESS Vision Reality / SS2022 / HY2"
     SAVED_HOST=$(_mihomoconf_get_saved_host "$CONFIG_FILE")
     [[ -n "$SAVED_HOST" ]] && _info "已保存 Host: ${SAVED_HOST}"
     IPV4_GOOGLE_PREF=$(_mihomoconf_ipv4_google_pref_get "$CONFIG_FILE")
@@ -4539,7 +4672,7 @@ _mihomoconf_setup() {
     printf "  ${DIM}提示: 每输入一次数字就会创建一个对应协议入站，例如 1 1 3 = 2个SS2022 + 1个HY2${PLAIN}\n"
     _separator
     _menu_pair "1" "SS2022" "" "green" "2" "AnyTLS" "" "green"
-    _menu_item "3" "HY2" "" "green"
+    _menu_pair "3" "VLESS Vision Reality" "" "green" "4" "HY2" "" "green"
     _separator
     local PROTOCOL_CHOICES
     read -rp "  选择 (如 \"1 1 2\" 表示 2 个 SS + 1 个 AnyTLS): " -a PROTOCOL_CHOICES
@@ -4548,17 +4681,19 @@ _mihomoconf_setup() {
         case "$ch" in
             1) ENABLE_SS="y"; SS_COUNT=$((SS_COUNT + 1)) ;;
             2) ENABLE_ANYTLS="y"; ANYTLS_COUNT=$((ANYTLS_COUNT + 1)) ;;
-            3) ENABLE_HY2="y"; HY2_COUNT=$((HY2_COUNT + 1)) ;;
+            3) ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
+            4) ENABLE_HY2="y"; HY2_COUNT=$((HY2_COUNT + 1)) ;;
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 ]]; then
+    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
     fi
     _status_kv "SS2022 数量" "${SS_COUNT}" "cyan" 10
     _status_kv "AnyTLS 数量" "${ANYTLS_COUNT}" "cyan" 10
+    _status_kv "VLESS 数量" "${VLESS_COUNT}" "cyan" 10
     _status_kv "HY2 数量" "${HY2_COUNT}" "cyan" 10
 
     # ---- 追加模式: 检查已有同协议节点 ----
@@ -4583,6 +4718,16 @@ _mihomoconf_setup() {
             read -rp "  请选择 [1/2，默认 2]: " anytls_action
             [[ "${anytls_action:-2}" == "1" ]] && ANYTLS_REPLACE="y"
         fi
+        if [[ "$ENABLE_VLESS" == "y" ]] && _mihomoconf_has_listener_type "vless"; then
+            _warn "配置中已存在 VLESS Vision Reality 节点:"
+            _mihomoconf_list_listeners "vless"
+            _separator
+            _menu_pair "1" "覆盖已有 VLESS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local vless_action
+            read -rp "  请选择 [1/2，默认 2]: " vless_action
+            [[ "${vless_action:-2}" == "1" ]] && VLESS_REPLACE="y"
+        fi
         if [[ "$ENABLE_HY2" == "y" ]] && _mihomoconf_has_listener_type "hysteria2"; then
             _warn "配置中已存在 HY2 节点:"
             _mihomoconf_list_listeners "hysteria2"
@@ -4599,12 +4744,15 @@ _mihomoconf_setup() {
     if [[ "$WRITE_MODE" == "append" && -f "$CONFIG_FILE" ]]; then
         local _e_type _e_name _e_port _e_cipher _e_password _e_user_id _e_user_pass _e_sni _e_tag
         local _e_hy2_up _e_hy2_down _e_hy2_ignore _e_hy2_obfs _e_hy2_obfs_password _e_hy2_masquerade _e_hy2_mport _e_hy2_insecure
+        local _e_vless_public_key _e_vless_short_id _e_vless_flow _e_vless_client_fingerprint
         while IFS=$'\x1f' read -r _e_type _e_name _e_port _e_cipher _e_password _e_user_id _e_user_pass _e_sni \
-            _e_hy2_up _e_hy2_down _e_hy2_ignore _e_hy2_obfs _e_hy2_obfs_password _e_hy2_masquerade _e_hy2_mport _e_hy2_insecure _e_tag; do
+            _e_hy2_up _e_hy2_down _e_hy2_ignore _e_hy2_obfs _e_hy2_obfs_password _e_hy2_masquerade _e_hy2_mport _e_hy2_insecure _e_tag \
+            _e_vless_public_key _e_vless_short_id _e_vless_flow _e_vless_client_fingerprint; do
             [[ -z "${_e_port:-}" ]] && continue
             case "$_e_type" in
                 shadowsocks) [[ "$SS_REPLACE" == "y" ]] && continue ;;
                 anytls) [[ "$ANYTLS_REPLACE" == "y" ]] && continue ;;
+                vless) [[ "$VLESS_REPLACE" == "y" ]] && continue ;;
                 hysteria2) [[ "$HY2_REPLACE" == "y" ]] && continue ;;
             esac
             _mihomoconf_port_in_list "$_e_port" "${RESERVED_PORTS[@]}" || RESERVED_PORTS+=("$_e_port")
@@ -4707,6 +4855,70 @@ _mihomoconf_setup() {
             done <<< "$_user_rows"
         done
         _info "AnyTLS 已生成 ${#ANYTLS_PORTS[@]} 个入站，共 ${_user_total} 个 user"
+    fi
+
+    # ---- VLESS Vision Reality 配置 ----
+    if [[ "$ENABLE_VLESS" == "y" ]]; then
+        printf "  ${BOLD}VLESS Vision Reality 配置${PLAIN}\n"
+        _separator
+        local _vless_idx vless_port_input
+        for ((_vless_idx=1; _vless_idx<=VLESS_COUNT; _vless_idx++)); do
+            while true; do
+                read -rp "    VLESS #${_vless_idx} 监听端口 [默认 443]: " vless_port_input
+                vless_port_input=$(_mihomoconf_trim "${vless_port_input:-443}")
+                if _is_valid_port "$vless_port_input"; then
+                    if _mihomoconf_port_in_list "$vless_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${vless_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$vless_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${vless_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    VLESS_PORTS+=("$vless_port_input")
+                    NEW_PORTS+=("$vless_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        if [[ -n "${ANYTLS_SNI:-}" ]]; then
+            read -rp "    伪造域名 [默认复用 AnyTLS: ${ANYTLS_SNI}]: " VLESS_REALITY_SERVER_NAME
+            VLESS_REALITY_SERVER_NAME=$(_mihomoconf_trim "${VLESS_REALITY_SERVER_NAME:-$ANYTLS_SNI}")
+        else
+            read -rp "    伪造域名 (必填，如 www.microsoft.com): " VLESS_REALITY_SERVER_NAME
+            VLESS_REALITY_SERVER_NAME=$(_mihomoconf_trim "${VLESS_REALITY_SERVER_NAME:-}")
+        fi
+        if [[ -z "$VLESS_REALITY_SERVER_NAME" ]]; then
+            _error_no_exit "VLESS Reality 伪造域名不能为空"
+            _press_any_key
+            return
+        fi
+
+        local i _keypair _vless_private_key _vless_public_key _vless_short_id
+        local _user_rows _u_name _u_uuid _vless_user_total=0
+        for i in "${!VLESS_PORTS[@]}"; do
+            if ! _keypair=$(_mihomoconf_gen_reality_keypair); then
+                _error_no_exit "生成 Reality 密钥失败，请先安装支持 reality-keypair 的 mihomo 后重试"
+                _press_any_key
+                return
+            fi
+            IFS=$'\t' read -r _vless_private_key _vless_public_key <<< "$_keypair"
+            _vless_short_id=$(_mihomoconf_gen_reality_short_id)
+            VLESS_PRIVATE_KEYS+=("$_vless_private_key")
+            VLESS_PUBLIC_KEYS+=("$_vless_public_key")
+            VLESS_SHORT_IDS+=("$_vless_short_id")
+            VLESS_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_relay")")
+
+            _user_rows=$(_mihomoconf_collect_users_input "VLESS #$((i + 1))" "" "vless")
+            while IFS=$'\t' read -r _u_name _u_uuid; do
+                [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
+                VLESS_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
+                _vless_user_total=$((_vless_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "VLESS Vision Reality 已生成 ${#VLESS_PORTS[@]} 个入站，共 ${_vless_user_total} 个 user"
     fi
 
     # ---- HY2 配置 ----
@@ -4832,6 +5044,8 @@ _mihomoconf_setup() {
         HOST_DEFAULT="$SAVED_HOST"
     elif [[ -n "${ANYTLS_SNI:-}" ]]; then
         HOST_DEFAULT="$ANYTLS_SNI"
+    elif [[ -n "${VLESS_REALITY_SERVER_NAME:-}" ]]; then
+        HOST_DEFAULT="$VLESS_REALITY_SERVER_NAME"
     elif [[ -n "${HY2_SNI:-}" ]]; then
         HOST_DEFAULT="$HY2_SNI"
     else
@@ -4850,8 +5064,9 @@ _mihomoconf_setup() {
         local i
         local _ss_port _ss_tag
         local _anytls_port _anytls_tag
+        local _vless_port _vless_tag _vless_private_key _vless_public_key _vless_short_id
         local _hy2_port _hy2_tag _hy2_mport _hy2_obfs_password
-        local _row _li _u_name _u_pass
+        local _row _li _u_name _u_pass _u_uuid
         if [[ "$ENABLE_SS" == "y" ]]; then
             for i in "${!SS_PORTS[@]}"; do
                 _ss_port="${SS_PORTS[$i]}"
@@ -4897,6 +5112,46 @@ MIHOMOCONF_AT_EOF
                     [[ "$_li" == "$i" ]] || continue
                     printf "      \"%s\": \"%s\"\n" "$_u_name" "$_u_pass" >> "$_target_file"
                 done
+            done
+        fi
+        if [[ "$ENABLE_VLESS" == "y" ]]; then
+            for i in "${!VLESS_PORTS[@]}"; do
+                _vless_port="${VLESS_PORTS[$i]}"
+                _vless_tag="${VLESS_TAGS[$i]}"
+                _vless_private_key="${VLESS_PRIVATE_KEYS[$i]}"
+                _vless_public_key="${VLESS_PUBLIC_KEYS[$i]}"
+                _vless_short_id="${VLESS_SHORT_IDS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_EOF
+  - name: vless-in-${_vless_port}
+    tag: "${_vless_tag}"
+    type: vless
+    port: ${_vless_port}
+    listen: "::"
+    # vpsgo-server-name: ${VLESS_REALITY_SERVER_NAME}
+    # vpsgo-vless-flow: ${VLESS_FLOW}
+    # vpsgo-vless-client-fingerprint: ${VLESS_CLIENT_FINGERPRINT}
+    # vpsgo-reality-public-key: ${_vless_public_key}
+    # vpsgo-reality-short-id: ${_vless_short_id}
+    users:
+MIHOMOCONF_VLESS_EOF
+                for _row in "${VLESS_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_USER_EOF
+      - username: "${_u_name}"
+        uuid: "${_u_uuid}"
+        flow: ${VLESS_FLOW}
+MIHOMOCONF_VLESS_USER_EOF
+                done
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_REALITY_EOF
+    reality-config:
+      dest: ${VLESS_REALITY_SERVER_NAME}:443
+      private-key: ${_vless_private_key}
+      short-id:
+        - ${_vless_short_id}
+      server-names:
+        - ${VLESS_REALITY_SERVER_NAME}
+MIHOMOCONF_VLESS_REALITY_EOF
             done
         fi
         if [[ "$ENABLE_HY2" == "y" ]]; then
@@ -4965,6 +5220,7 @@ MIHOMOCONF_HEADER
     else
         [[ "$SS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "shadowsocks" && _info "已移除旧的 SS2022 节点"
         [[ "$ANYTLS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "anytls" && _info "已移除旧的 AnyTLS 节点"
+        [[ "$VLESS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless" && _info "已移除旧的 VLESS 节点"
         [[ "$HY2_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "hysteria2" && _info "已移除旧的 HY2 节点"
         if grep -q '^listeners:' "$CONFIG_FILE" 2>/dev/null; then
             # 将新 listener 内容插入到 listeners: 块末尾（下一个顶级键之前）
@@ -5106,6 +5362,66 @@ MIHOMOCONF_AT_YAML
             done
             if [[ "$_user_idx" -eq 0 ]]; then
                 _warn "  AnyTLS 入站 ${_anytls_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # VLESS Vision Reality 输出
+    if [[ "$ENABLE_VLESS" == "y" ]]; then
+        printf "  ${BOLD}VLESS Vision Reality 连接信息 (%s 个)${PLAIN}\n" "${#VLESS_PORTS[@]}"
+        local i VLESS_LINK _vless_port _vless_tag _vless_name _vless_client_name
+        local _vless_public_key _vless_private_key _vless_short_id _vless_user_idx _u_uuid
+        local _row _li _u_name
+        for i in "${!VLESS_PORTS[@]}"; do
+            _vless_port="${VLESS_PORTS[$i]}"
+            _vless_tag="${VLESS_TAGS[$i]}"
+            _vless_private_key="${VLESS_PRIVATE_KEYS[$i]}"
+            _vless_public_key="${VLESS_PUBLIC_KEYS[$i]}"
+            _vless_short_id="${VLESS_SHORT_IDS[$i]}"
+            _vless_name=$(_mihomoconf_make_node_name "VLESS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vless_name"
+            printf "      入站tag : ${GREEN}%s${PLAIN}\n" "$_vless_tag"
+            printf "      服务器  : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口    : ${GREEN}%s${PLAIN}\n" "$_vless_port"
+            printf "      伪造域名: ${GREEN}%s${PLAIN}\n" "$VLESS_REALITY_SERVER_NAME"
+            printf "      Flow    : ${GREEN}%s${PLAIN}\n" "$VLESS_FLOW"
+            printf "      指纹    : ${GREEN}%s${PLAIN}\n" "$VLESS_CLIENT_FINGERPRINT"
+            printf "      Reality 公钥 : ${GREEN}%s${PLAIN}\n" "$_vless_public_key"
+            printf "      Reality 私钥 : ${GREEN}%s${PLAIN}\n" "$_vless_private_key"
+            printf "      Short ID: ${GREEN}%s${PLAIN}\n" "$_vless_short_id"
+            _vless_user_idx=0
+            for _row in "${VLESS_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _vless_user_idx=$((_vless_user_idx + 1))
+                _vless_client_name="${_vless_name}-${_u_name}"
+                VLESS_LINK=$(_mihomoconf_gen_vless_link "$SERVER_HOST" "$_vless_port" "$_u_uuid" "$_vless_client_name" "$VLESS_REALITY_SERVER_NAME" "$_vless_public_key" "$_vless_short_id" "$VLESS_FLOW" "$VLESS_CLIENT_FINGERPRINT")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_user_idx" "$_u_name"
+                printf "      UUID    : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
+                printf "  ${BOLD}VLESS 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$VLESS_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_VLESS_YAML
+    proxies:
+      - name: "${_vless_client_name}"
+        type: vless
+        server: ${SERVER_HOST}
+        port: ${_vless_port}
+        udp: true
+        uuid: "${_u_uuid}"
+        flow: ${VLESS_FLOW}
+        packet-encoding: xudp
+        tls: true
+        servername: ${VLESS_REALITY_SERVER_NAME}
+        client-fingerprint: ${VLESS_CLIENT_FINGERPRINT}
+        reality-opts:
+          public-key: "${_vless_public_key}"
+          short-id: "${_vless_short_id}"
+MIHOMOCONF_VLESS_YAML
+            done
+            if [[ "$_vless_user_idx" -eq 0 ]]; then
+                _warn "  VLESS 入站 ${_vless_tag} 未配置 user，已跳过导出"
             fi
         done
     fi
@@ -5733,8 +6049,10 @@ _mihomo_read_config() {
     local listener_total=0 listener_export=0 proxy_total=0 proxy_export=0
     local type name port cipher password user_id user_pass sni listener_tag
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure
+    local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     local p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport
     local p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive
+    local p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding
     local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0" SS_EXPORT_ASKED="0"
     local SS_EXPORT_UDP_BOOL="true" SS_EXPORT_UOT_BOOL="false"
     local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
@@ -5754,7 +6072,7 @@ _mihomo_read_config() {
     fi
 
     _info "配置文件: ${config_file}"
-    _info "支持导出 listeners(AnyTLS / SS2022 / HY2) 与 proxies(WireGuard Beta)"
+    _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2) 与 proxies(WireGuard Beta)"
     saved_host=$(_mihomoconf_get_saved_host "$config_file")
     if [[ -n "$saved_host" ]]; then
         server_ip="$saved_host"
@@ -5775,7 +6093,8 @@ _mihomo_read_config() {
     fi
 
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
-        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag; do
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
         [[ -z "${name:-}" ]] && continue
         total_count=$((total_count + 1))
         listener_total=$((listener_total + 1))
@@ -5879,6 +6198,53 @@ MIHOMO_ANYTLS_JSON
                     _warn "跳过 ${name}: 未配置可用 user"
                 fi
                 ;;
+            vless)
+                if [[ -z "$port" || -z "$sni" || -z "$vless_public_key" || -z "$vless_short_id" ]]; then
+                    _warn "跳过 ${name}: VLESS Reality 字段不完整(port/server-name/public-key/short-id)"
+                    continue
+                fi
+                local vless_found=0 vless_link vless_name vless_user vless_uuid vless_flow_value vless_fp_value
+                vless_flow_value="${vless_flow:-xtls-rprx-vision}"
+                vless_fp_value="${vless_client_fingerprint:-chrome}"
+                while IFS=$'\x1f' read -r vless_user vless_uuid; do
+                    [[ -z "${vless_user:-}" || -z "${vless_uuid:-}" ]] && continue
+                    vless_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    vless_name="$(_mihomoconf_make_node_name "VLESS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
+                    vless_link=$(_mihomoconf_gen_vless_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$sni" "$vless_public_key" "$vless_short_id" "$vless_flow_value" "$vless_fp_value")
+                    _separator
+                    printf "  ${BOLD}[VLESS Reality] %s${PLAIN}\n" "$vless_name"
+                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$vless_user"
+                    printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vless_uuid"
+                    printf "    伪造域名: ${GREEN}%s${PLAIN}\n" "$sni"
+                    printf "    Reality 公钥: ${GREEN}%s${PLAIN}\n" "$vless_public_key"
+                    printf "    Short ID: ${GREEN}%s${PLAIN}\n" "$vless_short_id"
+                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
+                    printf "    YAML:\n"
+                    cat <<MIHOMO_VLESS_YAML
+    proxies:
+      - name: "${vless_name}"
+        type: vless
+        server: ${server_ip}
+        port: ${port}
+        udp: true
+        uuid: "${vless_uuid}"
+        flow: ${vless_flow_value}
+        packet-encoding: xudp
+        tls: true
+        servername: ${sni}
+        client-fingerprint: ${vless_fp_value}
+        reality-opts:
+          public-key: "${vless_public_key}"
+          short-id: "${vless_short_id}"
+MIHOMO_VLESS_YAML
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$vless_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
             hysteria2)
                 if [[ -z "$port" ]]; then
                     _warn "跳过 ${name}: 节点字段不完整"
@@ -5931,7 +6297,8 @@ MIHOMO_HY2_JSON
     done < <(_mihomoconf_read_listener_rows "$config_file")
 
     while IFS=$'\x1f' read -r p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport \
-        p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive; do
+        p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive \
+        p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding; do
         [[ -z "${p_name:-}" ]] && continue
         proxy_total=$((proxy_total + 1))
         total_count=$((total_count + 1))
@@ -5993,7 +6360,7 @@ MIHOMO_WG_YAML2
     if [[ "$total_count" -eq 0 ]]; then
         _warn "未在配置中检测到可读节点 (listeners/proxies)"
     elif [[ "$export_count" -eq 0 ]]; then
-        _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/SS2022/HY2/WireGuard(Beta) 节点"
+        _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/VLESS/SS2022/HY2/WireGuard(Beta) 节点"
     else
         _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
         _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (WireGuard Beta)"
@@ -6074,13 +6441,17 @@ _mihomochain_read_proxy_rows() {
         function reset_item() {
             name=type=server=port=cipher=username=password=sni=insecure=obfs=obfs_password=mport=""
             wg_ip=wg_ipv6=wg_private_key=wg_public_key=wg_allowed_ips=wg_preshared_key=wg_reserved=wg_mtu=wg_keepalive=""
+            vless_uuid=vless_flow=vless_public_key=vless_short_id=vless_client_fingerprint=vless_packet_encoding=""
+            in_reality=0
+            reality_indent=-1
         }
         function emit() {
             if (name == "") return
             if (insecure == "") insecure="0"
-            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
+            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
                 name, type, server, port, cipher, username, password, sni, insecure, obfs, obfs_password, mport, \
-                wg_ip, wg_ipv6, wg_private_key, wg_public_key, wg_allowed_ips, wg_preshared_key, wg_reserved, wg_mtu, wg_keepalive
+                wg_ip, wg_ipv6, wg_private_key, wg_public_key, wg_allowed_ips, wg_preshared_key, wg_reserved, wg_mtu, wg_keepalive, \
+                vless_uuid, vless_flow, vless_public_key, vless_short_id, vless_client_fingerprint, vless_packet_encoding
         }
         BEGIN {
             in_proxies=0
@@ -6149,12 +6520,56 @@ _mihomochain_read_proxy_rows() {
             if (sni == "") sni=unquote(trim(line))
             next
         }
+        /^    uuid:/ {
+            line=$0
+            sub(/^    uuid:[[:space:]]*/, "", line)
+            vless_uuid=unquote(trim(line))
+            next
+        }
+        /^    flow:/ {
+            line=$0
+            sub(/^    flow:[[:space:]]*/, "", line)
+            vless_flow=unquote(trim(line))
+            next
+        }
+        /^    packet-encoding:/ {
+            line=$0
+            sub(/^    packet-encoding:[[:space:]]*/, "", line)
+            vless_packet_encoding=unquote(trim(line))
+            next
+        }
+        /^    client-fingerprint:/ {
+            line=$0
+            sub(/^    client-fingerprint:[[:space:]]*/, "", line)
+            vless_client_fingerprint=unquote(trim(line))
+            next
+        }
         /^    skip-cert-verify:/ {
             line=$0
             sub(/^    skip-cert-verify:[[:space:]]*/, "", line)
             line=trim(line)
             if (line == "true" || line == "1") insecure="1"
             else insecure="0"
+            next
+        }
+        /^    reality-opts:[[:space:]]*$/ {
+            in_reality=1
+            reality_indent=4
+            next
+        }
+        in_reality && /^    [^ ]/ {
+            in_reality=0
+        }
+        in_reality && /^      public-key:/ {
+            line=$0
+            sub(/^      public-key:[[:space:]]*/, "", line)
+            vless_public_key=unquote(trim(line))
+            next
+        }
+        in_reality && /^      short-id:/ {
+            line=$0
+            sub(/^      short-id:[[:space:]]*/, "", line)
+            vless_short_id=unquote(trim(line))
             next
         }
         /^    obfs:/ {
@@ -6239,8 +6654,10 @@ _mihomochain_outbound_exists() {
     local tag="$1"
     local name type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
     while IFS=$'\x1f' read -r name type server port cipher username password sni insecure obfs obfs_password mport \
-        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive; do
+        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
         [[ "$name" == "$tag" ]] && return 0
     done < <(_mihomochain_read_proxy_rows)
     return 1
@@ -6261,8 +6678,10 @@ _mihomochain_outbound_name_by_tag() {
     local tag="$1"
     local name type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
     while IFS=$'\x1f' read -r name type server port cipher username password sni insecure obfs obfs_password mport \
-        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive; do
+        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
         if [[ "$name" == "$tag" ]]; then
             printf '%s' "$name"
             return 0
@@ -6276,8 +6695,10 @@ _mihomochain_outbound_tag_by_name() {
     local name="$1"
     local n type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
     while IFS=$'\x1f' read -r n type server port cipher username password sni insecure obfs obfs_password mport \
-        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive; do
+        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
         if [[ "$n" == "$name" ]]; then
             printf '%s' "$n"
             return 0
@@ -6305,8 +6726,10 @@ _mihomochain_listener_name_by_tag() {
     local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}" in_tag="$2"
     local type name port cipher password user_id user_pass sni
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag
+    local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
-        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag; do
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
         [[ -z "${name:-}" ]] && continue
         if [[ "${listener_tag:-}" == "$in_tag" ]]; then
             printf '%s' "$name"
@@ -6321,8 +6744,10 @@ _mihomochain_listener_tag_by_name() {
     local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}" in_name="$2"
     local type name port cipher password user_id user_pass sni
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag
+    local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
-        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag; do
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
         [[ -z "${name:-}" ]] && continue
         if [[ "${name}" == "$in_name" ]]; then
             printf '%s' "${listener_tag}"
@@ -6336,8 +6761,10 @@ _mihomochain_list_outbounds() {
     local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}"
     local shown=0 name type server port cipher username password sni insecure obfs obfs_password mport show_name
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
     while IFS=$'\x1f' read -r name type server port cipher username password sni insecure obfs obfs_password mport \
-        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive; do
+        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
         [[ -z "${name:-}" ]] && continue
         [[ "$name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
         shown=1
@@ -6359,6 +6786,13 @@ _mihomochain_list_outbounds() {
                 [[ -n "${obfs:-}" ]] && extra="${extra}, obfs=${obfs}"
                 [[ "${insecure:-0}" == "1" ]] && extra="${extra}, insecure=1"
                 printf "      %s (type=%s, %s:%s%s)\n" "$show_name" "$type" "$server" "$port" "$extra"
+                ;;
+            vless)
+                local vless_extra=""
+                [[ -n "${sni:-}" ]] && vless_extra="${vless_extra}, sni=${sni}"
+                [[ -n "${vless_flow:-}" ]] && vless_extra="${vless_extra}, flow=${vless_flow}"
+                [[ -n "${vless_short_id:-}" ]] && vless_extra="${vless_extra}, sid=${vless_short_id}"
+                printf "      %s (type=vless, %s:%s%s)\n" "$show_name" "$server" "$port" "$vless_extra"
                 ;;
             socks5|http)
                 if [[ -n "${username:-}" || -n "${password:-}" ]]; then
@@ -6479,9 +6913,11 @@ _mihomochain_list_listeners() {
     local found=0
     local type name port cipher password user_id user_pass sni
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag
+    local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     local u_name u_pass u_count
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
-        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag; do
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
         [[ -z "${name:-}" ]] && continue
         found=1
         listener_tag="${listener_tag:-$name}"
@@ -6550,9 +6986,12 @@ _mihomochain_add_or_update_outbound() {
     local sni="${8:-}" insecure="${9:-0}" obfs="${10:-}" obfs_password="${11:-}" mport="${12:-}" out_name="${13:-}"
     local wg_ip="${14:-}" wg_ipv6="${15:-}" wg_private_key="${16:-}" wg_public_key="${17:-}"
     local wg_allowed_ips="${18:-}" wg_preshared_key="${19:-}" wg_reserved="${20:-}" wg_mtu="${21:-}" wg_keepalive="${22:-}"
+    local vless_uuid="${23:-}" vless_flow="${24:-xtls-rprx-vision}" vless_public_key="${25:-}"
+    local vless_short_id="${26:-}" vless_client_fingerprint="${27:-chrome}" vless_packet_encoding="${28:-xudp}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
     local name q_name q_server q_cipher q_user q_pass q_sni q_obfs q_obfs_password q_mport
     local q_wg_ip q_wg_ipv6 q_wg_private_key q_wg_public_key q_wg_allowed_ips q_wg_preshared_key q_wg_reserved
+    local q_vless_uuid q_vless_flow q_vless_public_key q_vless_short_id q_vless_client_fingerprint q_vless_packet_encoding
     local tmp_block
 
     name="${out_name:-$tag}"
@@ -6572,6 +7011,12 @@ _mihomochain_add_or_update_outbound() {
     q_wg_allowed_ips=$(_mihomochain_yaml_list_from_csv "$wg_allowed_ips")
     q_wg_preshared_key=$(_mihomochain_yaml_quote "$wg_preshared_key")
     q_wg_reserved=$(_mihomochain_yaml_quote "$wg_reserved")
+    q_vless_uuid=$(_mihomochain_yaml_quote "$vless_uuid")
+    q_vless_flow=$(_mihomochain_yaml_quote "$vless_flow")
+    q_vless_public_key=$(_mihomochain_yaml_quote "$vless_public_key")
+    q_vless_short_id=$(_mihomochain_yaml_quote "$vless_short_id")
+    q_vless_client_fingerprint=$(_mihomochain_yaml_quote "$vless_client_fingerprint")
+    q_vless_packet_encoding=$(_mihomochain_yaml_quote "$vless_packet_encoding")
 
     tmp_block=$(mktemp)
     case "$type" in
@@ -6621,6 +7066,45 @@ EOF
                 printf '    obfs: "%s"\n' "$q_obfs" >> "$tmp_block"
                 if [[ -n "$q_obfs_password" ]]; then
                     printf '    obfs-password: "%s"\n' "$q_obfs_password" >> "$tmp_block"
+                fi
+            fi
+            ;;
+        vless)
+            if [[ -z "$vless_uuid" ]]; then
+                rm -f "$tmp_block"
+                return 1
+            fi
+            cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: vless
+    server: "${q_server}"
+    port: ${port}
+    uuid: "${q_vless_uuid}"
+    udp: true
+    tls: true
+EOF
+            if [[ -n "$q_sni" ]]; then
+                printf '    servername: "%s"\n' "$q_sni" >> "$tmp_block"
+            fi
+            if [[ -n "$q_vless_flow" ]]; then
+                printf '    flow: "%s"\n' "$q_vless_flow" >> "$tmp_block"
+            fi
+            if [[ -n "$q_vless_packet_encoding" ]]; then
+                printf '    packet-encoding: "%s"\n' "$q_vless_packet_encoding" >> "$tmp_block"
+            fi
+            if [[ -n "$q_vless_client_fingerprint" ]]; then
+                printf '    client-fingerprint: "%s"\n' "$q_vless_client_fingerprint" >> "$tmp_block"
+            fi
+            if [[ "$insecure" == "1" ]]; then
+                echo "    skip-cert-verify: true" >> "$tmp_block"
+            fi
+            if [[ -n "$q_vless_public_key" || -n "$q_vless_short_id" ]]; then
+                echo "    reality-opts:" >> "$tmp_block"
+                if [[ -n "$q_vless_public_key" ]]; then
+                    printf '      public-key: "%s"\n' "$q_vless_public_key" >> "$tmp_block"
+                fi
+                if [[ -n "$q_vless_short_id" ]]; then
+                    printf '      short-id: "%s"\n' "$q_vless_short_id" >> "$tmp_block"
                 fi
             fi
             ;;
@@ -7234,12 +7718,13 @@ _mihomo_chain_proxy_manage() {
             2)
                 printf "  ${BOLD}添加出口节点${PLAIN}\n"
                 _separator
-                _menu_pair "1" "通过链接导入" "ss:// hy2:// anytls:// wireguard:// (Beta)" "green" "2" "手动录入" "" "green"
+                _menu_pair "1" "通过链接导入" "ss:// hy2:// anytls:// vless:// wireguard:// (Beta)" "green" "2" "手动录入" "" "green"
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
                 local out_sni out_insecure out_obfs out_obfs_pass out_mport
                 local out_wg_ip out_wg_ipv6 out_wg_private_key out_wg_public_key out_wg_allowed_ips
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
+                local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding
                 read -rp "  请选择 [1/2]: " import_mode
                 import_mode=$(_mihomoconf_trim "${import_mode:-}")
                 case "$import_mode" in
@@ -7271,13 +7756,19 @@ _mihomo_chain_proxy_manage() {
                 out_wg_reserved=""
                 out_wg_mtu=""
                 out_wg_keepalive=""
+                out_vless_uuid=""
+                out_vless_flow="xtls-rprx-vision"
+                out_vless_public_key=""
+                out_vless_short_id=""
+                out_vless_client_fingerprint="chrome"
+                out_vless_packet_encoding="xudp"
                 case "$import_mode" in
                     1)
                         local in_link link_body link_userinfo link_hostport link_query link_name
                         local rename_confirm custom_name_input
                         local ss_decoded kv k v
                         local -a _qarr
-                        read -rp "  输入链接 (ss:// / hy2:// / hysteria2:// / anytls:// / wireguard://[Beta]): " in_link
+                        read -rp "  输入链接 (ss:// / hy2:// / hysteria2:// / anytls:// / vless:// / wireguard://[Beta]): " in_link
                         in_link=$(_mihomoconf_trim "${in_link:-}")
                         if [[ -z "$in_link" ]]; then
                             _error_no_exit "链接不能为空"
@@ -7426,6 +7917,67 @@ _mihomo_chain_proxy_manage() {
                                     done
                                 fi
                                 ;;
+                            vless://*)
+                                link_body="${in_link#vless://}"
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                if [[ "$link_body" != *@* ]]; then
+                                    _error_no_exit "vless 链接格式错误"
+                                    _press_any_key
+                                    continue
+                                fi
+                                link_userinfo="${link_body%@*}"
+                                link_hostport="${link_body#*@}"
+                                link_hostport="${link_hostport%%/*}"
+                                out_server="${link_hostport%:*}"
+                                out_port="${link_hostport##*:}"
+                                out_vless_uuid=$(_mihomochain_urldecode "$link_userinfo")
+                                if [[ -z "$out_server" || -z "$out_vless_uuid" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "vless 链接解析失败"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="vless"
+                                if [[ -n "$link_query" ]]; then
+                                    local out_vless_security="" out_vless_network=""
+                                    IFS='&' read -r -a _qarr <<< "$link_query"
+                                    for kv in "${_qarr[@]}"; do
+                                        k="${kv%%=*}"
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        k=$(_mihomochain_urldecode "$k")
+                                        v=$(_mihomochain_urldecode "$v")
+                                        case "$k" in
+                                            sni|peer|servername|host) out_sni="$v" ;;
+                                            security) out_vless_security="$v" ;;
+                                            type|network) out_vless_network="$v" ;;
+                                            flow) out_vless_flow="$v" ;;
+                                            fp|client-fingerprint|client_fingerprint) out_vless_client_fingerprint="$v" ;;
+                                            pbk|public-key|public_key) out_vless_public_key="$v" ;;
+                                            sid|short-id|short_id) out_vless_short_id="$v" ;;
+                                            packet-encoding|packetEncoding) out_vless_packet_encoding="$v" ;;
+                                            insecure)
+                                                if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then
+                                                    out_insecure="1"
+                                                fi
+                                                ;;
+                                        esac
+                                    done
+                                    if [[ -n "$out_vless_security" && "$out_vless_security" != "reality" && "$out_vless_security" != "tls" && "$out_vless_security" != "none" ]]; then
+                                        _error_no_exit "暂不支持该 VLESS security=${out_vless_security}"
+                                        _press_any_key
+                                        continue
+                                    fi
+                                    if [[ -n "$out_vless_network" && "$out_vless_network" != "tcp" ]]; then
+                                        _error_no_exit "当前仅支持 VLESS TCP 出站导入"
+                                        _press_any_key
+                                        continue
+                                    fi
+                                fi
+                                ;;
                             wireguard://*|wg://*)
                                 if [[ "$in_link" == wireguard://* ]]; then
                                     link_body="${in_link#wireguard://}"
@@ -7487,7 +8039,7 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                             *)
-                                _error_no_exit "暂不支持该链接类型，请使用 ss:// / hy2:// / hysteria2:// / anytls:// / wireguard://(Beta)"
+                                _error_no_exit "暂不支持该链接类型，请使用 ss:// / hy2:// / hysteria2:// / anytls:// / vless:// / wireguard://(Beta)"
                                 _press_any_key
                                 continue
                                 ;;
@@ -7505,18 +8057,20 @@ _mihomo_chain_proxy_manage() {
                     2)
                         _separator
                         _menu_pair "1" "ss" "" "green" "2" "hy2" "" "green"
-                        _menu_pair "3" "anytls" "" "green" "4" "socks5" "" "green"
-                        _menu_pair "5" "http" "" "green" "6" "wireguard (Beta)" "" "green"
+                        _menu_pair "3" "anytls" "" "green" "4" "vless" "" "green"
+                        _menu_pair "5" "socks5" "" "green" "6" "http" "" "green"
+                        _menu_item "7" "wireguard (Beta)" "" "green"
                         _separator
                         local type_choice
-                        read -rp "  出站类型 [1-6]: " type_choice
+                        read -rp "  出站类型 [1-7]: " type_choice
                         case "$type_choice" in
                             1) out_type="ss" ;;
                             2) out_type="hysteria2" ;;
                             3) out_type="anytls" ;;
-                            4) out_type="socks5" ;;
-                            5) out_type="http" ;;
-                            6) out_type="wireguard" ;;
+                            4) out_type="vless" ;;
+                            5) out_type="socks5" ;;
+                            6) out_type="http" ;;
+                            7) out_type="wireguard" ;;
                             *) _error_no_exit "无效类型"; _press_any_key; continue ;;
                         esac
                         read -rp "  出口节点名称: " out_name
@@ -7561,6 +8115,30 @@ _mihomo_chain_proxy_manage() {
                                 read -rp "  mport [可留空]: " out_mport
                                 if [[ -z "$out_pass" ]]; then
                                     _error_no_exit "hy2 password 不能为空"
+                                    _press_any_key
+                                    continue
+                                fi
+                                ;;
+                            vless)
+                                read -rp "  uuid: " out_vless_uuid
+                                out_vless_uuid=$(_mihomoconf_trim "${out_vless_uuid:-}")
+                                read -rp "  servername/sni [可留空，默认跟随 server]: " out_sni
+                                out_sni=$(_mihomoconf_trim "${out_sni:-}")
+                                read -rp "  flow [默认 xtls-rprx-vision]: " out_vless_flow
+                                out_vless_flow=$(_mihomoconf_trim "${out_vless_flow:-xtls-rprx-vision}")
+                                read -rp "  client-fingerprint [默认 chrome]: " out_vless_client_fingerprint
+                                out_vless_client_fingerprint=$(_mihomoconf_trim "${out_vless_client_fingerprint:-chrome}")
+                                read -rp "  packet-encoding [默认 xudp]: " out_vless_packet_encoding
+                                out_vless_packet_encoding=$(_mihomoconf_trim "${out_vless_packet_encoding:-xudp}")
+                                read -rp "  reality public-key [可留空]: " out_vless_public_key
+                                out_vless_public_key=$(_mihomoconf_trim "${out_vless_public_key:-}")
+                                read -rp "  reality short-id [可留空]: " out_vless_short_id
+                                out_vless_short_id=$(_mihomoconf_trim "${out_vless_short_id:-}")
+                                local vless_insecure_input
+                                read -rp "  insecure (跳过证书验证)? [y/N]: " vless_insecure_input
+                                [[ "$vless_insecure_input" =~ ^[Yy] ]] && out_insecure="1" || out_insecure="0"
+                                if [[ -z "$out_vless_uuid" ]]; then
+                                    _error_no_exit "vless uuid 不能为空"
                                     _press_any_key
                                     continue
                                 fi
@@ -7625,7 +8203,8 @@ _mihomo_chain_proxy_manage() {
                 fi
 
                 if [[ "$out_name$out_server$out_cipher$out_user$out_pass$out_sni$out_obfs$out_obfs_pass$out_mport"\
-"$out_wg_ip$out_wg_ipv6$out_wg_private_key$out_wg_public_key$out_wg_allowed_ips$out_wg_preshared_key$out_wg_reserved$out_wg_mtu$out_wg_keepalive" == *"|"* ]]; then
+"$out_wg_ip$out_wg_ipv6$out_wg_private_key$out_wg_public_key$out_wg_allowed_ips$out_wg_preshared_key$out_wg_reserved$out_wg_mtu$out_wg_keepalive"\
+"$out_vless_uuid$out_vless_flow$out_vless_public_key$out_vless_short_id$out_vless_client_fingerprint$out_vless_packet_encoding" == *"|"* ]]; then
                     _error_no_exit "字段中不能包含字符 |"
                     _press_any_key
                     continue
@@ -7639,7 +8218,9 @@ _mihomo_chain_proxy_manage() {
                     "${out_cipher:-}" "${out_user:-}" "${out_pass:-}" \
                     "${out_sni:-}" "${out_insecure:-0}" "${out_obfs:-}" "${out_obfs_pass:-}" "${out_mport:-}" "${out_name}" \
                     "${out_wg_ip:-}" "${out_wg_ipv6:-}" "${out_wg_private_key:-}" "${out_wg_public_key:-}" \
-                    "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}"; then
+                    "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}" \
+                    "${out_vless_uuid:-}" "${out_vless_flow:-}" "${out_vless_public_key:-}" "${out_vless_short_id:-}" \
+                    "${out_vless_client_fingerprint:-}" "${out_vless_packet_encoding:-}"; then
                     _error_no_exit "保存出口节点失败"
                     _press_any_key
                     continue
@@ -7654,15 +8235,18 @@ _mihomo_chain_proxy_manage() {
                 local listener_name in_tag out_name out_show_name out_tag listener_input out_input
                 local li oi idx type server port cipher username password sni insecure obfs obfs_password mport
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
                 local l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
+                local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
                 local -a listener_names outbound_names outbound_show_names
 
                 printf "  ${BOLD}可用入站节点:${PLAIN}\n"
                 _separator
                 idx=0
                 while IFS=$'\x1f' read -r l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni \
-                    l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag; do
+                    l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag \
+                    l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint; do
                     [[ -z "${l_name:-}" ]] && continue
                     listener_names+=("$l_name")
                     idx=$((idx + 1))
@@ -7678,7 +8262,8 @@ _mihomo_chain_proxy_manage() {
                 _separator
                 idx=0
                 while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
-                    wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive; do
+                    wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
                     [[ -z "${out_name:-}" ]] && continue
                     [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
                     out_show_name=$(_mihomochain_display_name "$out_name")
@@ -7691,6 +8276,13 @@ _mihomo_chain_proxy_manage() {
                                 printf "      [%d] %s (type=wireguard, %s:%s, ip=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$wg_ip"
                             else
                                 printf "      [%d] %s (type=wireguard, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
+                            fi
+                            ;;
+                        vless)
+                            if [[ -n "${sni:-}" ]]; then
+                                printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$sni"
+                            else
+                                printf "      [%d] %s (type=vless, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
                             fi
                             ;;
                         *)
@@ -7763,8 +8355,10 @@ _mihomo_chain_proxy_manage() {
                 local user_listener_tag user_listener_name user_name out_name out_show_name out_tag
                 local listener_pick user_pick out_pick li ui oi idx type server port cipher username password sni insecure obfs obfs_password mport
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
                 local l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
+                local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
                 local u_name u_pass user_count
                 local -a listener_tags listener_names
                 local -a listener_users outbound_names outbound_show_names
@@ -7773,7 +8367,8 @@ _mihomo_chain_proxy_manage() {
                 _separator
                 idx=0
                 while IFS=$'\x1f' read -r l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni \
-                    l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag; do
+                    l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag \
+                    l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint; do
                     [[ -z "${l_name:-}" ]] && continue
                     l_listener_tag="${l_listener_tag:-$l_name}"
                     user_count=0
@@ -7845,7 +8440,8 @@ _mihomo_chain_proxy_manage() {
                 _separator
                 idx=0
                 while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
-                    wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive; do
+                    wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
                     [[ -z "${out_name:-}" ]] && continue
                     [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
                     out_show_name=$(_mihomochain_display_name "$out_name")
@@ -7858,6 +8454,13 @@ _mihomo_chain_proxy_manage() {
                                 printf "      [%d] %s (type=wireguard, %s:%s, ip=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$wg_ip"
                             else
                                 printf "      [%d] %s (type=wireguard, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
+                            fi
+                            ;;
+                        vless)
+                            if [[ -n "${sni:-}" ]]; then
+                                printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$sni"
+                            else
+                                printf "      [%d] %s (type=vless, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
                             fi
                             ;;
                         *)
@@ -7912,9 +8515,11 @@ _mihomo_chain_proxy_manage() {
                 _separator
                 local rm_out_idx=0 type server port cipher username password sni insecure obfs obfs_password mport out_name out_show_name
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
                 local -a rm_out_names rm_out_show_names rm_out_tags
                 while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
-                    wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive; do
+                    wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
                     [[ -z "${out_name:-}" ]] && continue
                     [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
                     out_show_name=$(_mihomochain_display_name "$out_name")
@@ -7928,6 +8533,13 @@ _mihomo_chain_proxy_manage() {
                                 printf "      [%d] %s (type=wireguard, %s:%s, ip=%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port" "$wg_ip"
                             else
                                 printf "      [%d] %s (type=wireguard, %s:%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port"
+                            fi
+                            ;;
+                        vless)
+                            if [[ -n "${sni:-}" ]]; then
+                                printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port" "$sni"
+                            else
+                                printf "      [%d] %s (type=vless, %s:%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port"
                             fi
                             ;;
                         *)
@@ -8065,6 +8677,7 @@ _mihomo_chain_proxy_manage() {
                 local add_username add_password add_overwrite add_result add_action
                 local idx li user_count l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
+                local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
                 local u_name u_pass
                 local -a add_listener_tags add_listener_names add_listener_types add_listener_ciphers
 
@@ -8072,7 +8685,8 @@ _mihomo_chain_proxy_manage() {
                 _separator
                 idx=0
                 while IFS=$'\x1f' read -r l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni \
-                    l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag; do
+                    l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag \
+                    l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint; do
                     [[ -z "${l_name:-}" ]] && continue
                     case "$l_type" in
                         anytls|hysteria2|hy2) ;;
@@ -9269,10 +9883,12 @@ _snell_port_conflict_with_mihomo() {
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
     local type name port cipher password user_id user_pass sni
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag
+    local vless_public_key vless_short_id vless_flow vless_client_fingerprint
 
     [[ -f "$config_file" ]] || return 1
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
-        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag; do
+        hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
         [[ -z "${port:-}" ]] && continue
         if [[ "$port" == "$target_port" ]]; then
             return 0
