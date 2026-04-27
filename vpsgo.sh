@@ -9,15 +9,16 @@
 #   4. TCP 缓冲区调优
 #   5. iPerf3 测速服务端
 #   6. NodeQuality 测试
-#   7. Docker 日志轮转配置
-#   8. Mihomo 管理 (安装/配置/重启/卸载)
-#   9. Sing-Box 管理 (安装/自启/重启/日志/卸载)
-#  10. Snell V5 管理 (官方安装/配置/重启/日志/卸载)
-#  11. WireGuard 原生节点 (安装/部署/重启/状态/卸载)
-#  12. Shadowsocks-Rust 管理 (安装/配置/重启/日志/卸载)
-#  13. Akile DNS 解锁检测与配置
-#  14. Linux DNS 管理 (临时/永久修改)
-#  15. Swap 管理
+#   7. Ookla Speedtest CLI 安装
+#   8. Docker 日志轮转配置
+#   9. Mihomo 管理 (安装/配置/重启/卸载)
+#  10. Sing-Box 管理 (安装/自启/重启/日志/卸载)
+#  11. Snell V5 管理 (官方安装/配置/重启/日志/卸载)
+#  12. WireGuard 原生节点 (安装/部署/重启/状态/卸载)
+#  13. Shadowsocks-Rust 管理 (安装/配置/重启/日志/卸载)
+#  14. Akile DNS 解锁检测与配置
+#  15. Linux DNS 管理 (临时/永久修改)
+#  16. Swap 管理
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -34,12 +35,14 @@ fi
 
 set -uo pipefail
 
-VERSION="2.37"
+VERSION="2.39"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
 UPDATE_URL="https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
 VPSGO_CONFIG_FILE="${VPSGO_CONFIG_FILE:-/etc/vpsgo/config}"
+_SPEEDTEST_VERSION="1.2.0"
+_SPEEDTEST_DOWNLOAD_BASE="https://install.speedtest.net/app/cli"
 _GITHUB_PROXY_DEFAULT_BASE="https://gh-proxy.org"
 _GITHUB_PROXY_ENABLED="0"
 _GITHUB_PROXY_BASE="$_GITHUB_PROXY_DEFAULT_BASE"
@@ -9104,6 +9107,404 @@ _nodequality_setup() {
     _press_any_key
 }
 
+# --- 7. Ookla Speedtest CLI 安装 ---
+
+_speedtest_prompt_yes_default() {
+    local prompt="$1" answer
+    read -rp "  ${prompt} [Y/n]: " answer
+    [[ ! "$answer" =~ ^[Nn] ]]
+}
+
+_speedtest_ensure_cmd_available() {
+    local cmd="$1" pkg="${2:-$1}"
+
+    if command -v "$cmd" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _warn "未检测到 ${cmd}，尝试安装 ${pkg}..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq "$pkg" >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y "$pkg" >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y "$pkg" >/dev/null 2>&1 || true
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm "$pkg" >/dev/null 2>&1 || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache "$pkg" >/dev/null 2>&1 || true
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y "$pkg" >/dev/null 2>&1 || true
+    elif command -v pkg >/dev/null 2>&1; then
+        pkg install -y "$pkg" >/dev/null 2>&1 || true
+    fi
+
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        _error_no_exit "缺少 ${cmd}，请先手动安装后重试"
+        return 1
+    fi
+    return 0
+}
+
+_speedtest_install_file() {
+    local src="$1" dst="$2" mode="${3:-0755}" dst_dir
+    dst_dir="$(dirname "$dst")"
+    mkdir -p "$dst_dir" || return 1
+
+    if command -v install >/dev/null 2>&1; then
+        install -m "$mode" "$src" "$dst" || return 1
+    else
+        cp "$src" "$dst" || return 1
+        chmod "$mode" "$dst" || return 1
+    fi
+}
+
+_speedtest_cleanup_deb_conflicts() {
+    local old_repo="/etc/apt/sources.list.d/speedtest.list"
+    if [[ -f "$old_repo" ]]; then
+        local backup="${old_repo}.bak.$(date +%Y%m%d%H%M%S)"
+        mv "$old_repo" "$backup"
+        _info "已备份旧 Bintray APT 源: ${backup}"
+        apt-get update -qq >/dev/null 2>&1 || true
+    fi
+
+    if command -v dpkg >/dev/null 2>&1 && dpkg -s speedtest-cli >/dev/null 2>&1; then
+        _warn "检测到非官方 speedtest-cli 包，可能与 Ookla 官方 speedtest 冲突"
+        if _speedtest_prompt_yes_default "是否移除 speedtest-cli"; then
+            apt-get remove -y speedtest-cli || return 1
+        else
+            _warn "已保留 speedtest-cli，后续安装可能失败"
+        fi
+    fi
+    return 0
+}
+
+_speedtest_install_deb_repo() {
+    _info "使用 Ookla 官方 APT 仓库安装..."
+    _speedtest_ensure_cmd_available curl curl || return 1
+    _speedtest_cleanup_deb_conflicts || return 1
+
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq curl ca-certificates >/dev/null 2>&1 || true
+    if ! curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash; then
+        return 1
+    fi
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y speedtest
+}
+
+_speedtest_cleanup_rpm_conflicts() {
+    local old_repo="/etc/yum.repos.d/bintray-ookla-rhel.repo"
+    local pkg_cmd="yum"
+    command -v dnf >/dev/null 2>&1 && pkg_cmd="dnf"
+
+    if [[ -f "$old_repo" ]]; then
+        local backup="${old_repo}.bak.$(date +%Y%m%d%H%M%S)"
+        mv "$old_repo" "$backup"
+        _info "已备份旧 Bintray RPM 源: ${backup}"
+    fi
+
+    if command -v rpm >/dev/null 2>&1 && rpm -q speedtest-cli >/dev/null 2>&1; then
+        _warn "检测到非官方 speedtest-cli 包，可能与 Ookla 官方 speedtest 冲突"
+        if _speedtest_prompt_yes_default "是否移除 speedtest-cli"; then
+            "$pkg_cmd" remove -y speedtest-cli || rpm -e speedtest-cli || return 1
+        else
+            _warn "已保留 speedtest-cli，后续安装可能失败"
+        fi
+    fi
+    return 0
+}
+
+_speedtest_install_rpm_repo() {
+    local pkg_cmd="yum"
+    command -v dnf >/dev/null 2>&1 && pkg_cmd="dnf"
+
+    _info "使用 Ookla 官方 RPM 仓库安装..."
+    _speedtest_ensure_cmd_available curl curl || return 1
+    _speedtest_cleanup_rpm_conflicts || return 1
+
+    if ! curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh | bash; then
+        return 1
+    fi
+    "$pkg_cmd" install -y speedtest
+}
+
+_speedtest_linux_arch_token() {
+    local arch
+
+    if command -v dpkg >/dev/null 2>&1; then
+        arch="$(dpkg --print-architecture 2>/dev/null || true)"
+        case "$arch" in
+            amd64) printf 'x86_64'; return 0 ;;
+            arm64) printf 'aarch64'; return 0 ;;
+            i386) printf 'i386'; return 0 ;;
+            armel|armhf) printf '%s' "$arch"; return 0 ;;
+        esac
+    fi
+
+    if command -v apk >/dev/null 2>&1; then
+        arch="$(apk --print-arch 2>/dev/null || true)"
+        case "$arch" in
+            x86_64|x86|aarch64|armhf|armv7|armv7l) ;;
+            *) arch="" ;;
+        esac
+        case "$arch" in
+            x86_64) printf 'x86_64'; return 0 ;;
+            x86) printf 'i386'; return 0 ;;
+            aarch64) printf 'aarch64'; return 0 ;;
+            armhf|armv7|armv7l) printf 'armhf'; return 0 ;;
+        esac
+    fi
+
+    arch="$(uname -m 2>/dev/null || true)"
+    case "$arch" in
+        x86_64|amd64) printf 'x86_64' ;;
+        i386|i486|i586|i686|x86) printf 'i386' ;;
+        aarch64|arm64) printf 'aarch64' ;;
+        armv7*|armv6*|armhf) printf 'armhf' ;;
+        armv5*|armel|arm*) printf 'armel' ;;
+        *) return 1 ;;
+    esac
+}
+
+_speedtest_install_linux_tarball() {
+    local arch url tmp_dir tarball bin_dst
+
+    _info "使用 Ookla 官方 Linux tarball 安装..."
+    _speedtest_ensure_cmd_available curl curl || return 1
+    _speedtest_ensure_cmd_available tar tar || return 1
+
+    if ! arch="$(_speedtest_linux_arch_token)"; then
+        _error_no_exit "当前 Linux 架构不受 Ookla 官方 tarball 支持: $(uname -m 2>/dev/null || echo unknown)"
+        return 1
+    fi
+
+    url="${_SPEEDTEST_DOWNLOAD_BASE}/ookla-speedtest-${_SPEEDTEST_VERSION}-linux-${arch}.tgz"
+    tmp_dir=$(mktemp -d /tmp/vpsgo-speedtest.XXXXXX) || {
+        _error_no_exit "创建临时目录失败"
+        return 1
+    }
+    tarball="${tmp_dir}/speedtest.tgz"
+
+    _info "下载: ${url}"
+    if ! curl -fsSL --retry 2 -o "$tarball" "$url"; then
+        rm -rf "$tmp_dir"
+        _error_no_exit "下载 Ookla Speedtest 失败"
+        return 1
+    fi
+
+    if ! tar -xzf "$tarball" -C "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        _error_no_exit "解压 Ookla Speedtest 失败"
+        return 1
+    fi
+
+    if [[ ! -x "${tmp_dir}/speedtest" ]]; then
+        rm -rf "$tmp_dir"
+        _error_no_exit "压缩包内未找到 speedtest 可执行文件"
+        return 1
+    fi
+
+    bin_dst="/usr/local/bin/speedtest"
+    if ! _speedtest_install_file "${tmp_dir}/speedtest" "$bin_dst" 0755; then
+        rm -rf "$tmp_dir"
+        _error_no_exit "安装 speedtest 到 ${bin_dst} 失败"
+        return 1
+    fi
+
+    [[ -f "${tmp_dir}/speedtest.5" ]] && _speedtest_install_file "${tmp_dir}/speedtest.5" "/usr/local/share/man/man5/speedtest.5" 0644 || true
+    [[ -f "${tmp_dir}/speedtest.md" ]] && _speedtest_install_file "${tmp_dir}/speedtest.md" "/usr/local/share/doc/ookla-speedtest/speedtest.md" 0644 || true
+
+    rm -rf "$tmp_dir"
+    _success "已安装 Ookla Speedtest: ${bin_dst}"
+    return 0
+}
+
+_speedtest_find_brew() {
+    local brew_bin candidate
+    brew_bin="$(command -v brew 2>/dev/null || true)"
+    if [[ -z "$brew_bin" && -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]] && command -v sudo >/dev/null 2>&1; then
+        brew_bin="$(sudo -H -u "$SUDO_USER" bash -lc 'command -v brew' 2>/dev/null || true)"
+    fi
+    if [[ -z "$brew_bin" ]]; then
+        for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+            if [[ -x "$candidate" ]]; then
+                brew_bin="$candidate"
+                break
+            fi
+        done
+    fi
+    printf '%s' "$brew_bin"
+}
+
+_speedtest_brew_exec() {
+    local brew_bin="$1"
+    shift
+
+    if [[ $EUID -eq 0 ]]; then
+        if [[ -z "${SUDO_USER:-}" || "${SUDO_USER}" == "root" ]]; then
+            _error_no_exit "Homebrew 不允许 root 直接执行，请用 sudo 从普通用户运行本脚本"
+            return 1
+        fi
+        sudo -H -u "$SUDO_USER" "$brew_bin" "$@"
+    else
+        "$brew_bin" "$@"
+    fi
+}
+
+_speedtest_install_macos() {
+    local brew_bin
+
+    brew_bin="$(_speedtest_find_brew)"
+    if [[ -z "$brew_bin" ]]; then
+        _error_no_exit "未检测到 Homebrew，请先安装 Homebrew 后重试"
+        _info "官方推荐 macOS 通过 Homebrew 安装 Ookla Speedtest"
+        return 1
+    fi
+
+    _info "使用 Homebrew 安装 Ookla Speedtest..."
+    if _speedtest_brew_exec "$brew_bin" list speedtest-cli >/dev/null 2>&1; then
+        _warn "检测到可能冲突的 speedtest-cli"
+        if _speedtest_prompt_yes_default "是否卸载 speedtest-cli"; then
+            _speedtest_brew_exec "$brew_bin" uninstall speedtest-cli --force || return 1
+        fi
+    fi
+
+    _speedtest_brew_exec "$brew_bin" tap teamookla/speedtest || return 1
+    _speedtest_brew_exec "$brew_bin" update || _warn "brew update 失败，继续尝试安装"
+    _speedtest_brew_exec "$brew_bin" install speedtest --force
+}
+
+_speedtest_install_freebsd() {
+    local major arch pkg_url
+
+    if ! command -v pkg >/dev/null 2>&1; then
+        _error_no_exit "未检测到 FreeBSD pkg，请先安装 pkg"
+        return 1
+    fi
+
+    arch="$(uname -m 2>/dev/null || true)"
+    case "$arch" in
+        amd64|x86_64) ;;
+        *)
+            _error_no_exit "Ookla 官方 FreeBSD 包仅支持 x86_64/amd64"
+            return 1
+            ;;
+    esac
+
+    major="$(freebsd-version -u 2>/dev/null || uname -r 2>/dev/null || true)"
+    major="${major%%.*}"
+    case "$major" in
+        12|13) ;;
+        *)
+            _error_no_exit "Ookla 官方页面当前仅提供 FreeBSD 12/13 x86_64 包"
+            return 1
+            ;;
+    esac
+
+    _info "使用 Ookla 官方 FreeBSD ${major} 包安装..."
+    pkg update -f >/dev/null 2>&1 || pkg update >/dev/null 2>&1 || true
+    pkg install -y libidn2 ca_root_nss || return 1
+
+    pkg_url="${_SPEEDTEST_DOWNLOAD_BASE}/ookla-speedtest-${_SPEEDTEST_VERSION}-freebsd${major}-x86_64.pkg"
+    pkg add -f "$pkg_url"
+}
+
+_speedtest_install_linux() {
+    local repo_tried="0"
+
+    if command -v apt-get >/dev/null 2>&1; then
+        repo_tried="1"
+        if _speedtest_install_deb_repo; then
+            return 0
+        fi
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        repo_tried="1"
+        if _speedtest_install_rpm_repo; then
+            return 0
+        fi
+    fi
+
+    if [[ "$repo_tried" == "1" ]]; then
+        _warn "Ookla 官方仓库安装失败，改用官方 Linux tarball 直接安装"
+    else
+        _info "当前发行版无 Ookla 官方仓库安装方式，改用官方 Linux tarball"
+    fi
+    _speedtest_install_linux_tarball
+}
+
+_speedtest_install_current_os() {
+    local os_name
+    os_name="$(uname -s 2>/dev/null || echo unknown)"
+
+    case "$os_name" in
+        Linux) _speedtest_install_linux ;;
+        Darwin) _speedtest_install_macos ;;
+        FreeBSD) _speedtest_install_freebsd ;;
+        MINGW*|MSYS*|CYGWIN*)
+            _error_no_exit "Windows 版 Speedtest CLI 官方提供 zip 包，当前 VPSGo Bash 菜单暂不处理 Windows 安装"
+            return 1
+            ;;
+        *)
+            _error_no_exit "暂不支持当前系统: ${os_name}"
+            return 1
+            ;;
+    esac
+}
+
+_speedtest_show_installed_status() {
+    local bin_path version
+    hash -r 2>/dev/null || true
+    bin_path="$(command -v speedtest 2>/dev/null || true)"
+
+    if [[ -z "$bin_path" ]]; then
+        _error_no_exit "未在 PATH 中检测到 speedtest 命令"
+        _warn "如果已安装到 /usr/local/bin，请确认该目录在 PATH 中"
+        return 1
+    fi
+
+    _success "Ookla Speedtest 已可用: ${bin_path}"
+    version="$("$bin_path" --version 2>&1 | head -1 || true)"
+    [[ -n "$version" ]] && _info "版本信息: ${version}"
+    return 0
+}
+
+_speedtest_setup() {
+    _header "Ookla Speedtest CLI 安装"
+
+    _info "官方页面: https://www.speedtest.net/apps/cli"
+    if command -v speedtest >/dev/null 2>&1; then
+        local current_version
+        current_version="$(speedtest --version 2>&1 | head -1 || true)"
+        _info "当前已检测到 speedtest: ${current_version:-$(command -v speedtest)}"
+    else
+        _info "当前未检测到 speedtest"
+    fi
+
+    echo ""
+    printf "  ${BOLD}请选择操作${PLAIN}\n"
+    _separator
+    _menu_pair "1" "安装/更新 Ookla Speedtest" "官方 CLI" "green" "0" "返回主菜单" "" "red"
+    _separator
+
+    local choice
+    read -rp "  选择 [0-1]: " choice
+    case "$choice" in
+        1) ;;
+        0) return ;;
+        *) _error_no_exit "无效选项"; _press_any_key; return ;;
+    esac
+
+    echo ""
+    if _speedtest_install_current_os && _speedtest_show_installed_status; then
+        _info "首次运行 speedtest 时会提示确认 Ookla 许可与隐私条款"
+    else
+        _error_no_exit "Ookla Speedtest 安装失败"
+    fi
+    _press_any_key
+}
+
 # --- 10. Sing-Box 管理 ---
 
 _SINGBOX_SERVICE_NAME="sing-box"
@@ -13783,6 +14184,14 @@ _dns_validate_ipv6() {
     return 0
 }
 
+_dns_server_exists() {
+    local needle="$1" item
+    for item in "${_DNS_SERVERS[@]+"${_DNS_SERVERS[@]}"}"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
 _dns_add_server() {
     local token="$1"
     [ -n "$token" ] || return 1
@@ -13792,7 +14201,7 @@ _dns_add_server() {
     token="${token%,}"
 
     if _dns_validate_ipv4 "$token"; then
-        if [[ " ${_DNS_SERVERS[*]} " != *" ${token} "* ]]; then
+        if ! _dns_server_exists "$token"; then
             _DNS_SERVERS+=("$token")
             _DNS_V4_SERVERS+=("$token")
         fi
@@ -13800,7 +14209,7 @@ _dns_add_server() {
     fi
 
     if _dns_validate_ipv6 "$token"; then
-        if [[ " ${_DNS_SERVERS[*]} " != *" ${token} "* ]]; then
+        if ! _dns_server_exists "$token"; then
             _DNS_SERVERS+=("$token")
             _DNS_V6_SERVERS+=("$token")
         fi
@@ -13865,6 +14274,31 @@ _dns_merge_existing_servers() {
     fi
 }
 
+_dns_has_ipv4_default_route() {
+    command -v ip >/dev/null 2>&1 || return 1
+    ip -4 route show default 2>/dev/null | grep -q '^default[[:space:]]'
+}
+
+_dns_has_ipv6_default_route() {
+    command -v ip >/dev/null 2>&1 || return 1
+    ip -6 route show default 2>/dev/null | grep -q '^default[[:space:]]'
+}
+
+_dns_is_ipv6_only_host() {
+    _dns_has_ipv6_default_route || return 1
+    ! _dns_has_ipv4_default_route
+}
+
+_dns_recommended_servers() {
+    if _dns_is_ipv6_only_host; then
+        printf '%s' "2606:4700:4700::1111,2001:4860:4860::8888"
+    elif _dns_has_ipv6_default_route; then
+        printf '%s' "1.1.1.1,8.8.8.8,2606:4700:4700::1111,2001:4860:4860::8888"
+    else
+        printf '%s' "1.1.1.1,8.8.8.8"
+    fi
+}
+
 _dns_force_runtime_servers() {
     local iface
     command -v resolvectl >/dev/null 2>&1 || return 0
@@ -13882,6 +14316,9 @@ _dns_force_runtime_servers() {
 _dns_default_iface() {
     local iface
     iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [ -z "$iface" ]; then
+        iface=$(ip -6 route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    fi
     if [ -z "$iface" ]; then
         iface=$(ip -o link show 2>/dev/null | awk -F': ' '$2 !~ /^lo$/ {print $2; exit}')
     fi
@@ -14011,15 +14448,19 @@ _dns_apply_permanent_resolvconf_head() {
 }
 
 _dns_apply_permanent_dhcp_overrides() {
-    local dns_csv dhclient_conf dhcpcd_conf backup
-    dns_csv=$(IFS=,; echo "${_DNS_SERVERS[*]}")
+    local dns_csv dns_v4_csv dns_v6_csv dhclient_conf dhcpcd_conf backup
+    dns_csv=$(IFS=,; echo "${_DNS_SERVERS[*]-}")
+    dns_v4_csv=$(IFS=,; echo "${_DNS_V4_SERVERS[*]-}")
+    dns_v6_csv=$(IFS=,; echo "${_DNS_V6_SERVERS[*]-}")
 
     dhclient_conf="/etc/dhcp/dhclient.conf"
     if [ -f "$dhclient_conf" ]; then
         backup="${dhclient_conf}.vpsgo.bak"
         [ -f "$backup" ] || cp -a "$dhclient_conf" "$backup" >/dev/null 2>&1 || true
         sed -i '/^[[:space:]]*supersede[[:space:]]\+domain-name-servers[[:space:]]\+/d' "$dhclient_conf"
-        printf "supersede domain-name-servers %s;\n" "$dns_csv" >> "$dhclient_conf"
+        sed -i '/^[[:space:]]*supersede[[:space:]]\+dhcp6\.name-servers[[:space:]]\+/d' "$dhclient_conf"
+        [ -n "$dns_v4_csv" ] && printf "supersede domain-name-servers %s;\n" "$dns_v4_csv" >> "$dhclient_conf"
+        [ -n "$dns_v6_csv" ] && printf "supersede dhcp6.name-servers %s;\n" "$dns_v6_csv" >> "$dhclient_conf"
         _info "已写入 DHCP 持久化配置: ${dhclient_conf}"
     fi
 
@@ -14287,24 +14728,26 @@ _dns_show_current_config() {
 
 _dns_verify_resolution() {
     local test_domain="cloudflare.com"
-    local out server answer
+    local out server answer qtype
 
     _dns_ensure_lookup_tool || true
     printf "  ${BOLD}解析验证${PLAIN}\n"
     _info "正在使用系统默认解析器验证 DNS..."
 
     if command -v dig >/dev/null 2>&1; then
-        out=$(dig +time=3 +tries=1 "$test_domain" 2>/dev/null || true)
-        server=$(echo "$out" | awk -F': ' '/^;; SERVER:/{print $2; exit}')
-        answer=$(echo "$out" | awk '/^[^;].*[[:space:]]IN[[:space:]]A[[:space:]]/ {print $5; exit}')
-        if [ -n "$server" ]; then
-            _status_kv "dig SERVER" "$server" "cyan" 17
-        fi
-        if [ -n "$answer" ]; then
-            _success "dig 解析成功: ${test_domain} -> ${answer}"
-            return 0
-        fi
-        _warn "dig 未返回 A 记录，继续尝试 nslookup..."
+        for qtype in A AAAA; do
+            out=$(dig +time=3 +tries=1 "$test_domain" "$qtype" 2>/dev/null || true)
+            server=$(echo "$out" | awk -F': ' '/^;; SERVER:/{print $2; exit}')
+            answer=$(echo "$out" | awk -v t="$qtype" '$0 !~ /^;/ && $0 ~ "[[:space:]]IN[[:space:]]" t "[[:space:]]" {print $5; exit}')
+            if [ -n "$server" ]; then
+                _status_kv "dig SERVER" "$server" "cyan" 17
+            fi
+            if [ -n "$answer" ]; then
+                _success "dig ${qtype} 解析成功: ${test_domain} -> ${answer}"
+                return 0
+            fi
+        done
+        _warn "dig 未返回 A/AAAA 记录，继续尝试 nslookup..."
     fi
 
     if command -v nslookup >/dev/null 2>&1; then
@@ -14327,9 +14770,10 @@ _dns_verify_resolution() {
 _dns_benchmark_query_time() {
     local server="$1"
     local domain="$2"
+    local qtype="${3:-A}"
     local out status query_time
 
-    out=$(dig "@${server}" "${domain}" A +time=2 +tries=1 2>/dev/null || true)
+    out=$(dig "@${server}" "${domain}" "$qtype" +time=2 +tries=1 2>/dev/null || true)
     status=$(echo "$out" | awk -F'status: ' '/status:/{print $2; exit}' | cut -d',' -f1)
     query_time=$(echo "$out" | awk '/Query time:/{print $4; exit}')
 
@@ -14354,7 +14798,8 @@ _dns_benchmark_show_ms() {
 _dns_benchmark_print_group_table() {
     local title="$1"
     local test_domain="$2"
-    shift 2
+    local qtype="$3"
+    shift 3
     local entries=("$@")
     local tmp_file entry name server query_time ecs_flag score
     local ms_show ecs_show
@@ -14363,16 +14808,16 @@ _dns_benchmark_print_group_table() {
 
     echo ""
     printf "  ${BOLD}[ %s ]${PLAIN}\n" "$title"
-    printf "    测试域名: ${CYAN}%s${PLAIN}\n" "$test_domain"
+    printf "    测试域名: ${CYAN}%s${PLAIN} (${qtype})\n" "$test_domain"
     _separator
-    printf "    %-16s %-16s %-12s %-8s\n" "DNS" "地址" "延迟" "ECS"
+    printf "    %-16s %-39s %-12s %-8s\n" "DNS" "地址" "延迟" "ECS"
 
     for entry in "${entries[@]}"; do
         name="${entry%%|*}"
         server="${entry#*|}"
         server="${server%%|*}"
         ecs_flag="${entry##*|}"
-        query_time=$(_dns_benchmark_query_time "$server" "$test_domain")
+        query_time=$(_dns_benchmark_query_time "$server" "$test_domain" "$qtype")
         if _is_digit "$query_time"; then
             score="$query_time"
         else
@@ -14388,7 +14833,7 @@ _dns_benchmark_print_group_table() {
         else
             ecs_show="-"
         fi
-        printf "    %-16s %-16s %-12s %-8s\n" "$name" "$server" "$ms_show" "$ecs_show"
+        printf "    %-16s %-39s %-12s %-8s\n" "$name" "$server" "$ms_show" "$ecs_show"
     done < <(sort -t'|' -k1,1n -k2,2 "$tmp_file")
 
     rm -f "$tmp_file"
@@ -14422,8 +14867,20 @@ _dns_benchmark_mainstream() {
         "Google-ECS2|8.8.4.4|yes"
     )
 
+    local ipv6_dns=(
+        "Cloudflare-v6|2606:4700:4700::1111|no"
+        "Cloudflare-v6-2|2606:4700:4700::1001|no"
+        "Google-v6|2001:4860:4860::8888|yes"
+        "Google-v6-2|2001:4860:4860::8844|yes"
+        "Quad9-v6|2620:fe::fe|no"
+        "Quad9-v6-2|2620:fe::9|no"
+        "AliDNS-v6|2400:3200::1|yes"
+        "AliDNS-v6-2|2400:3200:baba::1|yes"
+    )
+
     echo ""
     _info "DNS 测速基于 dig 请求延迟（单位 ms）"
+    _dns_is_ipv6_only_host && _info "检测到 IPv6-only 网络，建议优先测试 IPv6 DNS 组。"
     _warn "结果受线路、运营商缓存、网络波动影响，建议多测几次取平均。"
 
     _dns_ensure_lookup_tool || true
@@ -14437,25 +14894,31 @@ _dns_benchmark_mainstream() {
         printf "  ${BOLD}请选择测速分组${PLAIN}\n"
         _separator
         _menu_pair "1" "国内 DNS 组" "测试域名: qq.com" "green" "2" "国外 DNS 组" "测试域名: google.com" "green"
-        _menu_pair "3" "ECS DNS 组" "常见支持 ECS 的 DNS" "green" "0" "返回上一层" "" "red"
+        _menu_pair "3" "ECS DNS 组" "常见支持 ECS 的 DNS" "green" "4" "IPv6 DNS 组" "适合 IPv6-only VPS" "green"
+        _menu_item "0" "返回上一层" "" "red"
         _separator
 
         local group_choice
-        read -rp "  选择 [0-3]: " group_choice
+        read -rp "  选择 [0-4]: " group_choice
         case "$group_choice" in
             1)
-                _dns_benchmark_print_group_table "国内 DNS 组测速（ECS 标记）" "qq.com" "${cn_dns[@]}"
+                _dns_benchmark_print_group_table "国内 DNS 组测速（ECS 标记）" "qq.com" "A" "${cn_dns[@]}"
                 _press_any_key
                 return
                 ;;
             2)
-                _dns_benchmark_print_group_table "国外 DNS 组测速（ECS 标记，含 9.9.9.9）" "google.com" "${global_dns[@]}"
+                _dns_benchmark_print_group_table "国外 DNS 组测速（ECS 标记，含 9.9.9.9）" "google.com" "A" "${global_dns[@]}"
                 _press_any_key
                 return
                 ;;
             3)
-                _dns_benchmark_print_group_table "ECS DNS 组测速（qq.com）" "qq.com" "${ecs_dns[@]}"
-                _dns_benchmark_print_group_table "ECS DNS 组测速（google.com）" "google.com" "${ecs_dns[@]}"
+                _dns_benchmark_print_group_table "ECS DNS 组测速（qq.com）" "qq.com" "A" "${ecs_dns[@]}"
+                _dns_benchmark_print_group_table "ECS DNS 组测速（google.com）" "google.com" "A" "${ecs_dns[@]}"
+                _press_any_key
+                return
+                ;;
+            4)
+                _dns_benchmark_print_group_table "IPv6 DNS 组测速（AAAA）" "cloudflare.com" "AAAA" "${ipv6_dns[@]}"
                 _press_any_key
                 return
                 ;;
@@ -14467,12 +14930,17 @@ _dns_benchmark_mainstream() {
 
 _dns_change_flow() {
     local mode="$1"
-    local dns_input clear_existing
+    local dns_input clear_existing dns_default
 
     echo ""
     read -rp "  是否清除现有 DNS，仅保留你输入的新 DNS? [Y/n]: " clear_existing
     echo ""
-    read -rp "  请输入 DNS（空格/逗号分隔，如 1.1.1.1,8.8.8.8）: " dns_input
+    dns_default="$(_dns_recommended_servers)"
+    if _dns_is_ipv6_only_host; then
+        _info "检测到 IPv6-only 网络，默认使用 IPv6 公共 DNS。"
+    fi
+    read -rp "  请输入 DNS（空格/逗号分隔）[默认 ${dns_default}]: " dns_input
+    dns_input="${dns_input:-$dns_default}"
     if ! _dns_parse_servers "$dns_input"; then
         _press_any_key
         return
@@ -14508,7 +14976,7 @@ _dns_manage() {
         printf "  ${BOLD}请选择操作${PLAIN}\n"
         _separator
         _menu_pair "1" "临时修改 DNS" "重启后可能失效" "green" "2" "永久修改 DNS" "持久化并重启组件" "green"
-        _menu_pair "3" "仅验证当前 DNS" "dig/nslookup 测试" "green" "4" "主流 DNS 测速" "国内/国外/ECS 分组" "green"
+        _menu_pair "3" "仅验证当前 DNS" "A/AAAA 解析测试" "green" "4" "主流 DNS 测速" "国内/国外/ECS/IPv6" "green"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
 
@@ -15147,7 +15615,7 @@ _show_main_menu() {
     printf "  ${BOLD}[ 分类菜单 ]${PLAIN}\n"
     _separator
     _menu_item "1" "网络优化" "BBR/网卡调度/双栈选择/调优" "green"
-    _menu_item "2" "脚本工具" "iPerf3/NodeQuality/DNS" "green"
+    _menu_item "2" "脚本工具" "iPerf3/Speedtest/DNS" "green"
     _menu_item "3" "系统优化" "日志轮转/Swap" "green"
     _menu_item "4" "代理工具助手" "Mihomo/Sing-Box/SSR/WireGuard" "green"
     _separator
@@ -15183,17 +15651,19 @@ _script_tools_menu() {
     while true; do
         _header "脚本工具"
         _menu_pair "1" "iPerf3 测速服务端" "临时启动" "green" "2" "NodeQuality 测试" "VPS 综合测试" "green"
-        _menu_pair "3" "Akile DNS 解锁检测" "媒体解锁测速" "green" "4" "Linux DNS 管理" "临时/永久 DNS" "green"
+        _menu_pair "3" "Ookla Speedtest" "官方 CLI 安装" "green" "4" "Akile DNS 解锁检测" "媒体解锁测速" "green"
+        _menu_item "5" "Linux DNS 管理" "临时/永久 DNS" "green"
         _separator
         _menu_item "0" "返回主菜单" "" "red"
         _separator
         local ch
-        read -rp "  选择 [0-4]: " ch
+        read -rp "  选择 [0-5]: " ch
         case "$ch" in
             1) _iperf3_setup ;;
             2) _nodequality_setup ;;
-            3) _akdns_setup ;;
-            4) _dns_manage ;;
+            3) _speedtest_setup ;;
+            4) _akdns_setup ;;
+            5) _dns_manage ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac

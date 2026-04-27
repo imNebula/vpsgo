@@ -67,18 +67,20 @@ hash -r
 |---|------|------|
 | 5 | iPerf3 测速服务端 | 一键启动，自动安装，显示客户端连接命令 |
 | 6 | NodeQuality 测试 | 运行 NodeQuality 线路质量评分脚本 |
-| 7 | Docker 日志轮转 | 配置 json-file 日志驱动，限制容器日志大小；支持 systemd/OpenRC 重启 Docker |
-| 8 | Mihomo 管理 | 安装/更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志 |
-| 9 | sing-box 安装 | Debian/Ubuntu 使用官方 APT 源，其他发行版使用安装脚本；自启动支持 systemd/OpenRC |
-| 10 | Snell V5 管理 | 官方工具安装/更新、配置与启动、Surge V5 配置导出、日志/状态、卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC |
-| 11 | WireGuard 原生节点 | 原生内核方案，一键部署/重建、支持新增多个客户端（不重建服务端）、客户端配置导出、服务状态/重启/卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC 持久化 |
-| 12 | Shadowsocks-Rust 管理 | 官方 releases 安装/更新、配置并启动、自启动、日志/状态、卸载；支持 systemd/OpenRC，适合 LXC/容器环境 |
+| 7 | Ookla Speedtest CLI | 安装/更新官方 Speedtest CLI；APT/RPM 使用官方仓库，其他 Linux 发行版按架构使用官方 tarball，兼容 macOS/FreeBSD 官方安装方式 |
+| 8 | Linux DNS 管理 | 临时/永久修改 DNS，支持 IPv6-only VPS 的 IPv6 DNS 默认推荐、A/AAAA 验证与 IPv6 DNS 测速 |
+| 9 | Docker 日志轮转 | 配置 json-file 日志驱动，限制容器日志大小；支持 systemd/OpenRC 重启 Docker |
+| 10 | Mihomo 管理 | 安装/更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志 |
+| 11 | sing-box 安装 | Debian/Ubuntu 使用官方 APT 源，其他发行版使用安装脚本；自启动支持 systemd/OpenRC |
+| 12 | Snell V5 管理 | 官方工具安装/更新、配置与启动、Surge V5 配置导出、日志/状态、卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC |
+| 13 | WireGuard 原生节点 | 原生内核方案，一键部署/重建、支持新增多个客户端（不重建服务端）、客户端配置导出、服务状态/重启/卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC 持久化 |
+| 14 | Shadowsocks-Rust 管理 | 官方 releases 安装/更新、配置并启动、自启动、日志/状态、卸载；支持 systemd/OpenRC，适合 LXC/容器环境 |
 
 ### 系统
 
 | # | 功能 | 说明 |
 |---|------|------|
-| 10 | Swap 管理 | 智能推荐大小，创建/删除 Swap 文件 |
+| 16 | Swap 管理 | 智能推荐大小，创建/删除 Swap 文件 |
 
 ### 其他
 
@@ -94,6 +96,8 @@ hash -r
 - **操作系统**: Linux (Debian / Ubuntu / Alpine / CentOS / RHEL / Arch 等)
 - **权限**: 需要 root 权限 (`sudo vpsgo`)
 - **依赖**: `bash`, `curl`
+
+Ookla Speedtest CLI 安装项额外适配 macOS(Homebrew) 与 FreeBSD 12/13 x86_64；Windows 版官方 CLI 仍需按 Ookla 页面手动下载 zip。
 
 ## 更新
 
