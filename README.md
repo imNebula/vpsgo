@@ -6,32 +6,41 @@
 （项目永久保持开源，不会添加任何后门及广告）
 
 ## 快速开始
-脚本已覆盖 Ubuntu/Debian 与 Alpine(OpenRC) 常用场景，Alpine 需先安装 `bash`。
+脚本覆盖常见 Linux 发行版，建议使用 root 运行；非 root 用户需要系统已安装 `sudo`。
 
 ```bash
 # 一键安装并运行
-sudo curl -fsSL https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh -o /usr/local/bin/vpsgo
-sudo chmod 0755 /usr/local/bin/vpsgo
-hash -r
+sh -c 'set -eu
+URL="${VPSGO_URL:-https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh}"
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else echo "请使用 root 运行，或先安装 sudo"; exit 1; fi
+fi
+if ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+  if command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache bash curl
+  elif command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y bash curl
+  elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y bash curl
+  elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y bash curl
+  elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -Sy --noconfirm bash curl
+  else echo "请先安装 bash 和 curl"; exit 1; fi
+fi
+tmp="$(mktemp)"
+trap "rm -f \"$tmp\"" EXIT
+curl -fsSL "$URL" -o "$tmp"
+$SUDO bash "$tmp"'
 ```
 
 ```bash
-# 国内网络可选：通过 gh-proxy 安装
-sudo curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh -o /usr/local/bin/vpsgo
-sudo chmod 0755 /usr/local/bin/vpsgo
-hash -r
-```
-```bash
-# 安装后直接使用
+# 后续直接使用
 vpsgo
 ```
 
 ```bash
-# Alpine 额外准备（仅首次）
-sudo apk add --no-cache bash curl
+# 国内网络可在上面的命令前加这一段
+export VPSGO_URL="https://gh-proxy.org/https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
 ```
 
-首次运行会自动安装到 `/usr/local/bin/vpsgo`，之后输入 `vpsgo` 即可启动。
+安装命令会自动补齐 `bash` 和 `curl`，脚本首次启动会自安装到 `/usr/local/bin/vpsgo`。Alpine 默认没有 `sudo`，直接用 root 执行即可。
 
 首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.org/`，会自动作用到脚本自更新、Mihomo、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载。
 
@@ -40,14 +49,13 @@ sudo apk add --no-cache bash curl
 ```bash
 command -v vpsgo
 ls -l "$(command -v vpsgo)"
-sudo chmod 0755 "$(command -v vpsgo)"
+chmod 0755 "$(command -v vpsgo)"
 ```
 
 若挂载参数包含 `noexec`，请改用其他路径（示例）：
 
 ```bash
-sudo env VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
-hash -r
+VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 ```
 
 ## 功能列表
@@ -67,7 +75,7 @@ hash -r
 |---|------|------|
 | 5 | iPerf3 测速服务端 | 一键启动，自动安装，显示客户端连接命令 |
 | 6 | NodeQuality 测试 | 运行 NodeQuality 线路质量评分脚本 |
-| 7 | Ookla Speedtest CLI | 安装/更新官方 Speedtest CLI；APT/RPM 使用官方仓库，其他 Linux 发行版按架构使用官方 tarball，兼容 macOS/FreeBSD 官方安装方式 |
+| 7 | Ookla Speedtest CLI | 安装/更新官方 Speedtest CLI；Linux 优先使用官方 tarball 直装，APT/RPM 仓库仅作回退，兼容 macOS/FreeBSD 官方安装方式 |
 | 8 | Linux DNS 管理 | 临时/永久修改 DNS，支持 IPv6-only VPS 的 IPv6 DNS 默认推荐、A/AAAA 验证与 IPv6 DNS 测速 |
 | 9 | Docker 日志轮转 | 配置 json-file 日志驱动，限制容器日志大小；支持 systemd/OpenRC 重启 Docker |
 | 10 | Mihomo 管理 | 安装/更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志 |
@@ -94,7 +102,7 @@ hash -r
 ## 系统要求
 
 - **操作系统**: Linux (Debian / Ubuntu / Alpine / CentOS / RHEL / Arch 等)
-- **权限**: 需要 root 权限 (`sudo vpsgo`)
+- **权限**: 需要 root 权限；非 root 用户可通过 `sudo vpsgo` 运行
 - **依赖**: `bash`, `curl`
 
 Ookla Speedtest CLI 安装项额外适配 macOS(Homebrew) 与 FreeBSD 12/13 x86_64；Windows 版官方 CLI 仍需按 Ookla 页面手动下载 zip。

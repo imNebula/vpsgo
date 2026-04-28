@@ -35,7 +35,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.39"
+VERSION="2.40"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -276,6 +276,19 @@ _install_script_file() {
 
     chmod 0755 "$dst" || return 1
     return 0
+}
+
+_mktemp_file() {
+    local prefix="${1:-vpsgo}" suffix="${2:-}" tmp
+    tmp=$(mktemp "/tmp/${prefix}.XXXXXX" 2>/dev/null) || return 1
+    if [[ -n "$suffix" ]]; then
+        mv "$tmp" "${tmp}${suffix}" || {
+            rm -f "$tmp"
+            return 1
+        }
+        tmp="${tmp}${suffix}"
+    fi
+    printf '%s' "$tmp"
 }
 
 _ensure_script_mode_ok() {
@@ -2906,6 +2919,7 @@ _dockerlog_setup() {
 
 _mihomo_download() {
     local url="$1" output="$2" fetch_url
+    [[ -n "${output:-}" ]] || return 1
     fetch_url=$(_github_proxy_url "$url")
     rm -f "$output"
     if command -v curl >/dev/null 2>&1; then
@@ -2915,7 +2929,7 @@ _mihomo_download() {
         rm -f "$output"
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget -q --show-progress -O "$output" "$fetch_url"; then
+        if wget -q -O "$output" "$fetch_url"; then
             [[ -s "$output" ]] && return 0
         fi
         rm -f "$output"
@@ -3000,7 +3014,7 @@ _mihomo_try_install() {
     local install_dir="/usr/local/bin"
     local url="https://github.com/MetaCubeX/mihomo/releases/download/${version}/mihomo-linux-${arch}-${version}.gz"
     local tmp_file
-    tmp_file=$(mktemp /tmp/mihomo.XXXXXX.gz)
+    tmp_file=$(_mktemp_file mihomo .gz) || return 1
 
     _info "下载 mihomo-linux-${arch}..."
     printf "    ${DIM}%s${PLAIN}\n" "$url"
@@ -9115,6 +9129,16 @@ _speedtest_prompt_yes_default() {
     [[ ! "$answer" =~ ^[Nn] ]]
 }
 
+_speedtest_run_timeout() {
+    local seconds="${1:-60}"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 _speedtest_ensure_cmd_available() {
     local cmd="$1" pkg="${2:-$1}"
 
@@ -9124,24 +9148,26 @@ _speedtest_ensure_cmd_available() {
 
     _warn "未检测到 ${cmd}，尝试安装 ${pkg}..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq >/dev/null 2>&1 || true
-        apt-get install -y -qq "$pkg" >/dev/null 2>&1 || true
+        _speedtest_run_timeout 45 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+            apt-get update -qq >/dev/null 2>&1 || true
+        _speedtest_run_timeout 60 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+            apt-get install -y -qq "$pkg" >/dev/null 2>&1 || true
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y "$pkg" >/dev/null 2>&1 || true
+        _speedtest_run_timeout 60 dnf install -y "$pkg" >/dev/null 2>&1 || true
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y "$pkg" >/dev/null 2>&1 || true
+        _speedtest_run_timeout 60 yum install -y "$pkg" >/dev/null 2>&1 || true
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm "$pkg" >/dev/null 2>&1 || true
+        _speedtest_run_timeout 60 pacman -Sy --noconfirm "$pkg" >/dev/null 2>&1 || true
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache "$pkg" >/dev/null 2>&1 || true
+        _speedtest_run_timeout 45 apk add --no-cache "$pkg" >/dev/null 2>&1 || true
     elif command -v zypper >/dev/null 2>&1; then
-        zypper install -y "$pkg" >/dev/null 2>&1 || true
+        _speedtest_run_timeout 60 zypper install -y "$pkg" >/dev/null 2>&1 || true
     elif command -v pkg >/dev/null 2>&1; then
-        pkg install -y "$pkg" >/dev/null 2>&1 || true
+        _speedtest_run_timeout 60 pkg install -y "$pkg" >/dev/null 2>&1 || true
     fi
 
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        _error_no_exit "缺少 ${cmd}，请先手动安装后重试"
+        _error_no_exit "缺少 ${cmd}，自动安装超时或失败，请先手动安装后重试"
         return 1
     fi
     return 0
@@ -9166,13 +9192,15 @@ _speedtest_cleanup_deb_conflicts() {
         local backup="${old_repo}.bak.$(date +%Y%m%d%H%M%S)"
         mv "$old_repo" "$backup"
         _info "已备份旧 Bintray APT 源: ${backup}"
-        apt-get update -qq >/dev/null 2>&1 || true
+        _speedtest_run_timeout 45 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+            apt-get update -qq >/dev/null 2>&1 || true
     fi
 
     if command -v dpkg >/dev/null 2>&1 && dpkg -s speedtest-cli >/dev/null 2>&1; then
         _warn "检测到非官方 speedtest-cli 包，可能与 Ookla 官方 speedtest 冲突"
         if _speedtest_prompt_yes_default "是否移除 speedtest-cli"; then
-            apt-get remove -y speedtest-cli || return 1
+            _speedtest_run_timeout 60 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+                apt-get remove -y speedtest-cli || return 1
         else
             _warn "已保留 speedtest-cli，后续安装可能失败"
         fi
@@ -9185,13 +9213,17 @@ _speedtest_install_deb_repo() {
     _speedtest_ensure_cmd_available curl curl || return 1
     _speedtest_cleanup_deb_conflicts || return 1
 
-    apt-get update -qq >/dev/null 2>&1 || true
-    apt-get install -y -qq curl ca-certificates >/dev/null 2>&1 || true
-    if ! curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash; then
+    _speedtest_run_timeout 45 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+        apt-get update -qq >/dev/null 2>&1 || true
+    _speedtest_run_timeout 60 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+        apt-get install -y -qq curl ca-certificates >/dev/null 2>&1 || true
+    if ! _speedtest_run_timeout 60 bash -c 'curl -fsSL --connect-timeout 10 --max-time 45 https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash'; then
         return 1
     fi
-    apt-get update -qq >/dev/null 2>&1 || true
-    apt-get install -y speedtest
+    _speedtest_run_timeout 45 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+        apt-get update -qq >/dev/null 2>&1 || true
+    _speedtest_run_timeout 90 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
+        apt-get install -y speedtest
 }
 
 _speedtest_cleanup_rpm_conflicts() {
@@ -9208,7 +9240,7 @@ _speedtest_cleanup_rpm_conflicts() {
     if command -v rpm >/dev/null 2>&1 && rpm -q speedtest-cli >/dev/null 2>&1; then
         _warn "检测到非官方 speedtest-cli 包，可能与 Ookla 官方 speedtest 冲突"
         if _speedtest_prompt_yes_default "是否移除 speedtest-cli"; then
-            "$pkg_cmd" remove -y speedtest-cli || rpm -e speedtest-cli || return 1
+            _speedtest_run_timeout 60 "$pkg_cmd" remove -y speedtest-cli || rpm -e speedtest-cli || return 1
         else
             _warn "已保留 speedtest-cli，后续安装可能失败"
         fi
@@ -9224,10 +9256,10 @@ _speedtest_install_rpm_repo() {
     _speedtest_ensure_cmd_available curl curl || return 1
     _speedtest_cleanup_rpm_conflicts || return 1
 
-    if ! curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh | bash; then
+    if ! _speedtest_run_timeout 60 bash -c 'curl -fsSL --connect-timeout 10 --max-time 45 https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.rpm.sh | bash'; then
         return 1
     fi
-    "$pkg_cmd" install -y speedtest
+    _speedtest_run_timeout 90 "$pkg_cmd" install -y speedtest
 }
 
 _speedtest_linux_arch_token() {
@@ -9272,7 +9304,9 @@ _speedtest_install_linux_tarball() {
     local arch url tmp_dir tarball bin_dst
 
     _info "使用 Ookla 官方 Linux tarball 安装..."
-    _speedtest_ensure_cmd_available curl curl || return 1
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        _speedtest_ensure_cmd_available curl curl || return 1
+    fi
     _speedtest_ensure_cmd_available tar tar || return 1
 
     if ! arch="$(_speedtest_linux_arch_token)"; then
@@ -9288,7 +9322,7 @@ _speedtest_install_linux_tarball() {
     tarball="${tmp_dir}/speedtest.tgz"
 
     _info "下载: ${url}"
-    if ! curl -fsSL --retry 2 -o "$tarball" "$url"; then
+    if ! _mihomo_download "$url" "$tarball"; then
         rm -rf "$tmp_dir"
         _error_no_exit "下载 Ookla Speedtest 失败"
         return 1
@@ -9310,6 +9344,13 @@ _speedtest_install_linux_tarball() {
     if ! _speedtest_install_file "${tmp_dir}/speedtest" "$bin_dst" 0755; then
         rm -rf "$tmp_dir"
         _error_no_exit "安装 speedtest 到 ${bin_dst} 失败"
+        return 1
+    fi
+
+    if ! "$bin_dst" --version >/dev/null 2>&1; then
+        rm -rf "$tmp_dir"
+        rm -f "$bin_dst"
+        _error_no_exit "speedtest 安装后无法运行，当前系统可能不兼容官方 Linux tarball"
         return 1
     fi
 
@@ -9412,26 +9453,23 @@ _speedtest_install_freebsd() {
 }
 
 _speedtest_install_linux() {
-    local repo_tried="0"
+    if _speedtest_install_linux_tarball; then
+        return 0
+    fi
+
+    _warn "官方 Linux tarball 安装失败，尝试发行版仓库方式"
 
     if command -v apt-get >/dev/null 2>&1; then
-        repo_tried="1"
         if _speedtest_install_deb_repo; then
             return 0
         fi
     elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
-        repo_tried="1"
         if _speedtest_install_rpm_repo; then
             return 0
         fi
     fi
 
-    if [[ "$repo_tried" == "1" ]]; then
-        _warn "Ookla 官方仓库安装失败，改用官方 Linux tarball 直接安装"
-    else
-        _info "当前发行版无 Ookla 官方仓库安装方式，改用官方 Linux tarball"
-    fi
-    _speedtest_install_linux_tarball
+    return 1
 }
 
 _speedtest_install_current_os() {
@@ -9464,8 +9502,12 @@ _speedtest_show_installed_status() {
         return 1
     fi
 
+    if ! version="$("$bin_path" --version 2>&1 | head -1)"; then
+        _error_no_exit "speedtest 命令无法运行: ${bin_path}"
+        return 1
+    fi
+
     _success "Ookla Speedtest 已可用: ${bin_path}"
-    version="$("$bin_path" --version 2>&1 | head -1 || true)"
     [[ -n "$version" ]] && _info "版本信息: ${version}"
     return 0
 }
@@ -10415,7 +10457,10 @@ _snell_install_latest_core() {
     fi
 
     url="https://dl.nssurge.com/snell/snell-server-${latest_version}-linux-${arch}.zip"
-    tmp_zip=$(mktemp /tmp/snell.XXXXXX.zip)
+    tmp_zip=$(_mktemp_file snell .zip) || {
+        _error_no_exit "创建临时文件失败"
+        return 1
+    }
     tmp_dir=$(mktemp -d /tmp/snell.XXXXXX)
 
     _info "使用官方 Snell 工具安装: ${latest_version} (${arch})"
@@ -11223,7 +11268,7 @@ _ssrust_pick_asset_url() {
 
 _ssrust_extract_archive() {
     local archive="$1" dst="$2" err_log
-    err_log=$(mktemp /tmp/shadowsocks-rust.extract.XXXXXX.log)
+    err_log=$(_mktemp_file shadowsocks-rust.extract .log) || return 1
     _SSRUST_LAST_EXTRACT_ERROR=""
 
     # 优先尝试自动识别，不依赖文件后缀
@@ -11289,7 +11334,7 @@ _ssrust_strip_nofile_from_config() {
     [[ -f "$config_file" ]] || return 0
     grep -q '"nofile"[[:space:]]*:' "$config_file" 2>/dev/null || return 0
 
-    tmp_file=$(mktemp /tmp/shadowsocks-rust.config.XXXXXX.json)
+    tmp_file=$(_mktemp_file shadowsocks-rust.config .json) || return 1
     if ! awk '
         {
             if ($0 ~ /"nofile"[[:space:]]*:/) next
@@ -11363,7 +11408,10 @@ _ssrust_install_latest_core() {
     pkg_suffix="pkg"
     [[ "$asset_url" == *.tar.xz ]] && pkg_suffix="tar.xz"
     [[ "$asset_url" == *.tar.gz ]] && pkg_suffix="tar.gz"
-    tmp_pkg=$(mktemp "/tmp/shadowsocks-rust.XXXXXX.${pkg_suffix}")
+    tmp_pkg=$(_mktemp_file shadowsocks-rust ".${pkg_suffix}") || {
+        _error_no_exit "创建临时文件失败"
+        return 1
+    }
     tmp_dir=$(mktemp -d /tmp/shadowsocks-rust.XXXXXX)
 
     tmp_free_kb=$(_ssrust_tmp_free_kb)
@@ -15452,7 +15500,11 @@ _self_update() {
     local tmp_file
     local update_url
     update_url=$(_github_proxy_url "$UPDATE_URL")
-    tmp_file=$(mktemp /tmp/vpsgo.XXXXXX.sh)
+    tmp_file=$(_mktemp_file vpsgo .sh) || {
+        _error_no_exit "创建临时文件失败"
+        _press_any_key
+        return
+    }
     if ! curl -fsSL -o "$tmp_file" "$update_url"; then
         rm -f "$tmp_file"
         _error_no_exit "下载失败，请检查网络连接，或在首页按 g 开启 GitHub 代理"
