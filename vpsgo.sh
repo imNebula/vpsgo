@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.42"
+VERSION="2.43"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -49,6 +49,9 @@ _WARP_SH_URL="https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
 _WARP_REFRESH_SCRIPT="/usr/local/bin/vpsgo-warp-refresh.sh"
 _WARP_REFRESH_CRON="/etc/cron.d/vpsgo-warp-refresh"
 _WARP_REFRESH_LOG="/var/log/vpsgo-warp-refresh.log"
+_MIHOMO_AUTO_UPDATE_SCRIPT="/usr/local/bin/vpsgo-mihomo-auto-update.sh"
+_MIHOMO_AUTO_UPDATE_CRON="/etc/cron.d/vpsgo-mihomo-auto-update"
+_MIHOMO_AUTO_UPDATE_LOG="/var/log/vpsgo-mihomo-auto-update.log"
 _GITHUB_PROXY_DEFAULT_BASE="https://gh-proxy.org"
 _GITHUB_PROXY_ENABLED="0"
 _GITHUB_PROXY_BASE="$_GITHUB_PROXY_DEFAULT_BASE"
@@ -349,54 +352,92 @@ _ui_repeat_char() {
 
 _ui_display_width() {
     local s="$1"
-    awk -v s="$s" '
-        BEGIN {
-            w=0
-            for (i=1; i<=length(s); i++) {
-                c=substr(s, i, 1)
-                if (c ~ /[ -~]/) w+=1
-                else w+=2
+    printf '%s' "$s" | od -An -t u1 2>/dev/null | awk '
+        BEGIN { w=0; pending=0 }
+        {
+            for (i=1; i<=NF; i++) {
+                b=$i + 0
+                if (pending > 0) {
+                    pending--
+                    continue
+                }
+                if (b < 128) {
+                    w += 1
+                } else if (b >= 192 && b < 224) {
+                    w += 2
+                    pending = 1
+                } else if (b >= 224 && b < 240) {
+                    w += 2
+                    pending = 2
+                } else if (b >= 240) {
+                    w += 2
+                    pending = 3
+                }
             }
-            print w
         }
+        END { print w + 0 }
     '
 }
 
 _ui_truncate_text() {
-    local text="$1" max="$2"
+    local text="$1" max="$2" width limit bytes
     if ! _is_digit "${max:-}" || [ "$max" -le 0 ]; then
         printf ''
         return
     fi
-    awk -v s="$text" -v max="$max" '
-        BEGIN {
-            if (max <= 0) { print ""; exit }
-            out=""
-            w=0
-            n=length(s)
-            for (i=1; i<=n; i++) {
-                c=substr(s, i, 1)
-                cw=(c ~ /[ -~]/) ? 1 : 2
-                if (w + cw > max) break
-                out=out c
-                w+=cw
-            }
-            if (i <= n) {
-                if (max <= 3) {
-                    print substr("...", 1, max)
+
+    width=$(_ui_display_width "$text")
+    if [ "$width" -le "$max" ]; then
+        printf '%s' "$text"
+        return
+    fi
+
+    if [ "$max" -le 3 ]; then
+        printf '%.*s' "$max" "..."
+        return
+    fi
+
+    limit=$((max - 3))
+    bytes=$(printf '%s' "$text" | od -An -t u1 2>/dev/null | awk -v limit="$limit" '
+        BEGIN { w=0; bytes=0; pending=0 }
+        {
+            for (i=1; i<=NF; i++) {
+                b=$i + 0
+                if (pending > 0) {
+                    bytes++
+                    pending--
+                    continue
+                }
+
+                char_w=1
+                next_pending=0
+                if (b < 128) {
+                    char_w=1
+                } else if (b >= 192 && b < 224) {
+                    char_w=2
+                    next_pending=1
+                } else if (b >= 224 && b < 240) {
+                    char_w=2
+                    next_pending=2
+                } else if (b >= 240) {
+                    char_w=2
+                    next_pending=3
+                }
+                if (w + char_w > limit) {
+                    print bytes
                     exit
                 }
-                while (length(out) > 0 && w > max - 3) {
-                    c=substr(out, length(out), 1)
-                    cw=(c ~ /[ -~]/) ? 1 : 2
-                    out=substr(out, 1, length(out)-1)
-                    w-=cw
-                }
-                out=out "..."
+                w += char_w
+                bytes++
+                pending=next_pending
             }
-            print out
         }
-    '
+        END { print bytes + 0 }
+    ' | tail -n 1)
+    if _is_digit "${bytes:-}" && [ "$bytes" -gt 0 ]; then
+        printf '%s' "$text" | dd bs=1 count="$bytes" 2>/dev/null
+    fi
+    printf '...'
 }
 
 _ui_pad_right_text() {
@@ -439,7 +480,7 @@ _separator() {
 _menu_item() {
     local key="$1" label="$2" desc="${3:-}" tone="${4:-green}"
     local color="$GREEN" key_token cols
-    local label_max desc_max label_txt desc_txt
+    local label_txt desc_txt line_max label_w desc_w desc_max
     case "$tone" in
         red) color="$RED" ;;
         yellow) color="$YELLOW" ;;
@@ -449,15 +490,21 @@ _menu_item() {
     key_token="[${key}]"
 
     cols=$(_ui_term_cols)
+    line_max=$((cols - 8))
+    [ "$line_max" -lt 20 ] && line_max=20
+    label_txt="$label"
     if [[ -n "$desc" ]]; then
-        label_max=$(( (cols - 20) / 2 ))
-        desc_max=$(( cols - 14 - label_max ))
-        [ "$label_max" -lt 10 ] && label_max=10
-        [ "$desc_max" -lt 10 ] && desc_max=10
-        label_txt=$(_ui_truncate_text "$label" "$label_max")
-        desc_txt=$(_ui_truncate_text "$desc" "$desc_max")
+        label_w=$(_ui_display_width "$label_txt")
+        desc_w=$(_ui_display_width "$desc")
+        desc_max=$((line_max - $(_ui_display_width "$key_token") - 2 - label_w))
+        if [ "$desc_max" -ge "$desc_w" ]; then
+            desc_txt="$desc"
+        elif [ "$desc_max" -ge 8 ]; then
+            desc_txt=$(_ui_truncate_text "$desc" "$desc_max")
+        else
+            desc_txt=""
+        fi
     else
-        label_txt=$(_ui_truncate_text "$label" "$((cols - 12))")
         desc_txt=""
     fi
 
@@ -531,6 +578,14 @@ _exists() {
 
 _is_digit() {
     [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+_valid_hhmm() {
+    local value="$1" hh mm
+    [[ "$value" =~ ^[0-2][0-9]:[0-5][0-9]$ ]] || return 1
+    hh="${value%%:*}"
+    mm="${value##*:}"
+    [ "$hh" -le 23 ] && [ "$mm" -le 59 ]
 }
 
 _is_valid_port() {
@@ -1632,11 +1687,7 @@ _warp_refresh_netflix_now() {
 }
 
 _warp_valid_hhmm() {
-    local value="$1" hh mm
-    [[ "$value" =~ ^[0-2][0-9]:[0-5][0-9]$ ]] || return 1
-    hh="${value%%:*}"
-    mm="${value##*:}"
-    [ "$hh" -le 23 ] && [ "$mm" -le 59 ]
+    _valid_hhmm "$1"
 }
 
 _warp_write_refresh_script() {
@@ -3424,6 +3475,446 @@ _mihomo_try_install() {
     else
         return 1
     fi
+}
+
+_mihomo_write_auto_update_script() {
+    cat > "$_MIHOMO_AUTO_UPDATE_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+
+export TZ=Asia/Shanghai
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+PROXY_ENABLED="${_GITHUB_PROXY_ENABLED}"
+PROXY_BASE="${_GITHUB_PROXY_BASE}"
+LOG_FILE="${_MIHOMO_AUTO_UPDATE_LOG}"
+EOF
+    cat >> "$_MIHOMO_AUTO_UPDATE_SCRIPT" <<'EOF'
+LOCK_FILE="/run/vpsgo-mihomo-auto-update.lock"
+DEFAULT_INSTALL_BIN="/usr/local/bin/mihomo"
+INSTALL_BIN=""
+INSTALL_DIR=""
+RELEASE_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
+LATEST_URL="https://github.com/MetaCubeX/mihomo/releases/latest"
+
+log() {
+    printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*"
+}
+
+supports_proxy_url() {
+    local url="$1" rest host
+    rest="${url#*://}"
+    host="${rest%%/*}"
+    host="${host%%\?*}"
+    host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+    case "$host" in
+        github.com|www.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+proxy_url() {
+    local url="${1:-}" base
+    if [ "${PROXY_ENABLED}" != "1" ] && [ "${PROXY_ENABLED}" != "true" ] && [ "${PROXY_ENABLED}" != "yes" ] && [ "${PROXY_ENABLED}" != "on" ]; then
+        printf '%s' "$url"
+        return
+    fi
+    base="${PROXY_BASE%/}"
+    if [ -z "$base" ] || ! supports_proxy_url "$url" || [ "${url#${base}/}" != "$url" ]; then
+        printf '%s' "$url"
+        return
+    fi
+    printf '%s/%s' "$base" "$url"
+}
+
+download_file() {
+    local url="$1" output="$2" fetch_url
+    fetch_url=$(proxy_url "$url")
+    rm -f "$output"
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fL --retry 2 --connect-timeout 10 -o "$output" "$fetch_url"; then
+            [ -s "$output" ] && return 0
+        fi
+        rm -f "$output"
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        if wget -q -O "$output" "$fetch_url"; then
+            [ -s "$output" ] && return 0
+        fi
+        rm -f "$output"
+    fi
+    return 1
+}
+
+resolve_install_path() {
+    if [ -x "$DEFAULT_INSTALL_BIN" ]; then
+        INSTALL_BIN="$DEFAULT_INSTALL_BIN"
+    else
+        INSTALL_BIN=$(command -v mihomo 2>/dev/null || true)
+    fi
+    [ -n "$INSTALL_BIN" ] || INSTALL_BIN="$DEFAULT_INSTALL_BIN"
+    INSTALL_DIR=$(dirname "$INSTALL_BIN")
+}
+
+latest_version() {
+    local version latest_url fetch_latest
+    if command -v curl >/dev/null 2>&1; then
+        version=$(curl -fsSL "$RELEASE_API" 2>/dev/null | awk -F'"' '$2=="tag_name"{print $4; exit}')
+    elif command -v wget >/dev/null 2>&1; then
+        version=$(wget -qO- "$RELEASE_API" 2>/dev/null | awk -F'"' '$2=="tag_name"{print $4; exit}')
+    fi
+    if [ -n "${version:-}" ] && printf '%s' "$version" | grep -Eq '^v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$'; then
+        printf '%s' "$version"
+        return 0
+    fi
+
+    fetch_latest=$(proxy_url "$LATEST_URL")
+    if command -v curl >/dev/null 2>&1; then
+        latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$fetch_latest" 2>/dev/null || true)
+    elif command -v wget >/dev/null 2>&1; then
+        latest_url=$(wget -S --spider "$fetch_latest" 2>&1 | awk '/^  Location: /{u=$2} END{print u}' | tr -d '\r')
+    fi
+    if [ -n "${latest_url:-}" ] && [ "${latest_url#*/releases/tag/}" != "$latest_url" ]; then
+        version="${latest_url##*/}"
+        if [ -n "${version:-}" ] && printf '%s' "$version" | grep -Eq '^v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$'; then
+            printf '%s' "$version"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+current_version() {
+    local bin output version
+    [ -n "$INSTALL_BIN" ] || resolve_install_path
+    bin="$INSTALL_BIN"
+    [ -x "$bin" ] || bin=$(command -v mihomo 2>/dev/null || true)
+    [ -n "$bin" ] && [ -x "$bin" ] || return 1
+    output=$("$bin" -v 2>/dev/null | head -1 || true)
+    version=$(printf '%s\n' "$output" | sed -nE 's/.*[Mm]ihomo[^0-9v]*(v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*).*/\1/p' | head -1)
+    [ -n "$version" ] || version=$(printf '%s\n' "$output" | grep -Eom1 'v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*' || true)
+    [ -n "$version" ] || return 1
+    printf '%s' "$version"
+}
+
+normalize_version() {
+    printf '%s' "$1" | sed -E 's/^v//'
+}
+
+detect_amd64_level() {
+    local flags
+    flags=$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | cut -d: -f2 || true)
+    if echo "$flags" | grep -qw 'avx2'; then
+        echo "amd64-v3"
+    elif echo "$flags" | grep -qw 'sse4_2' && echo "$flags" | grep -qw 'popcnt'; then
+        echo "amd64-v2"
+    else
+        echo "amd64-compatible"
+    fi
+}
+
+detect_mips_float() {
+    if grep -q 'FPU' /proc/cpuinfo 2>/dev/null; then
+        echo "hardfloat"
+    else
+        echo "softfloat"
+    fi
+}
+
+detect_arch() {
+    local machine
+    machine=$(uname -m)
+    case "$machine" in
+        x86_64|amd64)       detect_amd64_level ;;
+        i386|i486|i586|i686) echo "386" ;;
+        aarch64|arm64)      echo "arm64" ;;
+        armv7*|armhf)       echo "armv7" ;;
+        armv6*)             echo "armv6" ;;
+        armv5*)             echo "armv5" ;;
+        mips64)             echo "mips64" ;;
+        mips64el|mips64le)  echo "mips64le" ;;
+        mips)               echo "mips-$(detect_mips_float)" ;;
+        mipsel|mipsle)      echo "mipsle-$(detect_mips_float)" ;;
+        riscv64)            echo "riscv64" ;;
+        s390x)              echo "s390x" ;;
+        ppc64le)            echo "ppc64le" ;;
+        loongarch64)        echo "loong64-abi2" ;;
+        *)                  echo "" ;;
+    esac
+}
+
+try_install_arch() {
+    local arch="$1" version="$2" url tmp_gz tmp_bin
+    url="https://github.com/MetaCubeX/mihomo/releases/download/${version}/mihomo-linux-${arch}-${version}.gz"
+    tmp_gz=$(mktemp "/tmp/vpsgo-mihomo-${arch}.XXXXXX.gz") || return 1
+    tmp_bin=$(mktemp "/tmp/vpsgo-mihomo-${arch}.XXXXXX") || {
+        rm -f "$tmp_gz"
+        return 1
+    }
+
+    log "Downloading mihomo-linux-${arch}-${version}.gz"
+    if ! download_file "$url" "$tmp_gz"; then
+        rm -f "$tmp_gz" "$tmp_bin"
+        return 1
+    fi
+    if ! gunzip -c "$tmp_gz" > "$tmp_bin"; then
+        rm -f "$tmp_gz" "$tmp_bin"
+        return 1
+    fi
+    chmod 0755 "$tmp_bin"
+    if ! "$tmp_bin" -v >/dev/null 2>&1; then
+        rm -f "$tmp_gz" "$tmp_bin"
+        return 1
+    fi
+
+    mkdir -p "$INSTALL_DIR"
+    mv -f "$tmp_bin" "$INSTALL_BIN"
+    chmod 0755 "$INSTALL_BIN"
+    rm -f "$tmp_gz"
+    log "Installed ${INSTALL_BIN} (${arch}, ${version})"
+    return 0
+}
+
+install_latest() {
+    local arch="$1" version="$2"
+    if try_install_arch "$arch" "$version"; then
+        return 0
+    fi
+    if [ "$arch" = "amd64-v3" ]; then
+        log "amd64-v3 failed, fallback to amd64-v2"
+        if try_install_arch "amd64-v2" "$version"; then
+            return 0
+        fi
+        log "amd64-v2 failed, fallback to amd64-compatible"
+        try_install_arch "amd64-compatible" "$version"
+        return $?
+    fi
+    return 1
+}
+
+mihomo_running() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet mihomo 2>/dev/null; then
+        return 0
+    fi
+    if command -v rc-service >/dev/null 2>&1 && [ -x /etc/init.d/mihomo ] && rc-service mihomo status >/dev/null 2>&1; then
+        return 0
+    fi
+    pgrep -x mihomo >/dev/null 2>&1
+}
+
+restart_mihomo() {
+    if command -v systemctl >/dev/null 2>&1; then
+        local state
+        state=$(systemctl show -p LoadState --value mihomo.service 2>/dev/null || true)
+        if [ -n "$state" ] && [ "$state" != "not-found" ]; then
+            systemctl restart mihomo >/dev/null 2>&1
+            return $?
+        fi
+    fi
+    if command -v rc-service >/dev/null 2>&1 && [ -x /etc/init.d/mihomo ]; then
+        rc-service mihomo restart >/dev/null 2>&1 || rc-service mihomo start >/dev/null 2>&1
+        return $?
+    fi
+    if pgrep -x mihomo >/dev/null 2>&1; then
+        pkill -x mihomo >/dev/null 2>&1 || true
+        sleep 1
+    fi
+    if [ -d /etc/mihomo ]; then
+        nohup "$INSTALL_BIN" -d /etc/mihomo >/dev/null 2>&1 &
+        sleep 1
+        pgrep -x mihomo >/dev/null 2>&1
+        return $?
+    fi
+    return 0
+}
+
+main() {
+    local latest current arch was_running=0
+    mkdir -p "$(dirname "$LOG_FILE")" /run
+    touch "$LOG_FILE"
+    exec >> "$LOG_FILE" 2>&1
+    exec 9>"$LOCK_FILE"
+    if command -v flock >/dev/null 2>&1; then
+        flock -n 9 || {
+            log "Previous Mihomo auto update is still running, skip."
+            exit 0
+        }
+    fi
+
+    resolve_install_path
+    if ! command -v mihomo >/dev/null 2>&1 && [ ! -x "$INSTALL_BIN" ]; then
+        log "Mihomo is not installed, skip."
+        exit 0
+    fi
+    if ! command -v gunzip >/dev/null 2>&1; then
+        log "Missing gunzip, cannot update."
+        exit 1
+    fi
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        log "Missing curl/wget, cannot update."
+        exit 1
+    fi
+
+    log "Start VPSGo Mihomo auto update."
+    latest=$(latest_version) || {
+        log "Failed to fetch latest version."
+        exit 1
+    }
+    current=$(current_version 2>/dev/null || true)
+    if [ -n "$current" ] && [ "$(normalize_version "$current")" = "$(normalize_version "$latest")" ]; then
+        log "Already latest: ${current}"
+        exit 0
+    fi
+
+    arch=$(detect_arch)
+    if [ -z "$arch" ]; then
+        log "Unsupported arch: $(uname -m)"
+        exit 1
+    fi
+    mihomo_running && was_running=1
+    log "Update needed: current=${current:-unknown}, latest=${latest}, arch=${arch}"
+    if ! install_latest "$arch" "$latest"; then
+        log "Install failed."
+        exit 1
+    fi
+
+    if [ "$was_running" = "1" ]; then
+        if restart_mihomo; then
+            log "Mihomo restarted."
+        else
+            log "Mihomo updated, but restart failed."
+            exit 1
+        fi
+    else
+        log "Mihomo was not running, skip restart."
+    fi
+    log "Finish VPSGo Mihomo auto update."
+}
+
+main "$@"
+EOF
+    chmod 0755 "$_MIHOMO_AUTO_UPDATE_SCRIPT"
+}
+
+_mihomo_configure_auto_update_cron() {
+    _header "Mihomo 定时自动更新"
+
+    if ! command -v mihomo >/dev/null 2>&1; then
+        _warn "当前未检测到 mihomo，请先安装后再配置自动更新。"
+        _press_any_key
+        return
+    fi
+
+    local time_hhmm hour minute
+    echo ""
+    _info "输入北京时间，格式 HH:MM，例如 04:20。"
+    _info "任务每天执行一次，只在发现新版本时更新。"
+    read -rp "  每天检查时间 [HH:MM]: " time_hhmm
+    if ! _valid_hhmm "$time_hhmm"; then
+        _error_no_exit "时间格式无效，请使用 HH:MM，例如 04:20。"
+        _press_any_key
+        return
+    fi
+
+    hour="${time_hhmm%%:*}"
+    minute="${time_hhmm##*:}"
+    hour=$((10#$hour))
+    minute=$((10#$minute))
+
+    _mihomo_write_auto_update_script
+    cat > "$_MIHOMO_AUTO_UPDATE_CRON" <<EOF
+# Managed by VPSGo. Runs by Beijing time.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+${minute} ${hour} * * * root ${_MIHOMO_AUTO_UPDATE_SCRIPT}
+EOF
+    chmod 0644 "$_MIHOMO_AUTO_UPDATE_CRON"
+    _restart_first_available_service cron crond >/dev/null 2>&1 || true
+
+    echo ""
+    _success "Mihomo 定时自动更新已配置"
+    _status_kv "时间" "每天北京时间 ${time_hhmm}" "green" 12
+    _status_kv "策略" "发现新版本后自动更新" "green" 12
+    _status_kv "日志" "$_MIHOMO_AUTO_UPDATE_LOG" "cyan" 12
+    if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
+        _status_kv "GitHub 代理" "$_GITHUB_PROXY_BASE" "cyan" 12
+    fi
+    _press_any_key
+}
+
+_mihomo_show_auto_update_cron() {
+    _header "Mihomo 定时自动更新状态"
+
+    if [ -f "$_MIHOMO_AUTO_UPDATE_CRON" ]; then
+        printf "  ${BOLD}Cron 配置${PLAIN}\n"
+        _separator
+        sed 's/^/    /' "$_MIHOMO_AUTO_UPDATE_CRON"
+    else
+        _warn "未检测到 Mihomo 定时自动更新配置。"
+    fi
+
+    if [ -f "$_MIHOMO_AUTO_UPDATE_SCRIPT" ]; then
+        echo ""
+        _status_kv "执行脚本" "$_MIHOMO_AUTO_UPDATE_SCRIPT" "cyan" 12
+    fi
+    if [ -f "$_MIHOMO_AUTO_UPDATE_LOG" ]; then
+        echo ""
+        printf "  ${BOLD}最近日志${PLAIN}\n"
+        _separator
+        tail -n 30 "$_MIHOMO_AUTO_UPDATE_LOG" | sed 's/^/    /'
+    fi
+    _press_any_key
+}
+
+_mihomo_remove_auto_update_cron() {
+    _header "删除 Mihomo 定时自动更新"
+
+    if [ ! -f "$_MIHOMO_AUTO_UPDATE_CRON" ] && [ ! -f "$_MIHOMO_AUTO_UPDATE_SCRIPT" ]; then
+        _info "未检测到 Mihomo 定时自动更新配置。"
+        _press_any_key
+        return
+    fi
+
+    local confirm
+    read -rp "  确认删除 Mihomo 定时自动更新? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    rm -f "$_MIHOMO_AUTO_UPDATE_CRON" "$_MIHOMO_AUTO_UPDATE_SCRIPT"
+    _restart_first_available_service cron crond >/dev/null 2>&1 || true
+    _success "已删除 Mihomo 定时自动更新配置。"
+    _press_any_key
+}
+
+_mihomo_auto_update_manage() {
+    while true; do
+        _header "Mihomo 定时自动更新"
+        if [ -f "$_MIHOMO_AUTO_UPDATE_CRON" ]; then
+            _info "当前状态: 已配置"
+        else
+            _info "当前状态: 未配置"
+        fi
+        _separator
+        _menu_pair "1" "配置/更新定时任务" "北京时间" "green" "2" "查看定时任务" "配置/日志" "cyan"
+        _menu_pair "3" "删除定时任务" "" "yellow" "0" "返回上级菜单" "" "red"
+        _separator
+
+        local choice
+        read -rp "  选择 [0-3]: " choice
+        case "$choice" in
+            1) _mihomo_configure_auto_update_cron ;;
+            2) _mihomo_show_auto_update_cron ;;
+            3) _mihomo_remove_auto_update_cron ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; sleep 1 ;;
+        esac
+    done
 }
 
 _mihomo_setup() {
@@ -6371,6 +6862,12 @@ _mihomo_uninstall() {
         removed_count=$((removed_count + 1))
         _info "已删除服务文件: $openrc_service_file"
     fi
+    if [[ -f "$_MIHOMO_AUTO_UPDATE_CRON" || -f "$_MIHOMO_AUTO_UPDATE_SCRIPT" ]]; then
+        rm -f "$_MIHOMO_AUTO_UPDATE_CRON" "$_MIHOMO_AUTO_UPDATE_SCRIPT"
+        removed_count=$((removed_count + 1))
+        _info "已删除定时自动更新配置"
+        _restart_first_available_service cron crond >/dev/null 2>&1 || true
+    fi
     if _has_systemd; then
         systemctl daemon-reload >/dev/null 2>&1 || true
         systemctl reset-failed mihomo >/dev/null 2>&1 || true
@@ -9282,11 +9779,12 @@ _mihomo_manage() {
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
         _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "" "green"
         _menu_pair "7" "服务端链式代理" "入站绑定出站" "green" "8" "Gemini/Google IPv4" "定向规则" "green"
-        _menu_pair "9" "卸载 Mihomo" "停止并清理" "yellow" "0" "返回主菜单" "" "red"
+        _menu_pair "9" "定时自动更新" "检查新版本" "green" "10" "卸载 Mihomo" "停止并清理" "yellow"
+        _menu_item "0" "返回主菜单" "" "red"
         _separator
 
         local choice
-        read -rp "  选择 [0-9]: " choice
+        read -rp "  选择 [0-10]: " choice
         case "$choice" in
             1) _mihomo_setup ;;
             2) _mihomoconf_setup ;;
@@ -9296,7 +9794,8 @@ _mihomo_manage() {
             6) _mihomo_read_config ;;
             7) _mihomo_chain_proxy_manage ;;
             8) _mihomo_ipv4_google_manage ;;
-            9) _mihomo_uninstall ;;
+            9) _mihomo_auto_update_manage ;;
+            10) _mihomo_uninstall ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
