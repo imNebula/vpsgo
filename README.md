@@ -65,30 +65,32 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 | # | 功能 | 说明 |
 |---|------|------|
 | 1 | 开启内核自带 BBR | 安装/启用 TCP BBR 拥塞控制 |
-| 2 | 设置队列调度算法 | 支持 fq / cake / fq_pie |
+| 2 | 设置队列调度算法 | 切换 fq / cake / fq_pie |
 | 3 | 设置 IPv4/IPv6 优先级 | 修改出口协议栈偏好 |
 | 4 | TCP 缓冲区调优 | 基于 BDP 自适应优化连接参数；CAKE 持久化支持 systemd/OpenRC |
+| 18 | WARP 管理 | 运行 warp-sh、刷新网络、刷 Netflix IP、配置北京时间定时刷新 |
 
 ### 工具
 
 | # | 功能 | 说明 |
 |---|------|------|
-| 5 | iPerf3 测速服务端 | 一键启动，自动安装，显示客户端连接命令 |
+| 5 | iPerf3 测速服务端 | 启动服务端并显示客户端命令 |
 | 6 | NodeQuality 测试 | 运行 NodeQuality 线路质量评分脚本 |
-| 7 | Ookla Speedtest CLI | 安装/更新官方 Speedtest CLI；Linux 优先使用官方 tarball 直装，APT/RPM 仓库仅作回退，兼容 macOS/FreeBSD 官方安装方式 |
-| 8 | Linux DNS 管理 | 临时/永久修改 DNS，支持 IPv6-only VPS 的 IPv6 DNS 默认推荐、A/AAAA 验证与 IPv6 DNS 测速 |
-| 9 | Docker 日志轮转 | 配置 json-file 日志驱动，限制容器日志大小；支持 systemd/OpenRC 重启 Docker |
+| 7 | Ookla Speedtest CLI | 安装/更新 Speedtest CLI |
+| 8 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
+| 9 | Docker 日志轮转 | 限制容器日志大小 |
 | 10 | Mihomo 管理 | 安装/更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志 |
-| 11 | sing-box 安装 | Debian/Ubuntu 使用官方 APT 源，其他发行版使用安装脚本；自启动支持 systemd/OpenRC |
-| 12 | Snell V5 管理 | 官方工具安装/更新、配置与启动、Surge V5 配置导出、日志/状态、卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC |
-| 13 | WireGuard 原生节点 | 原生内核方案，一键部署/重建、支持新增多个客户端（不重建服务端）、客户端配置导出、服务状态/重启/卸载，含与 Mihomo 端口冲突检查；支持 systemd/OpenRC 持久化 |
-| 14 | Shadowsocks-Rust 管理 | 官方 releases 安装/更新、配置并启动、自启动、日志/状态、卸载；支持 systemd/OpenRC，适合 LXC/容器环境 |
+| 11 | sing-box 安装 | 安装、启动、查看状态和日志 |
+| 12 | Snell V5 管理 | 安装、配置、导出、查看日志和状态 |
+| 13 | WireGuard 原生节点 | 部署节点、管理客户端、查看状态 |
+| 14 | Shadowsocks-Rust 管理 | 安装、配置、导出、查看日志和状态 |
 
 ### 系统
 
 | # | 功能 | 说明 |
 |---|------|------|
 | 16 | Swap 管理 | 智能推荐大小，创建/删除 Swap 文件 |
+| 17 | 1Panel iptables 代理链 | 快速挂载 1PANEL_PREROUTING / 1PANEL_POSTROUTING 到 NAT 主链，并可尝试保存规则 |
 
 ### 其他
 

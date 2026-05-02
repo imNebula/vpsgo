@@ -19,6 +19,8 @@
 #  14. Akile DNS 解锁检测与配置
 #  15. Linux DNS 管理 (临时/永久修改)
 #  16. Swap 管理
+#  17. 1Panel iptables 代理链快速应用
+#  18. WARP 管理
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -35,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.40"
+VERSION="2.42"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -43,6 +45,10 @@ UPDATE_URL="https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vps
 VPSGO_CONFIG_FILE="${VPSGO_CONFIG_FILE:-/etc/vpsgo/config}"
 _SPEEDTEST_VERSION="1.2.0"
 _SPEEDTEST_DOWNLOAD_BASE="https://install.speedtest.net/app/cli"
+_WARP_SH_URL="https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
+_WARP_REFRESH_SCRIPT="/usr/local/bin/vpsgo-warp-refresh.sh"
+_WARP_REFRESH_CRON="/etc/cron.d/vpsgo-warp-refresh"
+_WARP_REFRESH_LOG="/var/log/vpsgo-warp-refresh.log"
 _GITHUB_PROXY_DEFAULT_BASE="https://gh-proxy.org"
 _GITHUB_PROXY_ENABLED="0"
 _GITHUB_PROXY_BASE="$_GITHUB_PROXY_DEFAULT_BASE"
@@ -193,9 +199,9 @@ _github_proxy_status_text() {
 
 _github_proxy_status_desc() {
     if _is_truthy "$_GITHUB_PROXY_ENABLED"; then
-        printf '已开启，按 g 关闭'
+        printf '开启中，按 g 关闭'
     else
-        printf '已关闭，按 g 开启国内加速'
+        printf '关闭中，按 g 开启'
     fi
 }
 
@@ -766,7 +772,7 @@ _tail_log_files_interactive() {
 
     echo ""
     _separator
-    read -rp "  是否实时跟踪日志? [y/N]: " follow
+    read -rp "  实时跟踪日志? [y/N]: " follow
     if [[ "$follow" =~ ^[Yy] ]]; then
         echo ""
         _info "按 Ctrl+C 退出实时日志..."
@@ -1295,7 +1301,7 @@ _qdisc_setup() {
     _info "提示: 默认使用 fq 一般已足够，更换算法不一定带来性能提升"
     _qdisc_check_virt
 
-    printf "  ${BOLD}请选择要启用的队列调度算法${PLAIN}\n"
+    printf "  ${BOLD}选择队列算法${PLAIN}\n"
     _separator
     _menu_pair "1" "fq" "Fair Queuing (>=3.12)" "green" "2" "cake" "CAKE (>=4.19)" "green"
     _menu_pair "3" "fq_pie" "FQ+PIE (>=4.19)" "green" "0" "返回主菜单" "" "red"
@@ -1456,7 +1462,7 @@ _v4v6_setup() {
     echo ""
     _v4v6_show_exits
 
-    printf "  ${BOLD}请选择操作${PLAIN}\n"
+    printf "  ${BOLD}选择操作${PLAIN}\n"
     _separator
     _menu_pair "1" "设置 IPv4 优先" "" "green" "2" "设置 IPv6 优先" "" "green"
     _menu_item "0" "返回主菜单" "" "red"
@@ -1475,6 +1481,387 @@ _v4v6_setup() {
     echo ""
     _v4v6_verify_ip
     _press_any_key
+}
+
+# --- WARP 管理 ---
+
+_warp_command_available() {
+    command -v warp >/dev/null 2>&1
+}
+
+_warp_run_upstream_script() {
+    _header "WARP 管理"
+    _info "打开 warp-sh 原脚本菜单，用于安装、切换或卸载 WARP。"
+    _status_kv "项目" "https://github.com/fscarmen/warp-sh" "cyan" 10
+    _status_kv "脚本" "$_WARP_SH_URL" "cyan" 10
+    echo ""
+
+    if ! command -v bash >/dev/null 2>&1; then
+        _error_no_exit "未检测到 bash，无法运行 WARP 脚本。"
+        _press_any_key
+        return
+    fi
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        _error_no_exit "需要 curl 或 wget 下载 WARP 脚本。"
+        _press_any_key
+        return
+    fi
+
+    local confirm tmp_file
+    read -rp "  继续? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    tmp_file=$(_mktemp_file vpsgo-warp .sh) || {
+        _error_no_exit "创建临时文件失败"
+        _press_any_key
+        return
+    }
+
+    if command -v curl >/dev/null 2>&1; then
+        if ! curl -fsSL -o "$tmp_file" "$_WARP_SH_URL"; then
+            rm -f "$tmp_file"
+            _error_no_exit "下载 WARP 脚本失败"
+            _press_any_key
+            return
+        fi
+    else
+        if ! wget -qO "$tmp_file" "$_WARP_SH_URL"; then
+            rm -f "$tmp_file"
+            _error_no_exit "下载 WARP 脚本失败"
+            _press_any_key
+            return
+        fi
+    fi
+
+    chmod 0755 "$tmp_file" 2>/dev/null || true
+    bash "$tmp_file"
+    rm -f "$tmp_file"
+    _press_any_key
+}
+
+_warp_run_command() {
+    local mode="$1"
+    shift || true
+
+    if _warp_command_available; then
+        warp "$mode" "$@"
+        return $?
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+        bash <(curl -fsSL "$_WARP_SH_URL") "$mode" "$@"
+        return $?
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        local tmp_file
+        tmp_file=$(_mktemp_file vpsgo-warp .sh) || return 1
+        wget -qO "$tmp_file" "$_WARP_SH_URL" || {
+            rm -f "$tmp_file"
+            return 1
+        }
+        bash "$tmp_file" "$mode" "$@"
+        local rc=$?
+        rm -f "$tmp_file"
+        return "$rc"
+    fi
+    return 1
+}
+
+_warp_refresh_now() {
+    _header "WARP 网络刷新"
+
+    if ! _warp_command_available; then
+        _warn "未检测到 warp 命令，将临时下载脚本执行。"
+    fi
+
+    _info "刷新 WARP 当前网络。"
+    if ! _warp_run_command n; then
+        _error_no_exit "WARP 网络刷新失败，请先运行 WARP 安装脚本。"
+    fi
+    _press_any_key
+}
+
+_warp_prompt_netflix_ip_version() {
+    local choice
+    echo ""
+    printf "  ${BOLD}Netflix 刷 IP 类型${PLAIN}\n"
+    _separator
+    _menu_pair "1" "刷 WARP IPv4" "" "green" "2" "刷 WARP IPv6" "默认" "green"
+    _separator
+    read -rp "  选择 [1-2]（默认 2）: " choice
+    choice="${choice:-2}"
+    case "$choice" in
+        1|2) _WARP_NETFLIX_IP_CHOICE="$choice" ;;
+        *) _WARP_NETFLIX_IP_CHOICE="2" ;;
+    esac
+}
+
+_warp_prompt_netflix_region() {
+    local region
+    read -rp "  Netflix 目标地区 [默认当前地区，示例 hk/sg/jp/us]: " region
+    region=$(printf '%s' "${region:-}" | tr '[:upper:]' '[:lower:]')
+    if [[ -n "$region" && ! "$region" =~ ^[a-z]{2}$ ]]; then
+        _warn "地区格式无效，将使用当前地区。"
+        region=""
+    fi
+    _WARP_NETFLIX_REGION="$region"
+}
+
+_warp_refresh_netflix_now() {
+    _header "WARP Netflix 刷 IP"
+    _info "更换 WARP IP，直到 Netflix 检测通过。"
+
+    local ip_choice region
+    _warp_prompt_netflix_ip_version
+    _warp_prompt_netflix_region
+    ip_choice="$_WARP_NETFLIX_IP_CHOICE"
+    region="$_WARP_NETFLIX_REGION"
+
+    echo ""
+    _status_kv "IP 类型" "WARP IPv$([ "$ip_choice" = 1 ] && printf 4 || printf 6)" "green" 10
+    _status_kv "地区" "${region:-当前地区}" "green" 10
+
+    if ! printf '%s\n%s\n' "$ip_choice" "$ip_choice" | _warp_run_command i "$region"; then
+        _error_no_exit "WARP Netflix 刷 IP 失败，请确认 WARP 已安装并可用。"
+    fi
+    _press_any_key
+}
+
+_warp_valid_hhmm() {
+    local value="$1" hh mm
+    [[ "$value" =~ ^[0-2][0-9]:[0-5][0-9]$ ]] || return 1
+    hh="${value%%:*}"
+    mm="${value##*:}"
+    [ "$hh" -le 23 ] && [ "$mm" -le 59 ]
+}
+
+_warp_write_refresh_script() {
+    local mode="$1" ip_choice="$2" region="$3" max_minutes="$4"
+
+    cat > "$_WARP_REFRESH_SCRIPT" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+
+export TZ=Asia/Shanghai
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+MODE="${mode}"
+IP_CHOICE="${ip_choice}"
+REGION="${region}"
+MAX_MINUTES="${max_minutes}"
+LOG_FILE="${_WARP_REFRESH_LOG}"
+LOCK_FILE="/run/vpsgo-warp-refresh.lock"
+
+mkdir -p "\$(dirname "\$LOG_FILE")" /run
+touch "\$LOG_FILE"
+exec 9>"\$LOCK_FILE"
+if command -v flock >/dev/null 2>&1; then
+    flock -n 9 || {
+        printf '[%s] Previous WARP refresh is still running, skip.\\n' "\$(date '+%F %T %Z')" >> "\$LOG_FILE"
+        exit 0
+    }
+fi
+
+run_warp() {
+    if command -v warp >/dev/null 2>&1; then
+        warp "\$@"
+        return \$?
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        bash <(curl -fsSL "${_WARP_SH_URL}") "\$@"
+        return \$?
+    fi
+    printf '[%s] Missing warp command and curl.\\n' "\$(date '+%F %T %Z')"
+    return 1
+}
+
+run_with_timeout() {
+    if [[ "\$MAX_MINUTES" =~ ^[0-9]+$ ]] && [ "\$MAX_MINUTES" -gt 0 ]; then
+        "\$@" &
+        cmd_pid=\$!
+        (
+            sleep "\${MAX_MINUTES}m"
+            pkill -TERM -P "\$cmd_pid" >/dev/null 2>&1 || true
+            kill "\$cmd_pid" >/dev/null 2>&1 || true
+        ) &
+        timer_pid=\$!
+        wait "\$cmd_pid"
+        rc=\$?
+        kill "\$timer_pid" >/dev/null 2>&1 || true
+        wait "\$timer_pid" 2>/dev/null || true
+        return "\$rc"
+    else
+        "\$@"
+    fi
+}
+
+{
+    printf '\\n[%s] Start VPSGo WARP refresh, mode=%s, region=%s, ip_choice=%s\\n' "\$(date '+%F %T %Z')" "\$MODE" "\${REGION:-current}" "\${IP_CHOICE:-auto}"
+    case "\$MODE" in
+        network)
+            run_warp n
+            ;;
+        netflix)
+            if [ -n "\$REGION" ]; then
+                printf '%s\\n%s\\n' "\$IP_CHOICE" "\$IP_CHOICE" | run_with_timeout run_warp i "\$REGION"
+            else
+                printf '%s\\n%s\\n' "\$IP_CHOICE" "\$IP_CHOICE" | run_with_timeout run_warp i
+            fi
+            ;;
+        *)
+            printf '[%s] Invalid mode: %s\\n' "\$(date '+%F %T %Z')" "\$MODE"
+            exit 1
+            ;;
+    esac
+    rc=\$?
+    printf '[%s] Finish VPSGo WARP refresh, rc=%s\\n' "\$(date '+%F %T %Z')" "\$rc"
+    exit "\$rc"
+} >> "\$LOG_FILE" 2>&1
+EOF
+    chmod 0755 "$_WARP_REFRESH_SCRIPT"
+}
+
+_warp_configure_refresh_cron() {
+    _header "WARP 定时刷新"
+
+    echo ""
+    printf "  ${BOLD}刷新类型${PLAIN}\n"
+    _separator
+    _menu_pair "1" "刷新 WARP 网络" "重连 WARP" "green" "2" "刷 Netflix IP" "更换解锁 IP" "green"
+    _separator
+
+    local mode_choice mode ip_choice="" region="" time_hhmm hour minute max_minutes="120"
+    read -rp "  选择 [1-2]: " mode_choice
+    case "$mode_choice" in
+        1) mode="network" ;;
+        2)
+            mode="netflix"
+            _warp_prompt_netflix_ip_version
+            _warp_prompt_netflix_region
+            ip_choice="$_WARP_NETFLIX_IP_CHOICE"
+            region="$_WARP_NETFLIX_REGION"
+            read -rp "  单次最多运行分钟数 [默认 120，0 表示不限制]: " max_minutes
+            max_minutes="${max_minutes:-120}"
+            if ! _is_digit "$max_minutes"; then
+                _warn "运行时长格式无效，使用默认 120 分钟。"
+                max_minutes="120"
+            fi
+            ;;
+        *)
+            _error_no_exit "无效选项: ${mode_choice}"
+            _press_any_key
+            return
+            ;;
+    esac
+
+    echo ""
+    _info "输入北京时间，格式 HH:MM，例如 03:30。"
+    read -rp "  每天执行时间 [HH:MM]: " time_hhmm
+    if ! _warp_valid_hhmm "$time_hhmm"; then
+        _error_no_exit "时间格式无效，请使用 HH:MM，例如 03:30。"
+        _press_any_key
+        return
+    fi
+
+    hour="${time_hhmm%%:*}"
+    minute="${time_hhmm##*:}"
+    hour=$((10#$hour))
+    minute=$((10#$minute))
+
+    _warp_write_refresh_script "$mode" "$ip_choice" "$region" "$max_minutes"
+    cat > "$_WARP_REFRESH_CRON" <<EOF
+# Managed by VPSGo. Runs by Beijing time.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+${minute} ${hour} * * * root ${_WARP_REFRESH_SCRIPT}
+EOF
+    chmod 0644 "$_WARP_REFRESH_CRON"
+
+    _restart_first_available_service cron crond >/dev/null 2>&1 || true
+
+    echo ""
+    _success "WARP 定时刷新已配置"
+    _status_kv "时间" "每天北京时间 ${time_hhmm}" "green" 12
+    _status_kv "模式" "$([ "$mode" = network ] && printf '刷新 WARP 网络' || printf '刷 Netflix IP')" "green" 12
+    [ "$mode" = netflix ] && _status_kv "Netflix" "IPv$([ "$ip_choice" = 1 ] && printf 4 || printf 6) ${region:-当前地区}" "green" 12
+    _status_kv "日志" "$_WARP_REFRESH_LOG" "cyan" 12
+    _press_any_key
+}
+
+_warp_show_refresh_cron() {
+    _header "WARP 定时刷新状态"
+
+    if [ -f "$_WARP_REFRESH_CRON" ]; then
+        printf "  ${BOLD}Cron 配置${PLAIN}\n"
+        _separator
+        sed 's/^/    /' "$_WARP_REFRESH_CRON"
+    else
+        _warn "未检测到 WARP 定时刷新配置。"
+    fi
+
+    if [ -f "$_WARP_REFRESH_SCRIPT" ]; then
+        echo ""
+        _status_kv "执行脚本" "$_WARP_REFRESH_SCRIPT" "cyan" 12
+    fi
+    if [ -f "$_WARP_REFRESH_LOG" ]; then
+        echo ""
+        printf "  ${BOLD}最近日志${PLAIN}\n"
+        _separator
+        tail -n 30 "$_WARP_REFRESH_LOG" | sed 's/^/    /'
+    fi
+    _press_any_key
+}
+
+_warp_remove_refresh_cron() {
+    _header "删除 WARP 定时刷新"
+
+    if [ ! -f "$_WARP_REFRESH_CRON" ] && [ ! -f "$_WARP_REFRESH_SCRIPT" ]; then
+        _info "未检测到 WARP 定时刷新配置。"
+        _press_any_key
+        return
+    fi
+
+    local confirm
+    read -rp "  确认删除 WARP 定时刷新? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    rm -f "$_WARP_REFRESH_CRON" "$_WARP_REFRESH_SCRIPT"
+    _restart_first_available_service cron crond >/dev/null 2>&1 || true
+    _success "已删除 WARP 定时刷新配置。"
+    _press_any_key
+}
+
+_warp_manage() {
+    while true; do
+        _header "WARP 管理"
+        _menu_pair "1" "打开 warp-sh" "安装/管理 WARP" "green" "2" "刷新 WARP 网络" "重连 WARP" "green"
+        _menu_pair "3" "刷 Netflix IP" "IPv4/IPv6" "green" "4" "定时刷新" "北京时间" "green"
+        _menu_pair "5" "查看定时任务" "配置/日志" "cyan" "6" "删除定时任务" "" "yellow"
+        _separator
+        _menu_item "0" "返回上级菜单" "" "red"
+        _separator
+        local ch
+        read -rp "  选择 [0-6]: " ch
+        case "$ch" in
+            1) _warp_run_upstream_script ;;
+            2) _warp_refresh_now ;;
+            3) _warp_refresh_netflix_now ;;
+            4) _warp_configure_refresh_cron ;;
+            5) _warp_show_refresh_cron ;;
+            6) _warp_remove_refresh_cron ;;
+            0) return ;;
+            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+        esac
+    done
 }
 
 # --- 4. TCP 调优 ---
@@ -1640,7 +2027,7 @@ _tcptune_choose_ceiling() {
     _menu_item "4" "64 MiB" "经验档位: 高 RTT / 跨区推荐" "green"
     _menu_item "5" "128 MiB" "经验档位: 高带宽或高并发" "green"
     _separator
-    read -rp "  选择 [1-5，默认 4]: " choice
+    read -rp "  选择 [1-5]（默认 4）: " choice
     choice="${choice:-4}"
 
     case "$choice" in
@@ -2656,8 +3043,8 @@ _tcptune_run_v2() {
     _header "TCP 调优 (Azure/Proxy 基线)"
     _tcptune_show_current
     echo ""
-    _warn "将重写 TCP 调优配置并立即应用。"
-    read -rp "  是否继续进行 TCP 调优? [Y/n]: " confirm
+    _warn "将写入 TCP 调优配置并立即应用。"
+    read -rp "  继续? [Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         _info "已取消。"
         _press_any_key
@@ -2665,7 +3052,7 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "Step 1/8: 采集系统信息"
+    _info "步骤 1/8: 采集系统信息"
     iface="$(_tcptune_guess_iface)"
     if [ -z "$iface" ]; then
         read -rp "  无法自动识别出口网卡，请手动输入 (如 eth0): " iface
@@ -2712,20 +3099,20 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "Step 2/8: 计算 TCP 缓冲区 ceiling"
+    _info "步骤 2/8: 计算 TCP 缓冲区"
     _tcptune_choose_ceiling "$link_speed"
 
     echo ""
     if [ "$_TCPTUNE_LAST_QDISC_MODE" = "cake" ]; then
-        _info "Step 3/8: 设置 CAKE 带宽上限"
+        _info "步骤 3/8: 设置 CAKE 带宽"
         _tcptune_choose_cake_bandwidth "$link_speed"
     else
-        _info "Step 3/8: FQ 模式无需设置额外带宽上限"
+        _info "步骤 3/8: FQ 无需设置带宽"
         _TCPTUNE_LAST_CAKE_BW_MBIT=0
     fi
 
     echo ""
-    _info "Step 4/8: 检查 BBR 支持"
+    _info "步骤 4/8: 检查 BBR"
     if ! _tcptune_ensure_bbr_available; then
         _error_no_exit "当前内核未检测到 BBR。请先执行“开启 BBR”模块。"
         _press_any_key
@@ -2733,11 +3120,11 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "Step 5/8: 备份当前配置"
+    _info "步骤 5/8: 备份配置"
     _tcptune_backup_runtime "$iface"
 
     echo ""
-    _info "Step 6/8: 生成并应用优化配置"
+    _info "步骤 6/8: 写入配置"
     while IFS= read -r key; do
         [ -n "$key" ] && managed_keys+=("$key")
     done < <(_tcptune_build_managed_keys)
@@ -2749,7 +3136,7 @@ _tcptune_run_v2() {
     _tcptune_apply_sysctl_all
 
     echo ""
-    _info "Step 7/8: 验证并应用 Qdisc"
+    _info "步骤 7/8: 应用 Qdisc"
     if [ "$_TCPTUNE_LAST_QDISC_MODE" = "cake" ]; then
         _tcptune_verify_cake_qdisc "$iface" "$_TCPTUNE_LAST_CAKE_BW_MBIT" || true
         _tcptune_enable_cake_persist "$iface" "$_TCPTUNE_LAST_CAKE_BW_MBIT" || true
@@ -2759,7 +3146,7 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "Step 8/8: 最终验证"
+    _info "步骤 8/8: 验证结果"
     _tcptune_final_verify "$iface" "$_TCPTUNE_LAST_CEILING_BYTES" "$_TCPTUNE_LAST_QDISC_MODE" "$_TCPTUNE_LAST_CAKE_BW_MBIT"
     _tcptune_print_verify_hint "$iface" "$_TCPTUNE_LAST_CEILING_BYTES" "$_TCPTUNE_LAST_QDISC_MODE" "$_TCPTUNE_LAST_CAKE_BW_MBIT"
     _network_reboot_prompt
@@ -2774,7 +3161,7 @@ _tcptune_setup() {
         _info "原则: BBR + fq + autotune ceiling (RTT×带宽)，其余参数尽量少碰。"
 
         _separator
-        _menu_pair "1" "应用 TCP 调优" "一键应用并验证" "green" "2" "查看验证命令" "iperf3/ss/tc/nstat" "cyan"
+        _menu_pair "1" "应用 TCP 调优" "写入并验证参数" "green" "2" "查看验证命令" "iperf3/ss/tc/nstat" "cyan"
         _menu_pair "3" "查看备份列表" "恢复前可先确认内容" "cyan" "4" "从备份恢复" "回滚被修改项" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
@@ -2856,7 +3243,7 @@ _dockerlog_setup() {
         _info "当前无 daemon.json 配置文件，将创建新配置。"
     fi
 
-    printf "  ${BOLD}请选择操作${PLAIN}\n"
+    printf "  ${BOLD}选择操作${PLAIN}\n"
     _separator
     _menu_pair "1" "应用日志轮转配置" "自动备份原配置" "green" "0" "返回主菜单" "" "red"
     _separator
@@ -3081,7 +3468,7 @@ _mihomo_setup() {
     _info "检测到架构: ${ARCH}"
 
     local confirm_install
-    read -rp "  是否安装或更新 mihomo? [Y/n]: " confirm_install
+    read -rp "  安装或更新 mihomo? [Y/n]: " confirm_install
     if [[ "$confirm_install" =~ ^([Nn]|[Nn][Oo])$ ]]; then
         _info "已取消"
         _press_any_key
@@ -4657,7 +5044,7 @@ _mihomoconf_setup() {
     fi
     _info "配置: ${CONFIG_FILE}"
     _info "状态: ${CONFIG_STATUS}"
-    _info "支持: AnyTLS / VLESS Vision Reality / SS2022 / HY2"
+    _info "协议: AnyTLS / VLESS Vision Reality / SS2022 / HY2"
     SAVED_HOST=$(_mihomoconf_get_saved_host "$CONFIG_FILE")
     [[ -n "$SAVED_HOST" ]] && _info "已保存 Host: ${SAVED_HOST}"
     IPV4_GOOGLE_PREF=$(_mihomoconf_ipv4_google_pref_get "$CONFIG_FILE")
@@ -4669,13 +5056,13 @@ _mihomoconf_setup() {
 
     # ---- 判断写入模式 ----
     if [[ -f "$CONFIG_FILE" ]]; then
-        printf "  ${BOLD}请选择操作 (已有配置)${PLAIN}\n"
+        printf "  ${BOLD}选择配置方式${PLAIN}\n"
         _separator
         _menu_pair "1" "追加新节点到现有配置" "" "green" "2" "覆盖并重新生成配置" "" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
         local file_action
-        read -rp "  请选择 [0-2]: " file_action
+        read -rp "  选择 [0-2]: " file_action
         case "$file_action" in
             1) WRITE_MODE="append" ;;
             2) WRITE_MODE="new" ;;
@@ -4685,7 +5072,7 @@ _mihomoconf_setup() {
     fi
 
     # ---- 选择协议 ----
-    printf "  ${BOLD}请选择要添加的协议 (可重复输入，空格分隔，可添加不同落地链式代理)${PLAIN}\n"
+    printf "  ${BOLD}选择协议，可重复输入${PLAIN}\n"
     printf "  ${DIM}提示: 每输入一次数字就会创建一个对应协议入站，例如 1 1 3 = 2个SS2022 + 1个HY2${PLAIN}\n"
     _separator
     _menu_pair "1" "SS2022" "" "green" "2" "AnyTLS" "" "green"
@@ -4722,7 +5109,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 SS2022 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local ss_action
-            read -rp "  请选择 [1/2，默认 2]: " ss_action
+        read -rp "  选择 [1/2]（默认 2）: " ss_action
             [[ "${ss_action:-2}" == "1" ]] && SS_REPLACE="y"
         fi
         if [[ "$ENABLE_ANYTLS" == "y" ]] && _mihomoconf_has_listener_type "anytls"; then
@@ -4732,7 +5119,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 AnyTLS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local anytls_action
-            read -rp "  请选择 [1/2，默认 2]: " anytls_action
+        read -rp "  选择 [1/2]（默认 2）: " anytls_action
             [[ "${anytls_action:-2}" == "1" ]] && ANYTLS_REPLACE="y"
         fi
         if [[ "$ENABLE_VLESS" == "y" ]] && _mihomoconf_has_listener_type "vless"; then
@@ -4742,7 +5129,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VLESS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vless_action
-            read -rp "  请选择 [1/2，默认 2]: " vless_action
+        read -rp "  选择 [1/2]（默认 2）: " vless_action
             [[ "${vless_action:-2}" == "1" ]] && VLESS_REPLACE="y"
         fi
         if [[ "$ENABLE_HY2" == "y" ]] && _mihomoconf_has_listener_type "hysteria2"; then
@@ -4752,7 +5139,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 HY2 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local hy2_action
-            read -rp "  请选择 [1/2，默认 2]: " hy2_action
+        read -rp "  选择 [1/2]（默认 2）: " hy2_action
             [[ "${hy2_action:-2}" == "1" ]] && HY2_REPLACE="y"
         fi
     fi
@@ -4805,11 +5192,11 @@ _mihomoconf_setup() {
             done
         done
 
-        echo "    请选择加密方式:"
+        echo "    选择加密方式:"
         printf "      ${GREEN}1${PLAIN}) 2022-blake3-aes-128-gcm ${DIM}(推荐)${PLAIN}\n"
         printf "      ${GREEN}2${PLAIN}) 2022-blake3-aes-256-gcm\n"
         local cipher_choice
-        read -rp "    选择 [1/2，默认 1]: " cipher_choice
+        read -rp "    选择 [1/2]（默认 1）: " cipher_choice
         case "${cipher_choice:-1}" in
             1) SS_CIPHER="2022-blake3-aes-128-gcm" ;;
             2) SS_CIPHER="2022-blake3-aes-256-gcm" ;;
@@ -5272,13 +5659,13 @@ MIHOMOCONF_HEADER
     # SS2022 输出
     if [[ "$ENABLE_SS" == "y" ]]; then
         local ss_export_udp_answer ss_export_uot_answer _ss_udp_bool _ss_uot_bool
-        read -rp "  SS 导出: 是否开启 UDP? [Y/n]: " ss_export_udp_answer
+        read -rp "  SS 导出: 开启 UDP? [Y/n]: " ss_export_udp_answer
         if [[ "$ss_export_udp_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             SS_EXPORT_UDP="0"
             SS_EXPORT_UOT="0"
             _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
         else
-            read -rp "  SS 导出: 是否开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
+            read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
             if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
                 SS_EXPORT_UOT="1"
             else
@@ -5862,7 +6249,7 @@ _mihomoconf_post_setup_service_prompt() {
     fi
 
     if _mihomo_service_is_active; then
-        read -rp "  检测到 mihomo 已启动，是否立即重启应用新配置? [Y/n]: " answer
+        read -rp "  检测到 mihomo 已启动，立即重启应用新配置? [Y/n]: " answer
         if [[ "$answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已跳过重启"
             return 0
@@ -5872,7 +6259,7 @@ _mihomoconf_post_setup_service_prompt() {
     fi
 
     if _mihomo_service_is_configured; then
-        read -rp "  检测到 mihomo 服务已配置，是否立即启动? [Y/n]: " answer
+        read -rp "  检测到 mihomo 服务已配置，立即启动? [Y/n]: " answer
         if [[ "$answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已跳过启动"
             return 0
@@ -5882,9 +6269,9 @@ _mihomoconf_post_setup_service_prompt() {
     fi
 
     if [[ "$tls_required" == "1" ]]; then
-        read -rp "  检测到 SSL 证书，是否配置自启并启动 mihomo? [Y/n]: " answer
+        read -rp "  检测到 SSL 证书，配置自启并启动 mihomo? [Y/n]: " answer
     else
-        read -rp "  是否配置自启并启动 mihomo? [Y/n]: " answer
+        read -rp "  配置自启并启动 mihomo? [Y/n]: " answer
     fi
     if [[ "$answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
         _info "已跳过自启动配置"
@@ -5912,7 +6299,7 @@ _mihomo_enable() {
     if [[ -n "$service_file" && -f "$service_file" ]]; then
         _warn "${service_name} 服务文件已存在"
         local overwrite
-        read -rp "  是否覆盖? [y/N]: " overwrite
+        read -rp "  覆盖? [y/N]: " overwrite
         if [[ ! "$overwrite" =~ ^[Yy] ]]; then
             _press_any_key
             return
@@ -5937,7 +6324,7 @@ _mihomo_uninstall() {
 
     bin_path=$(command -v mihomo 2>/dev/null || true)
 
-    _warn "将停止并卸载 Mihomo，可选删除配置目录。"
+    _warn "将停止并卸载 Mihomo，可删除配置目录。"
     printf "    systemd 服务文件: %s\n" "$systemd_service_file"
     printf "    OpenRC 服务文件 : %s\n" "$openrc_service_file"
     if [[ -n "$bin_path" ]]; then
@@ -6002,7 +6389,7 @@ _mihomo_uninstall() {
     done
 
     if [[ -d "$config_dir" ]]; then
-        read -rp "  是否同时删除配置目录 ${config_dir}? [y/N]: " remove_config
+        read -rp "  同时删除配置目录 ${config_dir}? [y/N]: " remove_config
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$config_dir"
             removed_count=$((removed_count + 1))
@@ -6038,7 +6425,7 @@ _mihomo_log() {
         echo ""
         _separator
         local follow
-        read -rp "  是否实时跟踪日志? [y/N]: " follow
+        read -rp "  实时跟踪日志? [y/N]: " follow
         if [[ "$follow" =~ ^[Yy] ]]; then
             echo ""
             _info "按 Ctrl+C 退出实时日志..."
@@ -6129,13 +6516,13 @@ _mihomo_read_config() {
                 fi
                 if [[ "$SS_EXPORT_ASKED" != "1" ]]; then
                     local ss_export_udp_answer ss_export_uot_answer
-                    read -rp "  SS 导出: 是否开启 UDP? [Y/n]: " ss_export_udp_answer < /dev/tty
+                    read -rp "  SS 导出: 开启 UDP? [Y/n]: " ss_export_udp_answer < /dev/tty
                     if [[ "$ss_export_udp_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
                         SS_EXPORT_UDP="0"
                         SS_EXPORT_UOT="0"
                         _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
                     else
-                        read -rp "  SS 导出: 是否开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer < /dev/tty
+                        read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer < /dev/tty
                         if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
                             SS_EXPORT_UOT="1"
                         else
@@ -7742,7 +8129,7 @@ _mihomo_chain_proxy_manage() {
                 local out_wg_ip out_wg_ipv6 out_wg_private_key out_wg_public_key out_wg_allowed_ips
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
                 local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding
-                read -rp "  请选择 [1/2]: " import_mode
+                read -rp "  选择 [1/2]: " import_mode
                 import_mode=$(_mihomoconf_trim "${import_mode:-}")
                 case "$import_mode" in
                     1|2) ;;
@@ -8065,7 +8452,7 @@ _mihomo_chain_proxy_manage() {
                         if [[ -z "$out_name" ]]; then
                             out_name=$(_mihomochain_default_outbound_name "$out_type" "$out_server" "$out_port")
                         fi
-                        read -rp "  是否自定义出口节点名称? [y/N]: " rename_confirm
+                        read -rp "  自定义出口节点名称? [y/N]: " rename_confirm
                         if [[ "$rename_confirm" =~ ^[Yy] ]]; then
                             read -rp "  出口节点名称 [默认 ${out_name}]: " custom_name_input
                             out_name=$(_mihomoconf_trim "${custom_name_input:-$out_name}")
@@ -8763,7 +9150,7 @@ _mihomo_chain_proxy_manage() {
                 add_action="新增"
                 if _mihomoconf_listener_has_user "$config_file" "$add_listener_tag" "$add_username"; then
                     add_action="更新"
-                    read -rp "  用户已存在，将更新密码，是否继续? [Y/n]: " add_overwrite
+                    read -rp "  用户已存在，将更新密码，继续? [Y/n]: " add_overwrite
                     add_overwrite=$(_mihomoconf_trim "${add_overwrite:-Y}")
                     if [[ "$add_overwrite" =~ ^[Nn]$ ]]; then
                         _info "已取消"
@@ -8894,8 +9281,8 @@ _mihomo_manage() {
         _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
         _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "" "green"
-        _menu_pair "7" "服务端链式代理" "" "green" "8" "Gemini/Google IPv4 定向" "可选" "green"
-        _menu_pair "9" "卸载 Mihomo" "可选删除配置" "yellow" "0" "返回主菜单" "" "red"
+        _menu_pair "7" "服务端链式代理" "入站绑定出站" "green" "8" "Gemini/Google IPv4" "定向规则" "green"
+        _menu_pair "9" "卸载 Mihomo" "停止并清理" "yellow" "0" "返回主菜单" "" "red"
         _separator
 
         local choice
@@ -9035,7 +9422,7 @@ _iperf3_setup() {
         return
     fi
 
-    printf "  ${BOLD}请选择操作${PLAIN}\n"
+    printf "  ${BOLD}选择操作${PLAIN}\n"
     _separator
     _menu_pair "1" "启动 iperf3 服务端" "" "green" "0" "返回主菜单" "" "red"
     _separator
@@ -9198,7 +9585,7 @@ _speedtest_cleanup_deb_conflicts() {
 
     if command -v dpkg >/dev/null 2>&1 && dpkg -s speedtest-cli >/dev/null 2>&1; then
         _warn "检测到非官方 speedtest-cli 包，可能与 Ookla 官方 speedtest 冲突"
-        if _speedtest_prompt_yes_default "是否移除 speedtest-cli"; then
+        if _speedtest_prompt_yes_default "移除 speedtest-cli"; then
             _speedtest_run_timeout 60 env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=a \
                 apt-get remove -y speedtest-cli || return 1
         else
@@ -9239,7 +9626,7 @@ _speedtest_cleanup_rpm_conflicts() {
 
     if command -v rpm >/dev/null 2>&1 && rpm -q speedtest-cli >/dev/null 2>&1; then
         _warn "检测到非官方 speedtest-cli 包，可能与 Ookla 官方 speedtest 冲突"
-        if _speedtest_prompt_yes_default "是否移除 speedtest-cli"; then
+        if _speedtest_prompt_yes_default "移除 speedtest-cli"; then
             _speedtest_run_timeout 60 "$pkg_cmd" remove -y speedtest-cli || rpm -e speedtest-cli || return 1
         else
             _warn "已保留 speedtest-cli，后续安装可能失败"
@@ -9407,7 +9794,7 @@ _speedtest_install_macos() {
     _info "使用 Homebrew 安装 Ookla Speedtest..."
     if _speedtest_brew_exec "$brew_bin" list speedtest-cli >/dev/null 2>&1; then
         _warn "检测到可能冲突的 speedtest-cli"
-        if _speedtest_prompt_yes_default "是否卸载 speedtest-cli"; then
+        if _speedtest_prompt_yes_default "卸载 speedtest-cli"; then
             _speedtest_brew_exec "$brew_bin" uninstall speedtest-cli --force || return 1
         fi
     fi
@@ -9525,9 +9912,9 @@ _speedtest_setup() {
     fi
 
     echo ""
-    printf "  ${BOLD}请选择操作${PLAIN}\n"
+    printf "  ${BOLD}选择操作${PLAIN}\n"
     _separator
-    _menu_pair "1" "安装/更新 Ookla Speedtest" "官方 CLI" "green" "0" "返回主菜单" "" "red"
+    _menu_pair "1" "安装/更新 Speedtest" "测速 CLI" "green" "0" "返回主菜单" "" "red"
     _separator
 
     local choice
@@ -9616,12 +10003,12 @@ Signed-By: /etc/apt/keyrings/sagernet.asc
 SINGBOX_APT
 
     apt-get update -qq
-    printf "  ${BOLD}请选择版本${PLAIN}\n"
+    printf "  ${BOLD}选择版本${PLAIN}\n"
     _separator
     _menu_pair "1" "sing-box" "稳定版" "green" "2" "sing-box-beta" "测试版" "yellow"
     _separator
     local ver_choice
-    read -rp "  请选择 [1/2，默认 1]: " ver_choice
+    read -rp "  选择 [1/2]（默认 1）: " ver_choice
     case "${ver_choice:-1}" in
         1) apt-get install -y sing-box ;;
         2) apt-get install -y sing-box-beta ;;
@@ -9653,7 +10040,7 @@ _singbox_setup() {
         _info "当前未安装 sing-box"
     fi
 
-    printf "  ${BOLD}请选择操作${PLAIN}\n"
+    printf "  ${BOLD}选择操作${PLAIN}\n"
     _separator
     _menu_pair "1" "安装/更新 sing-box" "" "green" "0" "返回主菜单" "" "red"
     _separator
@@ -9719,7 +10106,7 @@ _singbox_enable() {
     if [[ -n "$service_file" && -f "$service_file" ]]; then
         _warn "${service_name} 服务文件已存在"
         local overwrite
-        read -rp "  是否覆盖? [y/N]: " overwrite
+        read -rp "  覆盖? [y/N]: " overwrite
         if [[ ! "$overwrite" =~ ^[Yy] ]]; then
             _press_any_key
             return
@@ -9938,7 +10325,7 @@ _singbox_log() {
         echo ""
         _separator
         local follow
-        read -rp "  是否实时跟踪日志? [y/N]: " follow
+        read -rp "  实时跟踪日志? [y/N]: " follow
         if [[ "$follow" =~ ^[Yy] ]]; then
             echo ""
             _info "按 Ctrl+C 退出实时日志..."
@@ -9969,7 +10356,7 @@ _singbox_uninstall() {
 
     bin_path=$(command -v sing-box 2>/dev/null || true)
 
-    _warn "将停止并卸载 Sing-Box，可选删除配置目录。"
+    _warn "将停止并卸载 Sing-Box，可删除配置目录。"
     printf "    systemd 服务文件: %s\n" "$systemd_service_file"
     printf "    OpenRC 服务文件 : %s\n" "$openrc_service_file"
     if [[ -n "$bin_path" ]]; then
@@ -10053,7 +10440,7 @@ _singbox_uninstall() {
     fi
 
     if [[ -f "$apt_source" || -f "$apt_key" ]]; then
-        read -rp "  是否同时删除 Sing-Box APT 源配置? [y/N]: " remove_repo
+        read -rp "  同时删除 Sing-Box APT 源配置? [y/N]: " remove_repo
         if [[ "$remove_repo" =~ ^[Yy] ]]; then
             rm -f "$apt_source" "$apt_key"
             removed_count=$((removed_count + 1))
@@ -10067,7 +10454,7 @@ _singbox_uninstall() {
     fi
 
     if [[ -d "$config_dir" ]]; then
-        read -rp "  是否同时删除配置目录 ${config_dir}? [y/N]: " remove_config
+        read -rp "  同时删除配置目录 ${config_dir}? [y/N]: " remove_config
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$config_dir"
             removed_count=$((removed_count + 1))
@@ -10108,7 +10495,7 @@ _singbox_manage() {
         _separator
         _menu_pair "1" "安装/更新 Sing-Box" "" "green" "2" "配置自启并启动" "" "green"
         _menu_pair "3" "重启 Sing-Box" "" "green" "4" "查看状态" "" "green"
-        _menu_pair "5" "查看日志" "" "green" "6" "卸载 Sing-Box" "可选删除配置" "yellow"
+        _menu_pair "5" "查看日志" "" "green" "6" "卸载 Sing-Box" "停止并清理" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
 
@@ -10636,7 +11023,7 @@ _snell_configure() {
     local GEO_LOOKUP_IP=""
 
     if [[ ! -x "$_SNELL_BIN" ]]; then
-        read -rp "  未检测到 snell-server，是否先安装最新版? [Y/n]: " install_confirm
+        read -rp "  未检测到 snell-server，先安装? [Y/n]: " install_confirm
         if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已取消"
             _press_any_key
@@ -10683,7 +11070,7 @@ _snell_configure() {
         return
     fi
 
-    read -rp "  是否启用 IPv6 转发? [y/N]: " ipv6_input
+    read -rp "  启用 IPv6 转发? [y/N]: " ipv6_input
     if [[ "$ipv6_input" =~ ^[Yy] ]]; then
         ipv6_flag="true"
         listen_addr="::0"
@@ -10908,7 +11295,7 @@ _snell_log() {
         echo ""
         _separator
         local follow
-        read -rp "  是否实时跟踪日志? [y/N]: " follow
+        read -rp "  实时跟踪日志? [y/N]: " follow
         if [[ "$follow" =~ ^[Yy] ]]; then
             journalctl -u "$_SNELL_SERVICE_NAME" -f
         fi
@@ -10925,7 +11312,7 @@ _snell_uninstall() {
 
     local confirm remove_config removed_count=0
 
-    _warn "将停止并卸载 Snell，可选删除配置目录。"
+    _warn "将停止并卸载 Snell，可删除配置目录。"
     printf "    systemd 服务文件: %s\n" "$_SNELL_SYSTEMD_SERVICE_FILE"
     printf "    OpenRC 服务文件 : %s\n" "$_SNELL_OPENRC_SERVICE_FILE"
     printf "    可执行文件: %s\n" "$_SNELL_BIN"
@@ -10971,7 +11358,7 @@ _snell_uninstall() {
     fi
 
     if [[ -d "$_SNELL_CONFIG_DIR" ]]; then
-        read -rp "  是否同时删除配置目录 ${_SNELL_CONFIG_DIR}? [y/N]: " remove_config
+        read -rp "  同时删除配置目录 ${_SNELL_CONFIG_DIR}? [y/N]: " remove_config
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$_SNELL_CONFIG_DIR"
             removed_count=$((removed_count + 1))
@@ -11011,10 +11398,10 @@ _snell_manage() {
         fi
 
         _separator
-        _menu_pair "1" "安装/更新 Snell V5" "官方 snell-server" "green" "2" "配置并启动 Snell" "含端口冲突检查" "green"
+        _menu_pair "1" "安装/更新 Snell V5" "安装服务端" "green" "2" "配置并启动 Snell" "检查端口" "green"
         _menu_pair "3" "重启 Snell" "" "green" "4" "查看状态" "" "green"
         _menu_pair "5" "导出 Surge V5 配置" "直接输出配置行" "green" "6" "查看日志" "" "green"
-        _menu_item "7" "卸载 Snell" "可选删除配置" "yellow"
+        _menu_item "7" "卸载 Snell" "停止并清理" "yellow"
         _menu_item "0" "返回上级菜单" "" "red"
         _separator
 
@@ -11811,7 +12198,7 @@ _ssrust_configure() {
 
     local install_confirm
     if ! command -v ssserver >/dev/null 2>&1 && [[ ! -x "$_SSRUST_BIN" ]]; then
-        read -rp "  未检测到 ssserver，是否先安装最新版? [Y/n]: " install_confirm
+        read -rp "  未检测到 ssserver，先安装? [Y/n]: " install_confirm
         if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已取消"
             _press_any_key
@@ -11998,7 +12385,7 @@ _ssrust_enable() {
     if [[ -n "$service_file" && -f "$service_file" ]]; then
         _warn "${service_name} 服务文件已存在"
         local overwrite
-        read -rp "  是否覆盖? [y/N]: " overwrite
+        read -rp "  覆盖? [y/N]: " overwrite
         if [[ ! "$overwrite" =~ ^[Yy] ]]; then
             _press_any_key
             return
@@ -12181,7 +12568,7 @@ _ssrust_log() {
         echo ""
         _separator
         local follow
-        read -rp "  是否实时跟踪日志? [y/N]: " follow
+        read -rp "  实时跟踪日志? [y/N]: " follow
         if [[ "$follow" =~ ^[Yy] ]]; then
             journalctl -u "$_SSRUST_SERVICE_NAME" -f
         fi
@@ -12202,7 +12589,7 @@ _ssrust_uninstall() {
 
     bin_path=$(command -v ssserver 2>/dev/null || true)
 
-    _warn "将停止并卸载 Shadowsocks-Rust，可选删除配置目录与日志。"
+    _warn "将停止并卸载 Shadowsocks-Rust，可删除配置目录与日志。"
     printf "    systemd 服务文件: %s\n" "$_SSRUST_SYSTEMD_SERVICE_FILE"
     printf "    OpenRC 服务文件 : %s\n" "$_SSRUST_OPENRC_SERVICE_FILE"
     if [[ -n "$bin_path" ]]; then
@@ -12256,7 +12643,7 @@ _ssrust_uninstall() {
     done
 
     if [[ -d "$_SSRUST_CONFIG_DIR" ]]; then
-        read -rp "  是否同时删除配置目录 ${_SSRUST_CONFIG_DIR}? [y/N]: " remove_config
+        read -rp "  同时删除配置目录 ${_SSRUST_CONFIG_DIR}? [y/N]: " remove_config
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$_SSRUST_CONFIG_DIR"
             removed_count=$((removed_count + 1))
@@ -12267,7 +12654,7 @@ _ssrust_uninstall() {
     fi
 
     if [[ -f "$_SSRUST_LOG_FILE" || -f "$_SSRUST_ERR_FILE" ]]; then
-        read -rp "  是否同时删除日志文件? [y/N]: " remove_logs
+        read -rp "  同时删除日志文件? [y/N]: " remove_logs
         if [[ "$remove_logs" =~ ^[Yy] ]]; then
             rm -f "$_SSRUST_LOG_FILE" "$_SSRUST_ERR_FILE"
             removed_count=$((removed_count + 1))
@@ -12318,10 +12705,10 @@ _ssrust_manage() {
         fi
 
         _separator
-        _menu_pair "1" "安装/更新 Shadowsocks-Rust" "官方 releases" "green" "2" "配置并启动 Shadowsocks-Rust" "含端口冲突检查" "green"
+        _menu_pair "1" "安装/更新 Shadowsocks-Rust" "安装服务端" "green" "2" "配置并启动 Shadowsocks-Rust" "检查端口" "green"
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Shadowsocks-Rust" "" "green"
         _menu_pair "5" "导出节点配置文件" "输出 SS/Mihomo/Sing-Box 文件" "green" "6" "查看日志" "" "green"
-        _menu_pair "7" "卸载 Shadowsocks-Rust" "可选删除配置/日志" "yellow" "0" "返回上级菜单" "" "red"
+        _menu_pair "7" "卸载 Shadowsocks-Rust" "停止并清理" "yellow" "0" "返回上级菜单" "" "red"
         _separator
 
         local ch
@@ -13286,7 +13673,7 @@ _wireguard_add_client() {
     chmod 700 "$_WIREGUARD_CLIENT_DIR"
     client_conf="${_WIREGUARD_CLIENT_DIR}/${iface}-${client_name}.conf"
     if [[ -f "$client_conf" ]]; then
-        read -rp "  客户端配置已存在，是否覆盖 ${client_conf}? [y/N]: " overwrite
+        read -rp "  客户端配置已存在，覆盖 ${client_conf}? [y/N]: " overwrite
         if [[ ! "$overwrite" =~ ^[Yy] ]]; then
             _info "已取消"
             _press_any_key
@@ -13514,10 +13901,10 @@ _wireguard_uninstall() {
     iface=$(_wireguard_detect_iface)
     service_name=$(_wireguard_service_name "$iface")
 
-    _warn "将停止 WireGuard 节点服务，可选删除配置文件"
+    _warn "将停止 WireGuard 节点服务，可删除配置文件。"
     printf "    服务: %s\n" "$service_name"
     printf "    配置: %s\n" "${_WIREGUARD_DIR}/${iface}.conf"
-    read -rp "  确认继续? [y/N]: " confirm
+    read -rp "  继续? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -13544,7 +13931,7 @@ _wireguard_uninstall() {
     fi
     sysctl --system >/dev/null 2>&1 || true
 
-    read -rp "  是否删除 WireGuard 配置目录 ${_WIREGUARD_DIR}? [y/N]: " remove_config
+    read -rp "  删除 WireGuard 配置目录 ${_WIREGUARD_DIR}? [y/N]: " remove_config
     if [[ "$remove_config" =~ ^[Yy] ]]; then
         rm -rf "$_WIREGUARD_DIR"
         _success "已删除配置目录: ${_WIREGUARD_DIR}"
@@ -13580,7 +13967,7 @@ _wireguard_manage() {
         _menu_pair "1" "安装/更新 WireGuard" "原生内核方案" "green" "2" "部署/重建节点" "含 Mihomo 端口冲突检查" "green"
         _menu_pair "3" "重启 WireGuard" "" "green" "4" "查看状态" "" "green"
         _menu_pair "5" "查看客户端配置" "可显示二维码" "green" "6" "新增客户端" "不重建服务端" "green"
-        _menu_pair "7" "卸载 WireGuard 节点" "可选删除配置" "yellow" "0" "返回上级菜单" "" "red"
+        _menu_pair "7" "卸载 WireGuard 节点" "停止并清理" "yellow" "0" "返回上级菜单" "" "red"
         _separator
 
         local ch
@@ -14002,7 +14389,7 @@ _acme_manage() {
         fi
 
         _separator
-        _menu_pair "1" "安装/自动更新 acme.sh" "Github 安装脚本" "green" "2" "申请证书 (80/DNS)" "签发并安装到目录" "green"
+        _menu_pair "1" "安装 acme.sh" "安装/更新工具" "green" "2" "申请证书" "80/DNS 验证" "green"
         _menu_pair "3" "手动更新 acme.sh" "" "green" "4" "自动更新设置" "开启/关闭" "green"
         _menu_item "5" "手动更新证书" "立即续期并覆盖安装" "green"
         _menu_item "0" "返回主菜单" "" "red"
@@ -14177,7 +14564,7 @@ _akdns_setup() {
     echo ""
     
     local confirm
-    read -rp "  是否已在 https://dns.akile.ai 添加本机 IP? [y/N]: " confirm
+    read -rp "  已在 https://dns.akile.ai 添加本机 IP? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "请先前往网站添加 IP，然后再返回继续操作。"
         _press_any_key
@@ -14939,7 +15326,7 @@ _dns_benchmark_mainstream() {
     fi
 
     while true; do
-        printf "  ${BOLD}请选择测速分组${PLAIN}\n"
+        printf "  ${BOLD}选择测速分组${PLAIN}\n"
         _separator
         _menu_pair "1" "国内 DNS 组" "测试域名: qq.com" "green" "2" "国外 DNS 组" "测试域名: google.com" "green"
         _menu_pair "3" "ECS DNS 组" "常见支持 ECS 的 DNS" "green" "4" "IPv6 DNS 组" "适合 IPv6-only VPS" "green"
@@ -14981,7 +15368,7 @@ _dns_change_flow() {
     local dns_input clear_existing dns_default
 
     echo ""
-    read -rp "  是否清除现有 DNS，仅保留你输入的新 DNS? [Y/n]: " clear_existing
+    read -rp "  清除现有 DNS，仅保留你输入的新 DNS? [Y/n]: " clear_existing
     echo ""
     dns_default="$(_dns_recommended_servers)"
     if _dns_is_ipv6_only_host; then
@@ -15021,7 +15408,7 @@ _dns_manage() {
         _header "Linux DNS 管理"
         _dns_show_current_config
 
-        printf "  ${BOLD}请选择操作${PLAIN}\n"
+        printf "  ${BOLD}选择操作${PLAIN}\n"
         _separator
         _menu_pair "1" "临时修改 DNS" "重启后可能失效" "green" "2" "永久修改 DNS" "持久化并重启组件" "green"
         _menu_pair "3" "仅验证当前 DNS" "A/AAAA 解析测试" "green" "4" "主流 DNS 测速" "国内/国外/ECS/IPv6" "green"
@@ -15129,7 +15516,7 @@ _swap_setup() {
                     _info "已删除 /swapfile 并移除 fstab 条目"
                     echo ""
                     local reboot_confirm
-                    read -rp "  是否立即重启系统? [y/N]: " reboot_confirm
+                    read -rp "  立即重启系统? [y/N]: " reboot_confirm
                     if [[ "$reboot_confirm" =~ ^[Yy] ]]; then
                         _info "系统将在 3 秒后重启..."
                         sleep 3
@@ -15173,7 +15560,7 @@ _swap_setup() {
     echo ""
     _warn "将在 /swapfile 创建 ${swap_size_mib} MiB 的 Swap"
     local confirm
-    read -rp "  确认? [y/N]: " confirm
+    read -rp "  继续? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -15230,7 +15617,7 @@ _swap_setup() {
 
     echo ""
     local reboot_confirm
-    read -rp "  是否立即重启系统? [y/N]: " reboot_confirm
+    read -rp "  立即重启系统? [y/N]: " reboot_confirm
     if [[ "$reboot_confirm" =~ ^[Yy] ]]; then
         _info "系统将在 3 秒后重启..."
         sleep 3
@@ -15367,10 +15754,10 @@ EOF
 
 _rootssh_enable() {
     _header "启用 Root SSH 登录"
-    _warn "将执行: 设置 root 密码、允许 root SSH、复制现有公钥"
+    _warn "将设置 root 密码，允许 root SSH 登录。"
 
     local confirm
-    read -rp "  确认继续? [Y/n]: " confirm
+    read -rp "  继续? [Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         _info "已取消"
         _press_any_key
@@ -15429,10 +15816,10 @@ _rootssh_enable() {
 
 _ssh_force_key_login() {
     _header "强制 SSH 密钥登录"
-    _warn "将执行: 禁用 SSH 密码登录，仅允许证书/密钥登录"
+    _warn "将禁用 SSH 密码登录，仅允许密钥登录。"
 
     local confirm
-    read -rp "  确认继续? [Y/n]: " confirm
+    read -rp "  继续? [Y/n]: " confirm
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         _info "已取消"
         _press_any_key
@@ -15480,6 +15867,137 @@ _ssh_force_key_login() {
     echo ""
     _success "SSH 已强制为密钥登录"
     _warn "密码登录已禁用，请先在新终端验证密钥登录成功后，再关闭当前会话"
+    _press_any_key
+}
+
+# --- 1Panel iptables 代理链 ---
+
+_onepanel_iptables_chain_exists() {
+    local chain="$1"
+    iptables -w 5 -t nat -n -L "$chain" >/dev/null 2>&1
+}
+
+_onepanel_iptables_jump_exists() {
+    local chain="$1" target="$2"
+    iptables -w 5 -t nat -C "$chain" -j "$target" >/dev/null 2>&1
+}
+
+_onepanel_iptables_ref_text() {
+    local chain="$1" first_line
+    first_line=$(iptables -w 5 -t nat -n -L "$chain" 2>/dev/null | sed -n '1p')
+    if [ -z "$first_line" ]; then
+        printf '%s' "未检测到"
+        return
+    fi
+    printf '%s' "$first_line" | awk -F'[()]' '{print $2}'
+}
+
+_onepanel_save_iptables_if_possible() {
+    if ! command -v iptables-save >/dev/null 2>&1; then
+        _warn "未检测到 iptables-save，已跳过持久化保存。"
+        return 1
+    fi
+
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        if netfilter-persistent save >/dev/null 2>&1; then
+            _success "已通过 netfilter-persistent 保存规则。"
+            return 0
+        fi
+        _warn "netfilter-persistent save 执行失败，尝试写入 /etc/iptables/rules.v4。"
+    fi
+
+    if [ -d /etc/iptables ]; then
+        if iptables-save > /etc/iptables/rules.v4; then
+            chmod 0644 /etc/iptables/rules.v4 2>/dev/null || true
+            _success "已保存到 /etc/iptables/rules.v4。"
+            return 0
+        fi
+        _warn "写入 /etc/iptables/rules.v4 失败。"
+        return 1
+    fi
+
+    _warn "未检测到 /etc/iptables 目录，当前规则已运行时生效但重启后可能丢失。"
+    _info "Debian/Ubuntu 可执行: apt install iptables-persistent -y && netfilter-persistent save"
+    return 1
+}
+
+_onepanel_apply_iptables_chains() {
+    _header "1Panel iptables 代理链"
+
+    _info "把 1Panel NAT 子链接入系统 NAT 主链。"
+    _info "会检查并补齐以下跳转规则:"
+    printf "    iptables -t nat -I PREROUTING 1 -j 1PANEL_PREROUTING\n"
+    printf "    iptables -t nat -I POSTROUTING 1 -j 1PANEL_POSTROUTING\n"
+    echo ""
+
+    if ! command -v iptables >/dev/null 2>&1; then
+        _error_no_exit "未检测到 iptables，无法应用 1Panel 代理链。"
+        _press_any_key
+        return
+    fi
+
+    local missing=0
+    if ! _onepanel_iptables_chain_exists "1PANEL_PREROUTING"; then
+        _error_no_exit "未检测到 nat/1PANEL_PREROUTING，请先在 1Panel 创建端口转发规则。"
+        missing=1
+    fi
+    if ! _onepanel_iptables_chain_exists "1PANEL_POSTROUTING"; then
+        _error_no_exit "未检测到 nat/1PANEL_POSTROUTING，请先在 1Panel 创建端口转发规则。"
+        missing=1
+    fi
+    if [ "$missing" -eq 1 ]; then
+        _press_any_key
+        return
+    fi
+
+    printf "  ${BOLD}应用前状态${PLAIN}\n"
+    _separator
+    _status_kv "PREROUTING" "$(_onepanel_iptables_ref_text 1PANEL_PREROUTING)" "cyan" 14
+    _status_kv "POSTROUTING" "$(_onepanel_iptables_ref_text 1PANEL_POSTROUTING)" "cyan" 14
+
+    echo ""
+    if _onepanel_iptables_jump_exists "PREROUTING" "1PANEL_PREROUTING"; then
+        _info "PREROUTING 已挂载 1PANEL_PREROUTING，跳过重复插入。"
+    else
+        if iptables -w 5 -t nat -I PREROUTING 1 -j 1PANEL_PREROUTING; then
+            _success "已挂载: PREROUTING -> 1PANEL_PREROUTING"
+        else
+            _error_no_exit "挂载 PREROUTING -> 1PANEL_PREROUTING 失败。"
+            _press_any_key
+            return
+        fi
+    fi
+
+    if _onepanel_iptables_jump_exists "POSTROUTING" "1PANEL_POSTROUTING"; then
+        _info "POSTROUTING 已挂载 1PANEL_POSTROUTING，跳过重复插入。"
+    else
+        if iptables -w 5 -t nat -I POSTROUTING 1 -j 1PANEL_POSTROUTING; then
+            _success "已挂载: POSTROUTING -> 1PANEL_POSTROUTING"
+        else
+            _error_no_exit "挂载 POSTROUTING -> 1PANEL_POSTROUTING 失败。"
+            _press_any_key
+            return
+        fi
+    fi
+
+    echo ""
+    printf "  ${BOLD}应用后状态${PLAIN}\n"
+    _separator
+    _status_kv "PREROUTING" "$(_onepanel_iptables_ref_text 1PANEL_PREROUTING)" "green" 14
+    _status_kv "POSTROUTING" "$(_onepanel_iptables_ref_text 1PANEL_POSTROUTING)" "green" 14
+
+    echo ""
+    local save_choice
+    read -rp "  保存规则以便重启后生效? [Y/n]: " save_choice
+    if [[ "$save_choice" =~ ^[Nn]$ ]]; then
+        _warn "已跳过保存；重启服务器或重启防火墙后规则可能丢失。"
+    else
+        _onepanel_save_iptables_if_possible || true
+    fi
+
+    echo ""
+    _success "1Panel iptables 代理链已应用"
+    _info "检查命令: iptables -t nat -L -n -v"
     _press_any_key
 }
 
@@ -15664,15 +16182,15 @@ BANNER
 
 _show_main_menu() {
     _show_sys_info
-    printf "  ${BOLD}[ 分类菜单 ]${PLAIN}\n"
+    printf "  ${BOLD}分类菜单${PLAIN}\n"
     _separator
-    _menu_item "1" "网络优化" "BBR/网卡调度/双栈选择/调优" "green"
-    _menu_item "2" "脚本工具" "iPerf3/Speedtest/DNS" "green"
-    _menu_item "3" "系统优化" "日志轮转/Swap" "green"
-    _menu_item "4" "代理工具助手" "Mihomo/Sing-Box/SSR/WireGuard" "green"
+    _menu_item "1" "网络优化" "内核/路由/WARP" "green"
+    _menu_item "2" "脚本工具" "测速/DNS" "green"
+    _menu_item "3" "系统优化" "日志/Swap/SSH/NAT" "green"
+    _menu_item "4" "代理工具" "服务端/证书" "green"
     _separator
     _menu_item "g" "GitHub 代理" "$(_github_proxy_status_desc)" "cyan"
-    _menu_item "u" "更新 VPSGo" "从 Github 更新" "cyan"
+    _menu_item "u" "更新 VPSGo" "拉取最新版" "cyan"
     _menu_item "x" "卸载 VPSGo" "" "red"
     _menu_item "0" "退出脚本" "" "red"
     _separator
@@ -15681,18 +16199,20 @@ _show_main_menu() {
 _network_opt_menu() {
     while true; do
         _header "网络优化"
-        _menu_pair "1" "开启 BBR" "启用/诊断 BBR" "green" "2" "队列调度算法" "fq/cake/fq_pie" "green"
-        _menu_pair "3" "IPv4/IPv6 优先级" "出口协议栈偏好" "green" "4" "TCP 缓冲区调优" "网络栈参数优化" "green"
+        _menu_pair "1" "BBR" "启用拥塞控制" "green" "2" "队列调度" "切换 qdisc" "green"
+        _menu_pair "3" "IPv4/IPv6 优先" "切换出口偏好" "green" "4" "TCP 缓冲区" "调整内核参数" "green"
+        _menu_item "5" "WARP 管理" "安装/刷新/定时" "green"
         _separator
         _menu_item "0" "返回主菜单" "" "red"
         _separator
         local ch
-        read -rp "  选择 [0-4]: " ch
+        read -rp "  选择 [0-5]: " ch
         case "$ch" in
             1) _bbr_install ;;
             2) _qdisc_setup ;;
             3) _v4v6_setup ;;
             4) _tcptune_setup ;;
+            5) _warp_manage ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
@@ -15702,9 +16222,9 @@ _network_opt_menu() {
 _script_tools_menu() {
     while true; do
         _header "脚本工具"
-        _menu_pair "1" "iPerf3 测速服务端" "临时启动" "green" "2" "NodeQuality 测试" "VPS 综合测试" "green"
-        _menu_pair "3" "Ookla Speedtest" "官方 CLI 安装" "green" "4" "Akile DNS 解锁检测" "媒体解锁测速" "green"
-        _menu_item "5" "Linux DNS 管理" "临时/永久 DNS" "green"
+        _menu_pair "1" "iPerf3 服务端" "启动测速服务" "green" "2" "NodeQuality" "线路质量测试" "green"
+        _menu_pair "3" "Speedtest" "安装测速 CLI" "green" "4" "Akile DNS" "检测 DNS 解锁" "green"
+        _menu_item "5" "DNS 管理" "修改/验证 DNS" "green"
         _separator
         _menu_item "0" "返回主菜单" "" "red"
         _separator
@@ -15725,18 +16245,20 @@ _script_tools_menu() {
 _system_opt_menu() {
     while true; do
         _header "系统优化"
-        _menu_pair "1" "日志轮转" "限制容器日志" "green" "2" "Swap 管理" "修改虚拟内存" "green"
-        _menu_pair "3" "启用 root SSH 登录" "设密/放行/复制密钥" "green" "4" "强制 SSH 密钥登录" "禁用密码登录" "green"
+        _menu_pair "1" "日志轮转" "限制 Docker 日志" "green" "2" "Swap 管理" "创建/删除 Swap" "green"
+        _menu_pair "3" "Root SSH" "允许 root 登录" "green" "4" "SSH 密钥登录" "禁用密码登录" "green"
+        _menu_item "5" "1Panel NAT 链" "挂载转发链" "green"
         _separator
         _menu_item "0" "返回主菜单" "" "red"
         _separator
         local ch
-        read -rp "  选择 [0-4]: " ch
+        read -rp "  选择 [0-5]: " ch
         case "$ch" in
             1) _dockerlog_setup ;;
             2) _swap_setup ;;
             3) _rootssh_enable ;;
             4) _ssh_force_key_login ;;
+            5) _onepanel_apply_iptables_chains ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
@@ -15745,10 +16267,10 @@ _system_opt_menu() {
 
 _proxy_tools_menu() {
     while true; do
-        _header "代理工具助手"
-        _menu_pair "1" "Mihomo 管理" "安装/配置/重启/卸载" "green" "2" "Sing-Box 管理" "安装/自启/重启/卸载" "green"
-        _menu_pair "3" "Snell V5 管理" "官方安装/配置/冲突检查" "green" "4" "WireGuard 原生节点" "部署/重启/状态/卸载" "green"
-        _menu_pair "5" "Shadowsocks-Rust 管理" "LXC/容器友好" "green" "6" "ACME 证书管理" "acme.sh/80端口/DNS签发" "green"
+        _header "代理工具"
+        _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
+        _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
+        _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "ACME 证书" "申请/续期证书" "green"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
         local ch
