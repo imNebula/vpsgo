@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.43"
+VERSION="2.44"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -4165,6 +4165,27 @@ _mihomoconf_gen_hy2_link() {
     echo "hysteria2://${password}@${server}:${port}${query}#${encoded_name}"
 }
 
+_mihomoconf_gen_tuic_link() {
+    local server="$1" port="$2" uuid="$3" password="$4" name="$5"
+    local peer="${6:-}" congestion_control="${7:-bbr}" alpn="${8:-h3}" udp_relay_mode="${9:-native}"
+    local encoded_name query=""
+    local -a params=()
+
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    [[ -n "$peer" ]] && params+=("peer=$(_mihomoconf_urlencode "$peer")")
+    [[ -n "$congestion_control" ]] && params+=("congestion_control=$(_mihomoconf_urlencode "$congestion_control")")
+    [[ -n "$alpn" ]] && params+=("alpn=$(_mihomoconf_urlencode "$alpn")")
+    if [[ -n "$udp_relay_mode" ]]; then
+        params+=("udp_relay_mode=$(_mihomoconf_urlencode "$udp_relay_mode")")
+    fi
+
+    if (( ${#params[@]} > 0 )); then
+        local IFS='&'
+        query="?${params[*]}"
+    fi
+    echo "tuic://${uuid}:${password}@${server}:${port}${query}#${encoded_name}"
+}
+
 _mihomoconf_gen_vless_link() {
     local server="$1" port="$2" uuid="$3" name="$4" servername="$5" public_key="$6" short_id="$7"
     local flow="${8:-xtls-rprx-vision}" client_fingerprint="${9:-chrome}"
@@ -4494,6 +4515,7 @@ _mihomoconf_read_listener_rows() {
             name=tag=type=port=cipher=password=user_id=user_pass=sni=""
             hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=""
             vless_public_key=vless_short_id=vless_flow=vless_client_fingerprint=""
+            tuic_congestion_control=tuic_alpn=tuic_udp_relay_mode=""
             in_users=0
             item_indent=-1
             users_indent=-1
@@ -4502,10 +4524,11 @@ _mihomoconf_read_listener_rows() {
         function emit() {
             if (name == "") return
             flush_vless_user()
-            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
+            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
                 type, name, port, cipher, password, user_id, user_pass, sni, hy2_up, hy2_down, \
                 hy2_ignore, hy2_obfs, hy2_obfs_password, hy2_masquerade, hy2_mport, hy2_insecure, tag, \
-                vless_public_key, vless_short_id, vless_flow, vless_client_fingerprint
+                vless_public_key, vless_short_id, vless_flow, vless_client_fingerprint, \
+                tuic_congestion_control, tuic_alpn, tuic_udp_relay_mode
         }
         BEGIN {
             in_listeners=0
@@ -4528,6 +4551,8 @@ _mihomoconf_read_listener_rows() {
             name=unquote(trim(line))
             tag=type=port=cipher=password=user_id=user_pass=sni=""
             hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=""
+            vless_public_key=vless_short_id=vless_flow=vless_client_fingerprint=""
+            tuic_congestion_control=tuic_alpn=tuic_udp_relay_mode=""
             in_users=0
             users_indent=-1
             next
@@ -4637,6 +4662,24 @@ _mihomoconf_read_listener_rows() {
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-client-fingerprint:[[:space:]]*/, "", line)
             vless_client_fingerprint=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-tuic-congestion-control:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-tuic-congestion-control:[[:space:]]*/, "", line)
+            tuic_congestion_control=trim(line)
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-tuic-alpn:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-tuic-alpn:[[:space:]]*/, "", line)
+            tuic_alpn=trim(line)
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-tuic-udp-relay-mode:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-tuic-udp-relay-mode:[[:space:]]*/, "", line)
+            tuic_udp_relay_mode=trim(line)
             next
         }
         /^[[:space:]]+type:/ {
@@ -4988,6 +5031,32 @@ _mihomoconf_unique_listener_tag_by_user() {
     printf '%s' "$found_tag"
 }
 
+_mihomoconf_read_tuic_usernames_by_tag() {
+    local config_file="$1" listener_tag="$2"
+    awk -v target="$listener_tag" '
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        function unquote(s) { gsub(/^"/, "", s); gsub(/"$/, "", s); return s }
+        BEGIN { in_target=0 }
+        /^  - name:/ {
+            in_target=0
+            line=$0; sub(/^  - name:[[:space:]]*/, "", line)
+            if (unquote(trim(line)) == target) in_target=1
+            next
+        }
+        /^    tag:/ {
+            line=$0; sub(/^    tag:[[:space:]]*/, "", line)
+            if (unquote(trim(line)) == target) in_target=1
+            next
+        }
+        !in_target { next }
+        /^[^ ]/ { in_target=0; next }
+        /# vpsgo-tuic-username:/ {
+            line=$0; sub(/^[[:space:]]+#[[:space:]]*vpsgo-tuic-username:[[:space:]]*/, "", line)
+            printf "%s\n", trim(line)
+        }
+    ' "$config_file"
+}
+
 _mihomoconf_user_password_by_tag() {
     local config_file="$1" listener_tag="$2" username="$3"
     local u p
@@ -5194,7 +5263,7 @@ _mihomoconf_add_or_update_listener_user() {
             if (resolved_tag == "") resolved_tag=item_name
             if (resolved_tag == target || item_name == target) {
                 matched=1
-                if (item_type != "anytls" && item_type != "hysteria2" && item_type != "hy2" && item_type != "shadowsocks") {
+                if (item_type != "anytls" && item_type != "hysteria2" && item_type != "hy2" && item_type != "shadowsocks" && item_type != "tuic") {
                     unsupported=1
                     print_item()
                 } else {
@@ -5508,9 +5577,9 @@ _mihomoconf_setup() {
     local CONFIG_STATUS
 
     local WRITE_MODE="new"
-    local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n"
-    local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0
-    local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n"
+    local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n" ENABLE_TUIC="n"
+    local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0 TUIC_COUNT=0
+    local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n" TUIC_REPLACE="n"
 
     local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
     local SS_CIPHER=""
@@ -5524,6 +5593,8 @@ _mihomoconf_setup() {
     local HY2_UP="" HY2_DOWN=""
     local HY2_IGNORE_CLIENT_BANDWIDTH="false" HY2_SNI="" HY2_INSECURE="0"
     local HY2_OBFS="" HY2_MASQUERADE=""
+    local -a TUIC_PORTS=() TUIC_TAGS=() TUIC_USER_ROWS=()
+    local TUIC_SNI="" TUIC_CONGESTION_CONTROL="bbr" TUIC_ALPN="h3" TUIC_UDP_RELAY_MODE="native" TUIC_INSECURE="0"
     local IPV4_GOOGLE_PREF="off"
     local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
     local SERVER_IP="" SERVER_HOST="" SAVED_HOST="" HOST_DEFAULT="" host_input=""
@@ -5535,7 +5606,7 @@ _mihomoconf_setup() {
     fi
     _info "配置: ${CONFIG_FILE}"
     _info "状态: ${CONFIG_STATUS}"
-    _info "协议: AnyTLS / VLESS Vision Reality / SS2022 / HY2"
+    _info "协议: AnyTLS / VLESS Vision Reality / SS2022 / HY2 / Tuic"
     SAVED_HOST=$(_mihomoconf_get_saved_host "$CONFIG_FILE")
     [[ -n "$SAVED_HOST" ]] && _info "已保存 Host: ${SAVED_HOST}"
     IPV4_GOOGLE_PREF=$(_mihomoconf_ipv4_google_pref_get "$CONFIG_FILE")
@@ -5568,6 +5639,7 @@ _mihomoconf_setup() {
     _separator
     _menu_pair "1" "SS2022" "" "green" "2" "AnyTLS" "" "green"
     _menu_pair "3" "VLESS Vision Reality" "" "green" "4" "HY2" "" "green"
+    _menu_item "5" "Tuic" "" "green"
     _separator
     local PROTOCOL_CHOICES
     read -rp "  选择 (如 \"1 1 2\" 表示 2 个 SS + 1 个 AnyTLS): " -a PROTOCOL_CHOICES
@@ -5578,10 +5650,11 @@ _mihomoconf_setup() {
             2) ENABLE_ANYTLS="y"; ANYTLS_COUNT=$((ANYTLS_COUNT + 1)) ;;
             3) ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
             4) ENABLE_HY2="y"; HY2_COUNT=$((HY2_COUNT + 1)) ;;
+            5) ENABLE_TUIC="y"; TUIC_COUNT=$((TUIC_COUNT + 1)) ;;
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 ]]; then
+    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
@@ -5590,6 +5663,7 @@ _mihomoconf_setup() {
     _status_kv "AnyTLS 数量" "${ANYTLS_COUNT}" "cyan" 10
     _status_kv "VLESS 数量" "${VLESS_COUNT}" "cyan" 10
     _status_kv "HY2 数量" "${HY2_COUNT}" "cyan" 10
+    _status_kv "Tuic 数量" "${TUIC_COUNT}" "cyan" 10
 
     # ---- 追加模式: 检查已有同协议节点 ----
     if [[ "$WRITE_MODE" == "append" ]]; then
@@ -5633,6 +5707,16 @@ _mihomoconf_setup() {
         read -rp "  选择 [1/2]（默认 2）: " hy2_action
             [[ "${hy2_action:-2}" == "1" ]] && HY2_REPLACE="y"
         fi
+        if [[ "$ENABLE_TUIC" == "y" ]] && _mihomoconf_has_listener_type "tuic"; then
+            _warn "配置中已存在 Tuic 节点:"
+            _mihomoconf_list_listeners "tuic"
+            _separator
+            _menu_pair "1" "覆盖已有 Tuic 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local tuic_action
+        read -rp "  选择 [1/2]（默认 2）: " tuic_action
+            [[ "${tuic_action:-2}" == "1" ]] && TUIC_REPLACE="y"
+        fi
     fi
 
     # ---- 端口冲突基线: 追加模式下保留现有端口（被替换协议除外）----
@@ -5649,6 +5733,7 @@ _mihomoconf_setup() {
                 anytls) [[ "$ANYTLS_REPLACE" == "y" ]] && continue ;;
                 vless) [[ "$VLESS_REPLACE" == "y" ]] && continue ;;
                 hysteria2) [[ "$HY2_REPLACE" == "y" ]] && continue ;;
+                tuic) [[ "$TUIC_REPLACE" == "y" ]] && continue ;;
             esac
             _mihomoconf_port_in_list "$_e_port" "${RESERVED_PORTS[@]}" || RESERVED_PORTS+=("$_e_port")
         done < <(_mihomoconf_read_listener_rows "$CONFIG_FILE")
@@ -5906,13 +5991,88 @@ _mihomoconf_setup() {
         _info "HY2 已生成 ${#HY2_PORTS[@]} 个入站，共 ${_hy2_user_total} 个 user"
     fi
 
-    # ---- TLS 证书检查 (AnyTLS / HY2 共用) ----
-    if [[ "$ENABLE_ANYTLS" == "y" || "$ENABLE_HY2" == "y" ]]; then
+    # ---- Tuic 配置 ----
+    if [[ "$ENABLE_TUIC" == "y" ]]; then
+        printf "  ${BOLD}Tuic 配置${PLAIN}\n"
+        _separator
+        local _tuic_idx tuic_port_input
+        for ((_tuic_idx=1; _tuic_idx<=TUIC_COUNT; _tuic_idx++)); do
+            while true; do
+                read -rp "    Tuic #${_tuic_idx} 监听端口 [默认 8443]: " tuic_port_input
+                tuic_port_input=$(_mihomoconf_trim "${tuic_port_input:-8443}")
+                if _is_valid_port "$tuic_port_input"; then
+                    if _mihomoconf_port_in_list "$tuic_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${tuic_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$tuic_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${tuic_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    TUIC_PORTS+=("$tuic_port_input")
+                    NEW_PORTS+=("$tuic_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        if [[ -n "${ANYTLS_SNI:-}" ]]; then
+            read -rp "    Tuic SNI 域名 [默认复用 AnyTLS: ${ANYTLS_SNI}]: " TUIC_SNI
+            TUIC_SNI=$(_mihomoconf_trim "${TUIC_SNI:-$ANYTLS_SNI}")
+        else
+            read -rp "    Tuic SNI 域名 (留空则用 IP): " TUIC_SNI
+            TUIC_SNI=$(_mihomoconf_trim "${TUIC_SNI:-}")
+        fi
+
+        # congestion control
+        printf "    选择拥塞控制:\n"
+        printf "      ${GREEN}1${PLAIN}) bbr ${DIM}(推荐)${PLAIN}\n"
+        printf "      ${GREEN}2${PLAIN}) cubic\n"
+        printf "      ${GREEN}3${PLAIN}) new_reno\n"
+        local cc_choice
+        read -rp "    选择 [1/2/3]（默认 1）: " cc_choice
+        case "${cc_choice:-1}" in
+            1) TUIC_CONGESTION_CONTROL="bbr" ;;
+            2) TUIC_CONGESTION_CONTROL="cubic" ;;
+            3) TUIC_CONGESTION_CONTROL="new_reno" ;;
+            *) _error_no_exit "无效选项"; _press_any_key; return ;;
+        esac
+
+        # ALPN
+        printf "    选择 ALPN:\n"
+        printf "      ${GREEN}1${PLAIN}) h3 ${DIM}(推荐)${PLAIN}\n"
+        printf "      ${GREEN}2${PLAIN}) h3,http/1.1\n"
+        local alpn_choice
+        read -rp "    选择 [1/2]（默认 1）: " alpn_choice
+        case "${alpn_choice:-1}" in
+            1) TUIC_ALPN="h3" ;;
+            2) TUIC_ALPN="h3,http/1.1" ;;
+            *) _error_no_exit "无效选项"; _press_any_key; return ;;
+        esac
+
+        local i _user_rows _u_name _u_pass _tuic_user_total=0
+        local _tuic_uuid
+        for i in "${!TUIC_PORTS[@]}"; do
+            TUIC_TAGS+=("$(_mihomoconf_gen_listener_tag "tuic_relay")")
+            _user_rows=$(_mihomoconf_collect_users_input "Tuic #$((i + 1))" "1")
+            while IFS=$'\t' read -r _u_name _u_pass; do
+                [[ -z "${_u_name:-}" || -z "${_u_pass:-}" ]] && continue
+                _tuic_uuid=$(_mihomoconf_gen_uuid)
+                TUIC_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_tuic_uuid}"$'\x1f'"${_u_pass}")
+                _tuic_user_total=$((_tuic_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "Tuic 已生成 ${#TUIC_PORTS[@]} 个入站，共 ${_tuic_user_total} 个 user"
+    fi
+
+    # ---- TLS 证书检查 (AnyTLS / HY2 / Tuic 共用) ----
+    if [[ "$ENABLE_ANYTLS" == "y" || "$ENABLE_HY2" == "y" || "$ENABLE_TUIC" == "y" ]]; then
         mkdir -p "$SSL_DIR"
         if [[ -f "${SSL_DIR}/cert.crt" && -f "${SSL_DIR}/cert.key" ]]; then
             _info "已检测到 TLS 证书: ${SSL_DIR}/"
         else
-            _warn "AnyTLS/HY2 需要 TLS 证书才能正常运行!"
+            _warn "AnyTLS/HY2/Tuic 需要 TLS 证书才能正常运行!"
             _warn "请将证书文件放到以下路径:"
             printf "    证书: ${YELLOW}${SSL_DIR}/cert.crt${PLAIN}\n"
             printf "    私钥: ${YELLOW}${SSL_DIR}/cert.key${PLAIN}\n"
@@ -5961,6 +6121,7 @@ _mihomoconf_setup() {
         local _anytls_port _anytls_tag
         local _vless_port _vless_tag _vless_private_key _vless_public_key _vless_short_id
         local _hy2_port _hy2_tag _hy2_mport _hy2_obfs_password
+        local _tuic_port _tuic_tag _tuic_uuid
         local _row _li _u_name _u_pass _u_uuid
         if [[ "$ENABLE_SS" == "y" ]]; then
             for i in "${!SS_PORTS[@]}"; do
@@ -6093,6 +6254,42 @@ MIHOMOCONF_HY2_OBFS_EOF
 MIHOMOCONF_HY2_TLS_EOF
             done
         fi
+        if [[ "$ENABLE_TUIC" == "y" ]]; then
+            for i in "${!TUIC_PORTS[@]}"; do
+                _tuic_port="${TUIC_PORTS[$i]}"
+                _tuic_tag="${TUIC_TAGS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_TUIC_EOF
+  - name: tuic-in-${_tuic_port}
+    tag: "${_tuic_tag}"
+    type: tuic
+    port: ${_tuic_port}
+    listen: "::"
+    # vpsgo-peer: ${TUIC_SNI}
+    # vpsgo-tuic-congestion-control: ${TUIC_CONGESTION_CONTROL}
+    # vpsgo-tuic-alpn: ${TUIC_ALPN}
+    # vpsgo-tuic-udp-relay-mode: ${TUIC_UDP_RELAY_MODE}
+    users:
+MIHOMOCONF_TUIC_EOF
+                for _row in "${TUIC_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _tuic_uuid _u_pass <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    printf "      # vpsgo-tuic-username: %s\n" "$_u_name" >> "$_target_file"
+                    printf "      \"%s\": \"%s\"\n" "$_tuic_uuid" "$_u_pass" >> "$_target_file"
+                done
+                printf '    congestion-controller: %s\n' "$TUIC_CONGESTION_CONTROL" >> "$_target_file"
+                echo "    alpn:" >> "$_target_file"
+                local _tuic_alpn_item
+                IFS=',' read -r -a _tuic_alpn_arr <<< "$TUIC_ALPN"
+                for _tuic_alpn_item in "${_tuic_alpn_arr[@]}"; do
+                    _tuic_alpn_item=$(_mihomoconf_trim "$_tuic_alpn_item")
+                    [[ -n "$_tuic_alpn_item" ]] && printf '      - %s\n' "$_tuic_alpn_item" >> "$_target_file"
+                done
+                cat >> "$_target_file" <<MIHOMOCONF_TUIC_TLS_EOF
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_TUIC_TLS_EOF
+            done
+        fi
     }
 
     if [[ "$WRITE_MODE" == "new" ]]; then
@@ -6117,6 +6314,7 @@ MIHOMOCONF_HEADER
         [[ "$ANYTLS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "anytls" && _info "已移除旧的 AnyTLS 节点"
         [[ "$VLESS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless" && _info "已移除旧的 VLESS 节点"
         [[ "$HY2_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "hysteria2" && _info "已移除旧的 HY2 节点"
+        [[ "$TUIC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "tuic" && _info "已移除旧的 Tuic 节点"
         if grep -q '^listeners:' "$CONFIG_FILE" 2>/dev/null; then
             # 将新 listener 内容插入到 listeners: 块末尾（下一个顶级键之前）
             local _tmplistener
@@ -6374,6 +6572,58 @@ MIHOMOCONF_HY2_JSON
             done
             if [[ "$_user_idx" -eq 0 ]]; then
                 _warn "  HY2 入站 ${_hy2_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # Tuic 输出
+    if [[ "$ENABLE_TUIC" == "y" ]]; then
+        printf "  ${BOLD}Tuic 连接信息 (%s 个)${PLAIN}\n" "${#TUIC_PORTS[@]}"
+        local i TUIC_LINK _tuic_port _tuic_tag _tuic_name _tuic_client_name
+        local _row _li _u_name _tuic_uuid _u_pass _user_idx
+        for i in "${!TUIC_PORTS[@]}"; do
+            _tuic_port="${TUIC_PORTS[$i]}"
+            _tuic_tag="${TUIC_TAGS[$i]}"
+            _tuic_name=$(_mihomoconf_make_node_name "Tuic" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_tuic_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_tuic_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_tuic_port"
+            [[ -n "$TUIC_SNI" ]] && printf "      SNI    : ${GREEN}%s${PLAIN}\n" "$TUIC_SNI"
+            printf "      拥塞控制: ${GREEN}%s${PLAIN}\n" "$TUIC_CONGESTION_CONTROL"
+            printf "      ALPN   : ${GREEN}%s${PLAIN}\n" "$TUIC_ALPN"
+            printf "      UDP模式: ${GREEN}%s${PLAIN}\n" "$TUIC_UDP_RELAY_MODE"
+            _user_idx=0
+            for _row in "${TUIC_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _tuic_uuid _u_pass <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _user_idx=$((_user_idx + 1))
+                _tuic_client_name="${_tuic_name}-${_u_name}"
+                TUIC_LINK=$(_mihomoconf_gen_tuic_link "$SERVER_HOST" "$_tuic_port" "$_tuic_uuid" "$_u_pass" "$_tuic_client_name" "$TUIC_SNI" "$TUIC_CONGESTION_CONTROL" "$TUIC_ALPN" "$TUIC_UDP_RELAY_MODE")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_user_idx" "$_u_name"
+                printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_tuic_uuid"
+                printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
+                printf "  ${BOLD}Tuic 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$TUIC_LINK"
+                printf "  ${BOLD}Tuic JSON:${PLAIN}\n"
+                cat <<MIHOMOCONF_TUIC_JSON
+    {
+      "type": "tuic",
+      "tag": "${_tuic_client_name}",
+      "server": "${SERVER_HOST}",
+      "server_port": ${_tuic_port},
+      "uuid": "${_tuic_uuid}",
+      "password": "${_u_pass}",
+      "sni": "${TUIC_SNI}",
+      "congestion_control": "${TUIC_CONGESTION_CONTROL}",
+      "alpn": "${TUIC_ALPN}",
+      "udp_relay_mode": "${TUIC_UDP_RELAY_MODE}"
+    }
+MIHOMOCONF_TUIC_JSON
+            done
+            if [[ "$_user_idx" -eq 0 ]]; then
+                _warn "  Tuic 入站 ${_tuic_tag} 未配置 user，已跳过导出"
             fi
         done
     fi
@@ -6725,18 +6975,18 @@ _mihomoconf_post_setup_service_prompt() {
     _separator
     _info "提示: 配置已生成，可立即应用到 mihomo 服务"
 
-    if [[ -f "$config_file" ]] && grep -Eq '^[[:space:]]*type:[[:space:]]*(anytls|hysteria2)[[:space:]]*$' "$config_file"; then
+    if [[ -f "$config_file" ]] && grep -Eq '^[[:space:]]*type:[[:space:]]*(anytls|hysteria2|tuic)[[:space:]]*$' "$config_file"; then
         tls_required="1"
     fi
 
     if [[ "$tls_required" == "1" ]]; then
         if [[ ! -f "$cert_file" || ! -f "$key_file" ]]; then
-            _warn "检测到 AnyTLS/HY2 配置但 SSL 证书不完整，跳过自动启动提示"
+            _warn "检测到 AnyTLS/HY2/Tuic 配置但 SSL 证书不完整，跳过自动启动提示"
             return 0
         fi
         _info "检测到 SSL 证书: ${ssl_dir}"
     else
-        _info "当前配置未启用 AnyTLS/HY2，跳过 SSL 证书检查"
+        _info "当前配置未启用 AnyTLS/HY2/Tuic，跳过 SSL 证书检查"
     fi
 
     if _mihomo_service_is_active; then
@@ -6951,6 +7201,7 @@ _mihomo_read_config() {
     local type name port cipher password user_id user_pass sni listener_tag
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure
     local vless_public_key vless_short_id vless_flow vless_client_fingerprint
+    local tuic_congestion_control tuic_alpn tuic_udp_relay_mode
     local p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport
     local p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive
     local p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding
@@ -6973,7 +7224,7 @@ _mihomo_read_config() {
     fi
 
     _info "配置文件: ${config_file}"
-    _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2) 与 proxies(WireGuard Beta)"
+    _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2 / Tuic) 与 proxies(WireGuard Beta)"
     saved_host=$(_mihomoconf_get_saved_host "$config_file")
     if [[ -n "$saved_host" ]]; then
         server_ip="$saved_host"
@@ -6995,7 +7246,8 @@ _mihomo_read_config() {
 
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
         hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
-        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint \
+        tuic_congestion_control tuic_alpn tuic_udp_relay_mode; do
         [[ -z "${name:-}" ]] && continue
         total_count=$((total_count + 1))
         listener_total=$((listener_total + 1))
@@ -7188,6 +7440,59 @@ MIHOMO_VLESS_YAML
 MIHOMO_HY2_JSON
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$hy2_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            tuic)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: 节点字段不完整"
+                    continue
+                fi
+                local tuic_found=0 tuic_link tuic_name tuic_user_uuid tuic_user_pass tuic_display_name
+                local tuic_cc="${tuic_congestion_control:-bbr}"
+                local tuic_alpn_val="${tuic_alpn:-h3}"
+                local tuic_urm="${tuic_udp_relay_mode:-native}"
+                local -a tuic_usernames
+                local _tn
+                while IFS= read -r _tn; do
+                    [[ -n "${_tn:-}" ]] && tuic_usernames+=("$_tn")
+                done < <(_mihomoconf_read_tuic_usernames_by_tag "$config_file" "$listener_tag")
+                local _tuic_uidx=0
+                while IFS=$'\x1f' read -r tuic_user_uuid tuic_user_pass; do
+                    [[ -z "${tuic_user_uuid:-}" || -z "${tuic_user_pass:-}" ]] && continue
+                    tuic_found=1
+                    tuic_display_name="${tuic_usernames[$_tuic_uidx]:-${tuic_user_uuid:0:8}}"
+                    _tuic_uidx=$((_tuic_uidx + 1))
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    tuic_name="$(_mihomoconf_make_node_name "Tuic" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${tuic_display_name}"
+                    tuic_link=$(_mihomoconf_gen_tuic_link "$server_ip" "$port" "$tuic_user_uuid" "$tuic_user_pass" "$tuic_name" "$sni" "$tuic_cc" "$tuic_alpn_val" "$tuic_urm")
+                    _separator
+                    printf "  ${BOLD}[Tuic] %s${PLAIN}\n" "$tuic_name"
+                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$tuic_display_name"
+                    printf "    UUID: ${GREEN}%s${PLAIN}\n" "$tuic_user_uuid"
+                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$tuic_link"
+                    [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
+                    printf "    拥塞控制: ${GREEN}%s${PLAIN}\n" "$tuic_cc"
+                    printf "    ALPN: ${GREEN}%s${PLAIN}\n" "$tuic_alpn_val"
+                    printf "    链接 JSON:\n"
+                    cat <<MIHOMO_TUIC_JSON
+    {
+      "type": "tuic",
+      "tag": "${tuic_name}",
+      "server": "${server_ip}",
+      "server_port": ${port},
+      "uuid": "${tuic_user_uuid}",
+      "password": "${tuic_user_pass}",
+      "sni": "${sni}",
+      "congestion_control": "${tuic_cc}",
+      "alpn": "${tuic_alpn_val}",
+      "udp_relay_mode": "${tuic_urm}"
+    }
+MIHOMO_TUIC_JSON
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$tuic_found" -eq 0 ]]; then
                     _warn "跳过 ${name}: 未配置可用 user"
                 fi
                 ;;
@@ -7709,6 +8014,12 @@ _mihomochain_list_outbounds() {
                 [[ -n "${wg_mtu:-}" ]] && wg_extra="${wg_extra}, mtu=${wg_mtu}"
                 printf "      %s (type=wireguard, %s:%s%s)\n" "$show_name" "$server" "$port" "$wg_extra"
                 ;;
+            tuic)
+                local tuic_extra=""
+                [[ -n "${sni:-}" ]] && tuic_extra="${tuic_extra}, sni=${sni}"
+                [[ -n "${vless_uuid:-}" ]] && tuic_extra="${tuic_extra}, uuid=${vless_uuid:0:8}..."
+                printf "      %s (type=tuic, %s:%s%s)\n" "$show_name" "$server" "$port" "$tuic_extra"
+                ;;
             *)
                 printf "      %s (type=%s, %s:%s)\n" "$show_name" "$type" "$server" "$port"
                 ;;
@@ -8065,6 +8376,44 @@ EOF
             fi
             if [[ -n "$wg_keepalive" ]]; then
                 printf '    persistent-keepalive: %s\n' "$wg_keepalive" >> "$tmp_block"
+            fi
+            ;;
+        tuic)
+            if [[ -z "$vless_uuid" ]]; then
+                rm -f "$tmp_block"
+                return 1
+            fi
+            cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: tuic
+    server: "${q_server}"
+    port: ${port}
+    uuid: "${q_vless_uuid}"
+    password: "${q_pass}"
+    udp: true
+EOF
+            if [[ -n "$q_sni" ]]; then
+                printf '    sni: "%s"\n' "$q_sni" >> "$tmp_block"
+            fi
+            if [[ "$insecure" == "1" ]]; then
+                echo "    skip-cert-verify: true" >> "$tmp_block"
+            fi
+            if [[ -n "$q_vless_flow" ]]; then
+                printf '    congestion-controller: "%s"\n' "$q_vless_flow" >> "$tmp_block"
+            else
+                echo '    congestion-controller: bbr' >> "$tmp_block"
+            fi
+            if [[ -n "$q_vless_client_fingerprint" ]]; then
+                echo "    alpn:" >> "$tmp_block"
+                printf '      - %s\n' "$q_vless_client_fingerprint" >> "$tmp_block"
+            else
+                cat >> "$tmp_block" <<'EOF'
+    alpn:
+      - h3
+EOF
+            fi
+            if [[ -n "$q_vless_packet_encoding" ]]; then
+                printf '    udp-relay-mode: "%s"\n' "$q_vless_packet_encoding" >> "$tmp_block"
             fi
             ;;
         *)
@@ -8619,7 +8968,7 @@ _mihomo_chain_proxy_manage() {
             2)
                 printf "  ${BOLD}添加出口节点${PLAIN}\n"
                 _separator
-                _menu_pair "1" "通过链接导入" "ss:// hy2:// anytls:// vless:// wireguard:// (Beta)" "green" "2" "手动录入" "" "green"
+                _menu_pair "1" "通过链接导入" "ss:// hy2:// anytls:// vless:// tuic:// wireguard:// (Beta)" "green" "2" "手动录入" "" "green"
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
                 local out_sni out_insecure out_obfs out_obfs_pass out_mport
@@ -8939,8 +9288,61 @@ _mihomo_chain_proxy_manage() {
                                     continue
                                 fi
                                 ;;
+                            tuic://*)
+                                link_body="${in_link#tuic://}"
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                if [[ "$link_body" != *@* ]]; then
+                                    _error_no_exit "tuic 链接格式错误"
+                                    _press_any_key
+                                    continue
+                                fi
+                                link_userinfo="${link_body%@*}"
+                                link_hostport="${link_body#*@}"
+                                link_hostport="${link_hostport%%/*}"
+                                out_server="${link_hostport%:*}"
+                                out_port="${link_hostport##*:}"
+                                if [[ "$link_userinfo" != *:* ]]; then
+                                    _error_no_exit "tuic 链接格式错误，需为 tuic://UUID:PASSWORD@server:port?..."
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_vless_uuid="${link_userinfo%%:*}"
+                                out_pass="${link_userinfo#*:}"
+                                out_pass=$(_mihomochain_urldecode "$out_pass")
+                                if [[ -z "$out_server" || -z "$out_vless_uuid" || -z "$out_pass" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "tuic 链接解析失败"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="tuic"
+                                if [[ -n "$link_query" ]]; then
+                                    IFS='&' read -r -a _qarr <<< "$link_query"
+                                    for kv in "${_qarr[@]}"; do
+                                        k="${kv%%=*}"
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        k=$(_mihomochain_urldecode "$k")
+                                        v=$(_mihomochain_urldecode "$v")
+                                        case "$k" in
+                                            sni|peer) out_sni="$v" ;;
+                                            congestion_control) out_vless_flow="$v" ;;
+                                            alpn) out_vless_client_fingerprint="$v" ;;
+                                            udp_relay_mode) out_vless_packet_encoding="$v" ;;
+                                            insecure)
+                                                if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then
+                                                    out_insecure="1"
+                                                fi
+                                                ;;
+                                        esac
+                                    done
+                                fi
+                                ;;
                             *)
-                                _error_no_exit "暂不支持该链接类型，请使用 ss:// / hy2:// / hysteria2:// / anytls:// / vless:// / wireguard://(Beta)"
+                                _error_no_exit "暂不支持该链接类型，请使用 ss:// / hy2:// / hysteria2:// / anytls:// / vless:// / tuic:// / wireguard://(Beta)"
                                 _press_any_key
                                 continue
                                 ;;
@@ -8960,10 +9362,10 @@ _mihomo_chain_proxy_manage() {
                         _menu_pair "1" "ss" "" "green" "2" "hy2" "" "green"
                         _menu_pair "3" "anytls" "" "green" "4" "vless" "" "green"
                         _menu_pair "5" "socks5" "" "green" "6" "http" "" "green"
-                        _menu_item "7" "wireguard (Beta)" "" "green"
+                        _menu_pair "7" "wireguard (Beta)" "" "green" "8" "tuic" "" "green"
                         _separator
                         local type_choice
-                        read -rp "  出站类型 [1-7]: " type_choice
+                        read -rp "  出站类型 [1-8]: " type_choice
                         case "$type_choice" in
                             1) out_type="ss" ;;
                             2) out_type="hysteria2" ;;
@@ -8972,6 +9374,7 @@ _mihomo_chain_proxy_manage() {
                             5) out_type="socks5" ;;
                             6) out_type="http" ;;
                             7) out_type="wireguard" ;;
+                            8) out_type="tuic" ;;
                             *) _error_no_exit "无效类型"; _press_any_key; continue ;;
                         esac
                         read -rp "  出口节点名称: " out_name
@@ -9047,6 +9450,30 @@ _mihomo_chain_proxy_manage() {
                             socks5|http)
                                 read -rp "  username [可留空]: " out_user
                                 read -rp "  password [可留空]: " out_pass
+                                ;;
+                            tuic)
+                                read -rp "  uuid [留空自动生成]: " out_vless_uuid
+                                out_vless_uuid=$(_mihomoconf_trim "${out_vless_uuid:-}")
+                                if [[ -z "$out_vless_uuid" ]]; then
+                                    out_vless_uuid=$(_mihomoconf_gen_uuid)
+                                    _info "已自动生成 UUID: ${out_vless_uuid}"
+                                fi
+                                read -rp "  password: " out_pass
+                                read -rp "  sni/peer [可留空]: " out_sni
+                                local tuic_insecure_input
+                                read -rp "  insecure (跳过证书验证)? [y/N]: " tuic_insecure_input
+                                [[ "$tuic_insecure_input" =~ ^[Yy] ]] && out_insecure="1" || out_insecure="0"
+                                read -rp "  congestion-control [默认 bbr]: " out_vless_flow
+                                out_vless_flow=$(_mihomoconf_trim "${out_vless_flow:-bbr}")
+                                read -rp "  alpn [默认 h3]: " out_vless_client_fingerprint
+                                out_vless_client_fingerprint=$(_mihomoconf_trim "${out_vless_client_fingerprint:-h3}")
+                                read -rp "  udp-relay-mode [默认 native]: " out_vless_packet_encoding
+                                out_vless_packet_encoding=$(_mihomoconf_trim "${out_vless_packet_encoding:-native}")
+                                if [[ -z "$out_pass" ]]; then
+                                    _error_no_exit "tuic password 不能为空"
+                                    _press_any_key
+                                    continue
+                                fi
                                 ;;
                             wireguard)
                                 read -rp "  ip (本地地址, 如 172.16.0.2/32): " out_wg_ip
