@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.46"
+VERSION="2.47"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -4183,7 +4183,7 @@ _mihomoconf_gen_anytls_link() {
 
 _mihomoconf_gen_hy2_link() {
     local server="$1" port="$2" password="$3" name="$4"
-    local peer="${5:-}" insecure="${6:-0}" obfs="${7:-}" obfs_password="${8:-}" mport="${9:-}"
+    local peer="${5:-}" insecure="${6:-0}" obfs="${7:-}" obfs_password="${8:-}" mport="${9:-}" congestion_control="${10:-bbr}"
     local encoded_name query=""
     local params=()
 
@@ -4195,6 +4195,7 @@ _mihomoconf_gen_hy2_link() {
         [[ -n "$obfs_password" ]] && params+=("obfs-password=$(_mihomoconf_urlencode "$obfs_password")")
     fi
     [[ -n "$mport" ]] && params+=("mport=$(_mihomoconf_urlencode "$mport")")
+    [[ -n "$congestion_control" ]] && params+=("congestion_control=$(_mihomoconf_urlencode "$congestion_control")")
 
     if (( ${#params[@]} > 0 )); then
         local IFS='&'
@@ -4551,7 +4552,7 @@ _mihomoconf_read_listener_rows() {
         }
         function reset_state() {
             name=tag=type=port=cipher=password=user_id=user_pass=sni=""
-            hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=""
+            hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=hy2_congestion_control=""
             vless_public_key=vless_short_id=vless_flow=vless_client_fingerprint=""
             tuic_congestion_control=tuic_alpn=tuic_udp_relay_mode=""
             in_users=0
@@ -4562,11 +4563,11 @@ _mihomoconf_read_listener_rows() {
         function emit() {
             if (name == "") return
             flush_vless_user()
-            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
+            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
                 type, name, port, cipher, password, user_id, user_pass, sni, hy2_up, hy2_down, \
                 hy2_ignore, hy2_obfs, hy2_obfs_password, hy2_masquerade, hy2_mport, hy2_insecure, tag, \
                 vless_public_key, vless_short_id, vless_flow, vless_client_fingerprint, \
-                tuic_congestion_control, tuic_alpn, tuic_udp_relay_mode
+                tuic_congestion_control, tuic_alpn, tuic_udp_relay_mode, hy2_congestion_control
         }
         BEGIN {
             in_listeners=0
@@ -4588,7 +4589,7 @@ _mihomoconf_read_listener_rows() {
             sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line)
             name=unquote(trim(line))
             tag=type=port=cipher=password=user_id=user_pass=sni=""
-            hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=""
+            hy2_up=hy2_down=hy2_ignore=hy2_obfs=hy2_obfs_password=hy2_masquerade=hy2_mport=hy2_insecure=hy2_congestion_control=""
             vless_public_key=vless_short_id=vless_flow=vless_client_fingerprint=""
             tuic_congestion_control=tuic_alpn=tuic_udp_relay_mode=""
             in_users=0
@@ -4676,6 +4677,12 @@ _mihomoconf_read_listener_rows() {
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-insecure:[[:space:]]*/, "", line)
             hy2_insecure=trim(line)
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-hy2-congestion-control:/ {
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-hy2-congestion-control:[[:space:]]*/, "", line)
+            hy2_congestion_control=trim(line)
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-reality-public-key:/ {
@@ -4996,12 +5003,14 @@ _mihomoconf_read_users_by_tag() {
 _mihomoconf_read_listener_user_rows() {
     local config_file="$1"
     local type name port cipher password user_id user_pass sni
-    local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag
+    local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure hy2_congestion_control listener_tag
     local vless_public_key vless_short_id vless_flow vless_client_fingerprint
+    local tuic_congestion_control tuic_alpn tuic_udp_relay_mode
     local username passwd
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
         hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
-        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint \
+        tuic_congestion_control tuic_alpn tuic_udp_relay_mode hy2_congestion_control; do
         [[ -z "${name:-}" ]] && continue
         listener_tag="${listener_tag:-$name}"
         while IFS=$'\x1f' read -r username passwd; do
@@ -5015,12 +5024,14 @@ _mihomoconf_read_listener_user_rows() {
 _mihomoconf_listener_meta_by_tag() {
     local config_file="$1" listener_tag="$2"
     local type name port cipher password user_id user_pass sni
-    local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure tag
+    local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure hy2_congestion_control tag
     local vless_public_key vless_short_id vless_flow vless_client_fingerprint
+    local tuic_congestion_control tuic_alpn tuic_udp_relay_mode
     local resolved_tag
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
         hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure tag \
-        vless_public_key vless_short_id vless_flow vless_client_fingerprint; do
+        vless_public_key vless_short_id vless_flow vless_client_fingerprint \
+        tuic_congestion_control tuic_alpn tuic_udp_relay_mode hy2_congestion_control; do
         [[ -n "${name:-}" ]] || continue
         resolved_tag="${tag:-$name}"
         if [[ "$resolved_tag" == "$listener_tag" || "$name" == "$listener_tag" ]]; then
@@ -5630,7 +5641,7 @@ _mihomoconf_setup() {
     local -a RESERVED_PORTS=() NEW_PORTS=()
     local HY2_UP="" HY2_DOWN=""
     local HY2_IGNORE_CLIENT_BANDWIDTH="false" HY2_SNI="" HY2_INSECURE="0"
-    local HY2_OBFS="" HY2_MASQUERADE=""
+    local HY2_OBFS="" HY2_MASQUERADE="" HY2_CONGESTION_CONTROL="bbr"
     local -a TUIC_PORTS=() TUIC_TAGS=() TUIC_USER_ROWS=()
     local TUIC_SNI="" TUIC_CONGESTION_CONTROL="bbr" TUIC_ALPN="h3" TUIC_UDP_RELAY_MODE="native" TUIC_INSECURE="0"
     local IPV4_GOOGLE_PREF="off"
@@ -5760,11 +5771,13 @@ _mihomoconf_setup() {
     # ---- 端口冲突基线: 追加模式下保留现有端口（被替换协议除外）----
     if [[ "$WRITE_MODE" == "append" && -f "$CONFIG_FILE" ]]; then
         local _e_type _e_name _e_port _e_cipher _e_password _e_user_id _e_user_pass _e_sni _e_tag
-        local _e_hy2_up _e_hy2_down _e_hy2_ignore _e_hy2_obfs _e_hy2_obfs_password _e_hy2_masquerade _e_hy2_mport _e_hy2_insecure
+        local _e_hy2_up _e_hy2_down _e_hy2_ignore _e_hy2_obfs _e_hy2_obfs_password _e_hy2_masquerade _e_hy2_mport _e_hy2_insecure _e_hy2_congestion_control
         local _e_vless_public_key _e_vless_short_id _e_vless_flow _e_vless_client_fingerprint
+        local _e_tuic_congestion_control _e_tuic_alpn _e_tuic_udp_relay_mode
         while IFS=$'\x1f' read -r _e_type _e_name _e_port _e_cipher _e_password _e_user_id _e_user_pass _e_sni \
             _e_hy2_up _e_hy2_down _e_hy2_ignore _e_hy2_obfs _e_hy2_obfs_password _e_hy2_masquerade _e_hy2_mport _e_hy2_insecure _e_tag \
-            _e_vless_public_key _e_vless_short_id _e_vless_flow _e_vless_client_fingerprint; do
+            _e_vless_public_key _e_vless_short_id _e_vless_flow _e_vless_client_fingerprint \
+            _e_tuic_congestion_control _e_tuic_alpn _e_tuic_udp_relay_mode _e_hy2_congestion_control; do
             [[ -z "${_e_port:-}" ]] && continue
             case "$_e_type" in
                 shadowsocks) [[ "$SS_REPLACE" == "y" ]] && continue ;;
@@ -5988,6 +6001,18 @@ _mihomoconf_setup() {
             _press_any_key
             return
         fi
+
+        # congestion control
+        printf "    选择拥塞控制:\n"
+        printf "      ${GREEN}1${PLAIN}) bbr ${DIM}(温和，推荐)${PLAIN}\n"
+        printf "      ${GREEN}2${PLAIN}) brutal ${DIM}(激进)${PLAIN}\n"
+        local hy2_cc_choice
+        read -rp "    选择 [1/2]（默认 1）: " hy2_cc_choice
+        case "${hy2_cc_choice:-1}" in
+            1) HY2_CONGESTION_CONTROL="bbr" ;;
+            2) HY2_CONGESTION_CONTROL="brutal" ;;
+            *) _error_no_exit "无效选项"; _press_any_key; return ;;
+        esac
 
         # 按默认安全行为固定为关闭，不再交互询问
         HY2_IGNORE_CLIENT_BANDWIDTH="false"
@@ -6263,6 +6288,7 @@ MIHOMOCONF_VLESS_REALITY_EOF
     # vpsgo-peer: ${HY2_SNI}
     # vpsgo-mport: ${_hy2_mport}
     # vpsgo-insecure: ${HY2_INSECURE}
+    # vpsgo-hy2-congestion-control: ${HY2_CONGESTION_CONTROL}
     users:
 MIHOMOCONF_HY2_EOF
                 for _row in "${HY2_USER_ROWS[@]}"; do
@@ -6274,6 +6300,7 @@ MIHOMOCONF_HY2_EOF
     up: ${HY2_UP}
     down: ${HY2_DOWN}
     ignore-client-bandwidth: ${HY2_IGNORE_CLIENT_BANDWIDTH}
+    congestion-controller: ${HY2_CONGESTION_CONTROL}
 MIHOMOCONF_HY2_RATE_EOF
                 if [[ -n "$HY2_OBFS" ]]; then
                     cat >> "$_target_file" <<MIHOMOCONF_HY2_OBFS_EOF
@@ -6585,7 +6612,7 @@ MIHOMOCONF_VLESS_YAML
                 [[ "$_li" == "$i" ]] || continue
                 _user_idx=$((_user_idx + 1))
                 _hy2_client_name="${_hy2_name}-${_u_name}"
-                HY2_LINK=$(_mihomoconf_gen_hy2_link "$SERVER_HOST" "$_hy2_port" "$_u_pass" "$_hy2_client_name" "$HY2_SNI" "$HY2_INSECURE" "$HY2_OBFS" "$_hy2_obfs_password" "$_hy2_mport")
+                HY2_LINK=$(_mihomoconf_gen_hy2_link "$SERVER_HOST" "$_hy2_port" "$_u_pass" "$_hy2_client_name" "$HY2_SNI" "$HY2_INSECURE" "$HY2_OBFS" "$_hy2_obfs_password" "$_hy2_mport" "$HY2_CONGESTION_CONTROL")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_user_idx" "$_u_name"
                 printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
                 printf "  ${BOLD}HY2 分享链接:${PLAIN}\n"
@@ -6604,7 +6631,8 @@ MIHOMOCONF_VLESS_YAML
       "down_mbps": ${HY2_DOWN},
       "mport": "${_hy2_mport}",
       "obfs": "${HY2_OBFS}",
-      "obfs_password": "${_hy2_obfs_password}"
+      "obfs_password": "${_hy2_obfs_password}",
+      "congestion_control": "${HY2_CONGESTION_CONTROL}"
     }
 MIHOMOCONF_HY2_JSON
             done
@@ -7238,7 +7266,7 @@ _mihomo_read_config() {
     local export_count=0
     local listener_total=0 listener_export=0 proxy_total=0 proxy_export=0
     local type name port cipher password user_id user_pass sni listener_tag
-    local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure
+    local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure hy2_congestion_control
     local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     local tuic_congestion_control tuic_alpn tuic_udp_relay_mode
     local p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport
@@ -7286,7 +7314,7 @@ _mihomo_read_config() {
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
         hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
         vless_public_key vless_short_id vless_flow vless_client_fingerprint \
-        tuic_congestion_control tuic_alpn tuic_udp_relay_mode; do
+        tuic_congestion_control tuic_alpn tuic_udp_relay_mode hy2_congestion_control; do
         [[ -z "${name:-}" ]] && continue
         total_count=$((total_count + 1))
         listener_total=$((listener_total + 1))
@@ -7449,7 +7477,7 @@ MIHOMO_VLESS_YAML
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
                     hy2_name="$(_mihomoconf_make_node_name "HY2" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${hy2_user}"
-                    hy2_link=$(_mihomoconf_gen_hy2_link "$server_ip" "$port" "$hy2_pass" "$hy2_name" "$sni" "${hy2_insecure:-0}" "$hy2_obfs" "$hy2_obfs_password" "$hy2_mport")
+                    hy2_link=$(_mihomoconf_gen_hy2_link "$server_ip" "$port" "$hy2_pass" "$hy2_name" "$sni" "${hy2_insecure:-0}" "$hy2_obfs" "$hy2_obfs_password" "$hy2_mport" "${hy2_congestion_control:-bbr}")
                     _separator
                     printf "  ${BOLD}[HY2] %s${PLAIN}\n" "$hy2_name"
                     printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
@@ -7474,7 +7502,8 @@ MIHOMO_VLESS_YAML
       "down_mbps": ${hy2_down:-1000},
       "mport": "${hy2_mport}",
       "obfs": "${hy2_obfs}",
-      "obfs_password": "${hy2_obfs_password}"
+      "obfs_password": "${hy2_obfs_password}",
+      "congestion_control": "${hy2_congestion_control:-bbr}"
     }
 MIHOMO_HY2_JSON
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
@@ -8239,8 +8268,9 @@ _mihomochain_add_or_update_outbound() {
     local wg_allowed_ips="${18:-}" wg_preshared_key="${19:-}" wg_reserved="${20:-}" wg_mtu="${21:-}" wg_keepalive="${22:-}"
     local vless_uuid="${23:-}" vless_flow="${24:-xtls-rprx-vision}" vless_public_key="${25:-}"
     local vless_short_id="${26:-}" vless_client_fingerprint="${27:-chrome}" vless_packet_encoding="${28:-xudp}"
+    local hy2_congestion_control="${29:-bbr}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
-    local name q_name q_server q_cipher q_user q_pass q_sni q_obfs q_obfs_password q_mport
+    local name q_name q_server q_cipher q_user q_pass q_sni q_obfs q_obfs_password q_mport q_hy2_congestion_control
     local q_wg_ip q_wg_ipv6 q_wg_private_key q_wg_public_key q_wg_allowed_ips q_wg_preshared_key q_wg_reserved
     local q_vless_uuid q_vless_flow q_vless_public_key q_vless_short_id q_vless_client_fingerprint q_vless_packet_encoding
     local tmp_block
@@ -8255,6 +8285,7 @@ _mihomochain_add_or_update_outbound() {
     q_obfs=$(_mihomochain_yaml_quote "$obfs")
     q_obfs_password=$(_mihomochain_yaml_quote "$obfs_password")
     q_mport=$(_mihomochain_yaml_quote "$mport")
+    q_hy2_congestion_control=$(_mihomochain_yaml_quote "$hy2_congestion_control")
     q_wg_ip=$(_mihomochain_yaml_quote "$wg_ip")
     q_wg_ipv6=$(_mihomochain_yaml_quote "$wg_ipv6")
     q_wg_private_key=$(_mihomochain_yaml_quote "$wg_private_key")
@@ -8318,6 +8349,9 @@ EOF
                 if [[ -n "$q_obfs_password" ]]; then
                     printf '    obfs-password: "%s"\n' "$q_obfs_password" >> "$tmp_block"
                 fi
+            fi
+            if [[ -n "$q_hy2_congestion_control" ]]; then
+                printf '    congestion-controller: "%s"\n' "$q_hy2_congestion_control" >> "$tmp_block"
             fi
             ;;
         vless)
@@ -9036,6 +9070,7 @@ _mihomo_chain_proxy_manage() {
                 out_obfs=""
                 out_obfs_pass=""
                 out_mport=""
+                out_hy2_cc=""
                 out_wg_ip=""
                 out_wg_ipv6=""
                 out_wg_private_key=""
@@ -9202,6 +9237,7 @@ _mihomo_chain_proxy_manage() {
                                             obfs) out_obfs="$v" ;;
                                             obfs-password|obfs_password) out_obfs_pass="$v" ;;
                                             mport) out_mport="$v" ;;
+                                            congestion_control) out_hy2_cc="$v" ;;
                                         esac
                                     done
                                 fi
@@ -9456,6 +9492,8 @@ _mihomo_chain_proxy_manage() {
                                     read -rp "  obfs-password [可留空]: " out_obfs_pass
                                 fi
                                 read -rp "  mport [可留空]: " out_mport
+                                read -rp "  congestion-control [默认 bbr]: " out_hy2_cc
+                                out_hy2_cc=$(_mihomoconf_trim "${out_hy2_cc:-bbr}")
                                 if [[ -z "$out_pass" ]]; then
                                     _error_no_exit "hy2 password 不能为空"
                                     _press_any_key
@@ -9569,7 +9607,7 @@ _mihomo_chain_proxy_manage() {
                     continue
                 fi
 
-                if [[ "$out_name$out_server$out_cipher$out_user$out_pass$out_sni$out_obfs$out_obfs_pass$out_mport"\
+                if [[ "$out_name$out_server$out_cipher$out_user$out_pass$out_sni$out_obfs$out_obfs_pass$out_mport$out_hy2_cc"\
 "$out_wg_ip$out_wg_ipv6$out_wg_private_key$out_wg_public_key$out_wg_allowed_ips$out_wg_preshared_key$out_wg_reserved$out_wg_mtu$out_wg_keepalive"\
 "$out_vless_uuid$out_vless_flow$out_vless_public_key$out_vless_short_id$out_vless_client_fingerprint$out_vless_packet_encoding" == *"|"* ]]; then
                     _error_no_exit "字段中不能包含字符 |"
@@ -9587,7 +9625,8 @@ _mihomo_chain_proxy_manage() {
                     "${out_wg_ip:-}" "${out_wg_ipv6:-}" "${out_wg_private_key:-}" "${out_wg_public_key:-}" \
                     "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}" \
                     "${out_vless_uuid:-}" "${out_vless_flow:-}" "${out_vless_public_key:-}" "${out_vless_short_id:-}" \
-                    "${out_vless_client_fingerprint:-}" "${out_vless_packet_encoding:-}"; then
+                    "${out_vless_client_fingerprint:-}" "${out_vless_packet_encoding:-}" \
+                    "${out_hy2_cc:-bbr}"; then
                     _error_no_exit "保存出口节点失败"
                     _press_any_key
                     continue
