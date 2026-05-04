@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.47"
+VERSION="2.48"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -4183,7 +4183,7 @@ _mihomoconf_gen_anytls_link() {
 
 _mihomoconf_gen_hy2_link() {
     local server="$1" port="$2" password="$3" name="$4"
-    local peer="${5:-}" insecure="${6:-0}" obfs="${7:-}" obfs_password="${8:-}" mport="${9:-}" congestion_control="${10:-bbr}"
+    local peer="${5:-}" insecure="${6:-0}" obfs="${7:-}" obfs_password="${8:-}" mport="${9:-}" congestion_control="${10:-brutal}"
     local encoded_name query=""
     local params=()
 
@@ -5641,7 +5641,7 @@ _mihomoconf_setup() {
     local -a RESERVED_PORTS=() NEW_PORTS=()
     local HY2_UP="" HY2_DOWN=""
     local HY2_IGNORE_CLIENT_BANDWIDTH="false" HY2_SNI="" HY2_INSECURE="0"
-    local HY2_OBFS="" HY2_MASQUERADE="" HY2_CONGESTION_CONTROL="bbr"
+    local HY2_OBFS="" HY2_MASQUERADE="" HY2_CONGESTION_CONTROL="brutal"
     local -a TUIC_PORTS=() TUIC_TAGS=() TUIC_USER_ROWS=()
     local TUIC_SNI="" TUIC_CONGESTION_CONTROL="bbr" TUIC_ALPN="h3" TUIC_UDP_RELAY_MODE="native" TUIC_INSECURE="0"
     local IPV4_GOOGLE_PREF="off"
@@ -5986,33 +5986,40 @@ _mihomoconf_setup() {
             HY2_SNI=$(_mihomoconf_trim "${HY2_SNI:-}")
         fi
 
-        read -rp "    up 上传速率 [默认 1000 Mbps]: " HY2_UP
-        HY2_UP="${HY2_UP:-1000}"
-        if ! _is_digit "$HY2_UP" || [[ "$HY2_UP" -le 0 ]]; then
-            _error_no_exit "up 必须为正整数"
-            _press_any_key
-            return
-        fi
-
-        read -rp "    down 下载速率 [默认 1000 Mbps]: " HY2_DOWN
-        HY2_DOWN="${HY2_DOWN:-1000}"
-        if ! _is_digit "$HY2_DOWN" || [[ "$HY2_DOWN" -le 0 ]]; then
-            _error_no_exit "down 必须为正整数"
-            _press_any_key
-            return
-        fi
-
-        # congestion control
+        # congestion control (must precede up/down: only brutal needs bandwidth)
         printf "    选择拥塞控制:\n"
-        printf "      ${GREEN}1${PLAIN}) bbr ${DIM}(温和，推荐)${PLAIN}\n"
-        printf "      ${GREEN}2${PLAIN}) brutal ${DIM}(激进)${PLAIN}\n"
+        printf "      ${GREEN}1${PLAIN}) brutal ${DIM}(激进，默认)${PLAIN}\n"
+        printf "      ${GREEN}2${PLAIN}) bbr ${DIM}(温和)${PLAIN}\n"
+        printf "      ${GREEN}3${PLAIN}) reno ${DIM}(最温和)${PLAIN}\n"
         local hy2_cc_choice
-        read -rp "    选择 [1/2]（默认 1）: " hy2_cc_choice
+        read -rp "    选择 [1/2/3]（默认 1）: " hy2_cc_choice
         case "${hy2_cc_choice:-1}" in
-            1) HY2_CONGESTION_CONTROL="bbr" ;;
-            2) HY2_CONGESTION_CONTROL="brutal" ;;
+            1) HY2_CONGESTION_CONTROL="brutal" ;;
+            2) HY2_CONGESTION_CONTROL="bbr" ;;
+            3) HY2_CONGESTION_CONTROL="reno" ;;
             *) _error_no_exit "无效选项"; _press_any_key; return ;;
         esac
+
+        if [[ "$HY2_CONGESTION_CONTROL" == "brutal" ]]; then
+            read -rp "    up 上传速率 [默认 1000 Mbps]: " HY2_UP
+            HY2_UP="${HY2_UP:-1000}"
+            if ! _is_digit "$HY2_UP" || [[ "$HY2_UP" -le 0 ]]; then
+                _error_no_exit "up 必须为正整数"
+                _press_any_key
+                return
+            fi
+
+            read -rp "    down 下载速率 [默认 1000 Mbps]: " HY2_DOWN
+            HY2_DOWN="${HY2_DOWN:-1000}"
+            if ! _is_digit "$HY2_DOWN" || [[ "$HY2_DOWN" -le 0 ]]; then
+                _error_no_exit "down 必须为正整数"
+                _press_any_key
+                return
+            fi
+        else
+            HY2_UP=""
+            HY2_DOWN=""
+        fi
 
         # 按默认安全行为固定为关闭，不再交互询问
         HY2_IGNORE_CLIENT_BANDWIDTH="false"
@@ -6296,12 +6303,14 @@ MIHOMOCONF_HY2_EOF
                     [[ "$_li" == "$i" ]] || continue
                     printf "      \"%s\": \"%s\"\n" "$_u_name" "$_u_pass" >> "$_target_file"
                 done
-                cat >> "$_target_file" <<MIHOMOCONF_HY2_RATE_EOF
+                if [[ -n "$HY2_UP" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_HY2_RATE_EOF
     up: ${HY2_UP}
     down: ${HY2_DOWN}
     ignore-client-bandwidth: ${HY2_IGNORE_CLIENT_BANDWIDTH}
-    congestion-controller: ${HY2_CONGESTION_CONTROL}
 MIHOMOCONF_HY2_RATE_EOF
+                fi
+                printf '    congestion-controller: %s\n' "$HY2_CONGESTION_CONTROL" >> "$_target_file"
                 if [[ -n "$HY2_OBFS" ]]; then
                     cat >> "$_target_file" <<MIHOMOCONF_HY2_OBFS_EOF
     obfs: ${HY2_OBFS}
@@ -7477,7 +7486,7 @@ MIHOMO_VLESS_YAML
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
                     hy2_name="$(_mihomoconf_make_node_name "HY2" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${hy2_user}"
-                    hy2_link=$(_mihomoconf_gen_hy2_link "$server_ip" "$port" "$hy2_pass" "$hy2_name" "$sni" "${hy2_insecure:-0}" "$hy2_obfs" "$hy2_obfs_password" "$hy2_mport" "${hy2_congestion_control:-bbr}")
+                    hy2_link=$(_mihomoconf_gen_hy2_link "$server_ip" "$port" "$hy2_pass" "$hy2_name" "$sni" "${hy2_insecure:-0}" "$hy2_obfs" "$hy2_obfs_password" "$hy2_mport" "${hy2_congestion_control:-brutal}")
                     _separator
                     printf "  ${BOLD}[HY2] %s${PLAIN}\n" "$hy2_name"
                     printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
@@ -7503,7 +7512,7 @@ MIHOMO_VLESS_YAML
       "mport": "${hy2_mport}",
       "obfs": "${hy2_obfs}",
       "obfs_password": "${hy2_obfs_password}",
-      "congestion_control": "${hy2_congestion_control:-bbr}"
+      "congestion_control": "${hy2_congestion_control:-brutal}"
     }
 MIHOMO_HY2_JSON
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
@@ -8268,7 +8277,7 @@ _mihomochain_add_or_update_outbound() {
     local wg_allowed_ips="${18:-}" wg_preshared_key="${19:-}" wg_reserved="${20:-}" wg_mtu="${21:-}" wg_keepalive="${22:-}"
     local vless_uuid="${23:-}" vless_flow="${24:-xtls-rprx-vision}" vless_public_key="${25:-}"
     local vless_short_id="${26:-}" vless_client_fingerprint="${27:-chrome}" vless_packet_encoding="${28:-xudp}"
-    local hy2_congestion_control="${29:-bbr}"
+    local hy2_congestion_control="${29:-brutal}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
     local name q_name q_server q_cipher q_user q_pass q_sni q_obfs q_obfs_password q_mport q_hy2_congestion_control
     local q_wg_ip q_wg_ipv6 q_wg_private_key q_wg_public_key q_wg_allowed_ips q_wg_preshared_key q_wg_reserved
@@ -9492,8 +9501,8 @@ _mihomo_chain_proxy_manage() {
                                     read -rp "  obfs-password [可留空]: " out_obfs_pass
                                 fi
                                 read -rp "  mport [可留空]: " out_mport
-                                read -rp "  congestion-control [默认 bbr]: " out_hy2_cc
-                                out_hy2_cc=$(_mihomoconf_trim "${out_hy2_cc:-bbr}")
+                                read -rp "  congestion-control [默认 brutal]: " out_hy2_cc
+                                out_hy2_cc=$(_mihomoconf_trim "${out_hy2_cc:-brutal}")
                                 if [[ -z "$out_pass" ]]; then
                                     _error_no_exit "hy2 password 不能为空"
                                     _press_any_key
@@ -9626,7 +9635,7 @@ _mihomo_chain_proxy_manage() {
                     "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}" \
                     "${out_vless_uuid:-}" "${out_vless_flow:-}" "${out_vless_public_key:-}" "${out_vless_short_id:-}" \
                     "${out_vless_client_fingerprint:-}" "${out_vless_packet_encoding:-}" \
-                    "${out_hy2_cc:-bbr}"; then
+                    "${out_hy2_cc:-brutal}"; then
                     _error_no_exit "保存出口节点失败"
                     _press_any_key
                     continue
