@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.44"
+VERSION="2.45"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -9567,7 +9567,7 @@ _mihomo_chain_proxy_manage() {
                 local l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
                 local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
-                local -a listener_names outbound_names outbound_show_names
+                local -a listener_names=() outbound_names=() outbound_show_names=()
 
                 printf "  ${BOLD}可用入站节点:${PLAIN}\n"
                 _separator
@@ -9688,8 +9688,8 @@ _mihomo_chain_proxy_manage() {
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
                 local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
                 local u_name u_pass user_count
-                local -a listener_tags listener_names
-                local -a listener_users outbound_names outbound_show_names
+                local -a listener_tags=() listener_names=()
+                local -a listener_users=() outbound_names=() outbound_show_names=()
 
                 printf "  ${BOLD}可用入站节点:${PLAIN}\n"
                 _separator
@@ -9844,7 +9844,7 @@ _mihomo_chain_proxy_manage() {
                 local rm_out_idx=0 type server port cipher username password sni insecure obfs obfs_password mport out_name out_show_name
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
                 local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
-                local -a rm_out_names rm_out_show_names rm_out_tags
+                local -a rm_out_names=() rm_out_show_names=() rm_out_tags=()
                 while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
                     wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
                     vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
@@ -9922,7 +9922,7 @@ _mihomo_chain_proxy_manage() {
                 printf "  ${BOLD}当前规则:${PLAIN}\n"
                 _separator
                 local rule_idx=0 kind rule_left out_name in_name in_user out_show_name
-                local -a rule_types rule_in_names rule_keys rule_users
+                local -a rule_types=() rule_in_names=() rule_keys=() rule_users=()
                 while IFS=$'\x1f' read -r kind rule_left out_name; do
                     [[ -z "${kind:-}" ]] && continue
                     case "$kind" in
@@ -10007,7 +10007,7 @@ _mihomo_chain_proxy_manage() {
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
                 local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
                 local u_name u_pass
-                local -a add_listener_tags add_listener_names add_listener_types add_listener_ciphers
+                local -a add_listener_tags=() add_listener_names=() add_listener_types=() add_listener_ciphers=()
 
                 printf "  ${BOLD}可新增用户的入站节点:${PLAIN}\n"
                 _separator
@@ -12347,7 +12347,971 @@ _snell_manage() {
     done
 }
 
-# --- 12. Shadowsocks-Rust 管理 ---
+# --- 12. Realm 端口转发管理 ---
+
+_REALM_CONFIG_DIR="/etc/realm"
+_REALM_CONFIG_FILE="/etc/realm/config.toml"
+_REALM_SERVICE_NAME="realm"
+_REALM_SYSTEMD_SERVICE_FILE="/etc/systemd/system/${_REALM_SERVICE_NAME}.service"
+_REALM_OPENRC_SERVICE_FILE="/etc/init.d/${_REALM_SERVICE_NAME}"
+_REALM_BIN="/usr/local/bin/realm"
+_REALM_LOG_FILE="/var/log/realm.log"
+_REALM_ERR_FILE="/var/log/realm.error.log"
+_REALM_RELEASE_API="https://api.github.com/repos/zhboner/realm/releases/latest"
+
+_realm_running_pid() {
+    local pid=""
+    local pid_file="/run/${_REALM_SERVICE_NAME}.pid"
+
+    if [[ -f "$pid_file" ]]; then
+        pid=$(tr -cd '0-9' < "$pid_file" 2>/dev/null || true)
+        if _is_digit "${pid:-}" && kill -0 "$pid" >/dev/null 2>&1; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    fi
+
+    if command -v pgrep >/dev/null 2>&1; then
+        pid=$(pgrep -x realm 2>/dev/null | head -n1 || true)
+        [[ -z "$pid" ]] && pid=$(pgrep realm 2>/dev/null | head -n1 || true)
+        if _is_digit "${pid:-}" && kill -0 "$pid" >/dev/null 2>&1; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+_realm_systemd_service_configured() {
+    _has_systemd || return 1
+    systemctl is-enabled "${_REALM_SERVICE_NAME}.service" &>/dev/null \
+        || systemctl is-active "${_REALM_SERVICE_NAME}.service" &>/dev/null \
+        || [[ -f "$_REALM_SYSTEMD_SERVICE_FILE" ]]
+}
+
+_realm_openrc_service_configured() {
+    _has_openrc || return 1
+    [[ -x "$_REALM_OPENRC_SERVICE_FILE" ]] || _openrc_service_in_default "$_REALM_SERVICE_NAME"
+}
+
+_realm_service_is_active() {
+    if _has_systemd && systemctl is-active --quiet "$_REALM_SERVICE_NAME" 2>/dev/null; then
+        return 0
+    fi
+    if _has_openrc && [[ -x "$_REALM_OPENRC_SERVICE_FILE" ]] && rc-service "$_REALM_SERVICE_NAME" status >/dev/null 2>&1; then
+        return 0
+    fi
+    _realm_running_pid >/dev/null 2>&1
+}
+
+_realm_detect_arch() {
+    local machine
+    machine=$(uname -m 2>/dev/null || echo unknown)
+    case "$machine" in
+        x86_64|amd64) echo "x86_64" ;;
+        i386|i486|i586|i686) echo "i686" ;;
+        aarch64|arm64) echo "aarch64" ;;
+        armv7l|armv7) echo "armv7" ;;
+        *) echo "" ;;
+    esac
+}
+
+_realm_bin_version() {
+    if [[ -x "$_REALM_BIN" ]]; then
+        local out
+        out=$("$_REALM_BIN" --version 2>/dev/null | head -1 || true)
+        [[ -z "$out" ]] && out=$("$_REALM_BIN" -V 2>/dev/null | head -1 || true)
+        printf '%s' "$out"
+        return
+    fi
+    echo ""
+}
+
+_realm_is_musl() {
+    if command -v ldd >/dev/null 2>&1; then
+        if ldd --version 2>&1 | grep -qi 'musl'; then
+            return 0
+        fi
+    fi
+    ls /lib/ld-musl-*.so.1 >/dev/null 2>&1
+}
+
+_realm_release_tag_from_json() {
+    local release_json="$1"
+    printf '%s\n' "$release_json" \
+        | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -1
+}
+
+_realm_pick_asset_url() {
+    local release_json="$1" arch="$2" prefer_musl="$3"
+    local keywords=() urls=() line kw url
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && urls+=("$line")
+    done < <(
+        printf '%s\n' "$release_json" \
+            | grep -oE 'https://[^"]+/download/[^"]+/realm-[^"]+\.(tar\.gz|tar\.xz|zip)' \
+            | sort -u
+    )
+    (( ${#urls[@]} > 0 )) || return 1
+
+    case "$arch" in
+        x86_64)
+            if [[ "$prefer_musl" == "1" ]]; then
+                keywords=("x86_64-unknown-linux-musl" "x86_64-unknown-linux-gnu")
+            else
+                keywords=("x86_64-unknown-linux-gnu" "x86_64-unknown-linux-musl")
+            fi
+            ;;
+        aarch64)
+            if [[ "$prefer_musl" == "1" ]]; then
+                keywords=("aarch64-unknown-linux-musl" "aarch64-unknown-linux-gnu")
+            else
+                keywords=("aarch64-unknown-linux-gnu" "aarch64-unknown-linux-musl")
+            fi
+            ;;
+        armv7)
+            keywords=("armv7-unknown-linux-gnueabihf" "arm-unknown-linux-gnueabihf" "armv7-unknown-linux-musleabihf")
+            ;;
+        i686)
+            keywords=("i686-unknown-linux-gnu" "i686-unknown-linux-musl")
+            ;;
+        *) return 1 ;;
+    esac
+
+    for kw in "${keywords[@]}"; do
+        for url in "${urls[@]}"; do
+            if [[ "$url" == *"${kw}"* && "$url" == *"linux"* ]]; then
+                printf '%s' "$url"
+                return 0
+            fi
+        done
+    done
+
+    for url in "${urls[@]}"; do
+        if [[ "$url" == *"${arch}"* && "$url" == *"linux"* ]]; then
+            printf '%s' "$url"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_realm_install_latest_core() {
+    local arch prefer_musl latest_json latest_version asset_url
+    local tmp_pkg tmp_dir extracted_bin
+
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        _error_no_exit "Realm 仅支持 Linux 系统"
+        return 1
+    fi
+    for cmd in curl tar; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            _error_no_exit "缺少必要命令: $cmd，请先安装"
+            return 1
+        fi
+    done
+
+    arch=$(_realm_detect_arch)
+    if [[ -z "$arch" ]]; then
+        _error_no_exit "不支持的架构: $(uname -m)"
+        return 1
+    fi
+
+    prefer_musl="0"
+    _realm_is_musl && prefer_musl="1"
+
+    latest_json=$(curl -fsSL "$(_github_proxy_url "$_REALM_RELEASE_API")" 2>/dev/null || true)
+    if [[ -z "$latest_json" ]]; then
+        _error_no_exit "无法获取 Realm 最新版本信息"
+        return 1
+    fi
+    latest_version=$(_realm_release_tag_from_json "$latest_json")
+    if [[ -z "$latest_version" ]]; then
+        _error_no_exit "解析 Realm 版本号失败"
+        return 1
+    fi
+
+    asset_url=$(_realm_pick_asset_url "$latest_json" "$arch" "$prefer_musl")
+    if [[ -z "$asset_url" ]]; then
+        _error_no_exit "未找到匹配当前系统的 Realm 发行包"
+        return 1
+    fi
+
+    tmp_pkg=$(_mktemp_file realm .tar.gz) || {
+        _error_no_exit "创建临时文件失败"
+        return 1
+    }
+    tmp_dir=$(mktemp -d /tmp/realm.XXXXXX)
+
+    _info "下载 Realm: ${latest_version}"
+    printf "    ${DIM}%s${PLAIN}\n" "$asset_url"
+    if ! _mihomo_download "$asset_url" "$tmp_pkg"; then
+        rm -rf "$tmp_pkg" "$tmp_dir"
+        _error_no_exit "下载失败，请检查网络连接"
+        return 1
+    fi
+    if [[ ! -s "$tmp_pkg" ]]; then
+        rm -rf "$tmp_pkg" "$tmp_dir"
+        _error_no_exit "下载文件为空，请稍后重试"
+        return 1
+    fi
+
+    if ! tar -xzf "$tmp_pkg" -C "$tmp_dir" 2>/dev/null; then
+        if ! tar -xf "$tmp_pkg" -C "$tmp_dir" 2>/dev/null; then
+            rm -rf "$tmp_pkg" "$tmp_dir"
+            _error_no_exit "解压失败，请确认 tar 支持已安装"
+            return 1
+        fi
+    fi
+
+    extracted_bin=$(find "$tmp_dir" -type f -name 'realm' | head -1)
+    if [[ -z "$extracted_bin" || ! -f "$extracted_bin" ]]; then
+        rm -rf "$tmp_pkg" "$tmp_dir"
+        _error_no_exit "发行包中未找到 realm 可执行文件"
+        return 1
+    fi
+
+    install -m 0755 "$extracted_bin" "$_REALM_BIN"
+    rm -rf "$tmp_pkg" "$tmp_dir"
+
+    if [[ ! -x "$_REALM_BIN" ]]; then
+        _error_no_exit "realm 安装失败"
+        return 1
+    fi
+    _success "Realm 安装完成"
+    _info "版本: $(_realm_bin_version)"
+    return 0
+}
+
+_realm_install_or_update() {
+    _header "Realm 安装/更新"
+    _time_sync_check_and_enable
+    _realm_install_latest_core
+    _press_any_key
+}
+
+# ---- Realm 配置解析 ----
+
+_realm_parse_endpoints() {
+    local config_file="$1"
+    [[ -f "$config_file" ]] || return 1
+    awk '
+        function trim(s) {
+            gsub(/^[[:space:]]+/, "", s)
+            gsub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function unquote(s) {
+            gsub(/^"/, "", s)
+            gsub(/"$/, "", s)
+            gsub(/^'\''/, "", s)
+            gsub(/'\''$/, "", s)
+            return s
+        }
+        BEGIN { in_endpoint = 0; listen = ""; remote = "" }
+        /^\[\[endpoints\]\]/ {
+            if (in_endpoint && listen != "" && remote != "")
+                printf "%s\x1f%s\n", listen, remote
+            in_endpoint = 1
+            listen = ""
+            remote = ""
+            next
+        }
+        in_endpoint && /^[[:space:]]*listen[[:space:]]*=/ {
+            val = $0; sub(/^[^=]*=/, "", val)
+            listen = unquote(trim(val))
+            next
+        }
+        in_endpoint && /^[[:space:]]*remote[[:space:]]*=/ {
+            val = $0; sub(/^[^=]*=/, "", val)
+            remote = unquote(trim(val))
+            next
+        }
+        /^\[/ && !/^\[\[endpoints\]\]/ {
+            if (in_endpoint && listen != "" && remote != "")
+                printf "%s\x1f%s\n", listen, remote
+            in_endpoint = 0
+            listen = ""
+            remote = ""
+            next
+        }
+        END {
+            if (in_endpoint && listen != "" && remote != "")
+                printf "%s\x1f%s\n", listen, remote
+        }
+    ' "$config_file"
+}
+
+_realm_add_endpoint_to_config() {
+    local listen="$1" remote="$2"
+    local -a lines=()
+    local found=0 l r
+
+    if [[ -f "$_REALM_CONFIG_FILE" ]]; then
+        while IFS=$'\x1f' read -r l r; do
+            [[ -z "$l" ]] && continue
+            if [[ "$l" == "$listen" ]]; then
+                found=1
+            fi
+            lines+=("${l}|${r}")
+        done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+    fi
+
+    if [[ "$found" == "1" ]]; then
+        return 2
+    fi
+
+    lines+=("${listen}|${remote}")
+    _realm_write_config_from_lines "${lines[@]}"
+}
+
+_realm_delete_endpoint_from_config() {
+    local index="$1"
+    local -a lines=()
+    local i=0 l r
+
+    if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
+        return 1
+    fi
+
+    while IFS=$'\x1f' read -r l r; do
+        [[ -z "$l" ]] && continue
+        if (( i != index )); then
+            lines+=("${l}|${r}")
+        fi
+        ((i++))
+    done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+
+    if (( ${#lines[@]} == 0 )); then
+        rm -f "$_REALM_CONFIG_FILE"
+        return 0
+    fi
+
+    _realm_write_config_from_lines "${lines[@]}"
+}
+
+_realm_write_config_from_lines() {
+    local line listen remote
+    mkdir -p "$_REALM_CONFIG_DIR"
+    {
+        printf '[log]\nlevel = "warn"\n\n'
+        for line in "$@"; do
+            listen="${line%%|*}"
+            remote="${line##*|}"
+            printf '[[endpoints]]\nlisten = "%s"\nremote = "%s"\n\n' "$listen" "$remote"
+        done
+    } > "$_REALM_CONFIG_FILE"
+}
+
+# ---- Realm 端口冲突检查 ----
+
+_realm_port_usage_line() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -lnutpH 2>/dev/null | awk -v p="$port" '
+            {
+                addr=$5
+                sub(/%[[:alnum:]_.-]+$/, "", addr)
+                if (addr ~ "\\]:" p "$" || addr ~ ":" p "$") {
+                    print
+                    exit
+                }
+            }
+        '
+        return
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+    fi
+}
+
+_realm_port_conflict_with_mihomo() {
+    local target_port="$1"
+    [[ -f "$_MIHOMOCONF_CONFIG_FILE" ]] || return 1
+    if declare -F _snell_port_conflict_with_mihomo >/dev/null 2>&1; then
+        _snell_port_conflict_with_mihomo "$target_port"
+        return $?
+    fi
+    return 1
+}
+
+_realm_pick_listen_port() {
+    local default_port="${1:-8000}"
+    local port_input usage_line
+
+    while true; do
+        read -rp "  监听端口 [默认 ${default_port}]: " port_input
+        port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
+        if ! _is_valid_port "$port_input"; then
+            _warn "端口无效，请输入 1-65535 的数字"
+            continue
+        fi
+        if _realm_port_conflict_with_mihomo "$port_input"; then
+            _warn "端口 ${port_input} 与 mihomo 配置冲突（listeners/port/mixed-port 等），请更换端口"
+            continue
+        fi
+        usage_line=$(_realm_port_usage_line "$port_input")
+        if [[ -n "$usage_line" && "$usage_line" != *"realm"* ]]; then
+            _warn "端口 ${port_input} 已被占用: ${usage_line}"
+            continue
+        fi
+        printf '%s' "$port_input"
+        return 0
+    done
+}
+
+# ---- Realm 服务管理 ----
+
+_realm_enable_now() {
+    if [[ ! -x "$_REALM_BIN" ]]; then
+        _error_no_exit "未检测到 realm，请先安装"
+        return 1
+    fi
+    if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
+        _error_no_exit "未检测到配置文件: ${_REALM_CONFIG_FILE}"
+        return 1
+    fi
+
+    if _has_systemd; then
+        cat > "$_REALM_SYSTEMD_SERVICE_FILE" <<EOF
+[Unit]
+Description=Realm Port Forwarding Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${_REALM_BIN} -c ${_REALM_CONFIG_FILE}
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=32768
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if ! systemctl enable "$_REALM_SERVICE_NAME" >/dev/null 2>&1; then
+            _error_no_exit "设置 realm 开机自启失败"
+            return 1
+        fi
+        if ! systemctl restart "$_REALM_SERVICE_NAME" >/dev/null 2>&1; then
+            _error_no_exit "realm 启动失败，请检查: systemctl status ${_REALM_SERVICE_NAME}"
+            return 1
+        fi
+        sleep 1
+        if systemctl is-active --quiet "$_REALM_SERVICE_NAME"; then
+            _success "realm 已成功启动"
+            return 0
+        fi
+        _error_no_exit "realm 启动失败，请检查: systemctl status ${_REALM_SERVICE_NAME}"
+        return 1
+    fi
+
+    if _has_openrc; then
+        mkdir -p "$(dirname "$_REALM_LOG_FILE")"
+        cat > "$_REALM_OPENRC_SERVICE_FILE" <<EOF
+#!/sbin/openrc-run
+name="Realm"
+description="Realm Port Forwarding Service"
+
+command="${_REALM_BIN}"
+command_args="-c ${_REALM_CONFIG_FILE}"
+command_background=true
+pidfile="/run/${_REALM_SERVICE_NAME}.pid"
+output_log="${_REALM_LOG_FILE}"
+error_log="${_REALM_ERR_FILE}"
+
+depend() {
+    need net
+}
+EOF
+        chmod 0755 "$_REALM_OPENRC_SERVICE_FILE" || {
+            _error_no_exit "写入 OpenRC 服务文件失败: ${_REALM_OPENRC_SERVICE_FILE}"
+            return 1
+        }
+        if ! rc-update add "$_REALM_SERVICE_NAME" default >/dev/null 2>&1; then
+            if ! _openrc_service_in_default "$_REALM_SERVICE_NAME"; then
+                _error_no_exit "设置 realm 开机自启失败"
+                return 1
+            fi
+        fi
+        if ! rc-service "$_REALM_SERVICE_NAME" restart >/dev/null 2>&1; then
+            if ! rc-service "$_REALM_SERVICE_NAME" start >/dev/null 2>&1; then
+                _error_no_exit "realm 启动失败，请检查: rc-service ${_REALM_SERVICE_NAME} status"
+                return 1
+            fi
+        fi
+        sleep 1
+        if _realm_service_is_active; then
+            _success "realm 已成功启动"
+            return 0
+        fi
+        _error_no_exit "realm 启动失败，请检查: rc-service ${_REALM_SERVICE_NAME} status"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$_REALM_LOG_FILE")"
+    pkill -x realm >/dev/null 2>&1 || pkill realm >/dev/null 2>&1 || true
+    nohup "$_REALM_BIN" -c "$_REALM_CONFIG_FILE" >>"$_REALM_LOG_FILE" 2>>"$_REALM_ERR_FILE" &
+    sleep 1
+    if _realm_running_pid >/dev/null 2>&1; then
+        _success "realm 已成功启动 (非 systemd/OpenRC 模式)"
+        return 0
+    fi
+    _error_no_exit "realm 启动失败"
+    return 1
+}
+
+_realm_restart() {
+    _header "Realm 重启"
+
+    if [[ ! -x "$_REALM_BIN" ]]; then
+        _error_no_exit "未检测到 realm，请先安装"
+        _press_any_key
+        return
+    fi
+
+    if _realm_systemd_service_configured; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if ! systemctl restart "$_REALM_SERVICE_NAME"; then
+            _error_no_exit "realm 重启失败，请检查: systemctl status ${_REALM_SERVICE_NAME}"
+            _press_any_key
+            return
+        fi
+        sleep 1
+        if systemctl is-active --quiet "$_REALM_SERVICE_NAME"; then
+            _success "realm 已成功重启"
+        else
+            _error_no_exit "realm 重启失败，请检查: systemctl status ${_REALM_SERVICE_NAME}"
+        fi
+    elif _realm_openrc_service_configured; then
+        if ! rc-service "$_REALM_SERVICE_NAME" restart >/dev/null 2>&1; then
+            if ! rc-service "$_REALM_SERVICE_NAME" start >/dev/null 2>&1; then
+                _error_no_exit "realm 重启失败，请检查: rc-service ${_REALM_SERVICE_NAME} status"
+                _press_any_key
+                return
+            fi
+        fi
+        sleep 1
+        if _realm_service_is_active; then
+            _success "realm 已成功重启"
+        else
+            _error_no_exit "realm 重启失败，请检查: rc-service ${_REALM_SERVICE_NAME} status"
+        fi
+    else
+        local pid
+        pid=$(_realm_running_pid 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+        if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
+            _error_no_exit "未找到配置文件: ${_REALM_CONFIG_FILE}"
+            _press_any_key
+            return
+        fi
+        mkdir -p "$(dirname "$_REALM_LOG_FILE")"
+        nohup "$_REALM_BIN" -c "$_REALM_CONFIG_FILE" >>"$_REALM_LOG_FILE" 2>>"$_REALM_ERR_FILE" &
+        sleep 1
+        if _realm_running_pid >/dev/null 2>&1; then
+            _success "realm 已成功启动"
+        else
+            _error_no_exit "realm 启动失败"
+        fi
+    fi
+    _press_any_key
+}
+
+_realm_status() {
+    _header "Realm 运行状态"
+
+    if _realm_systemd_service_configured; then
+        echo ""
+        systemctl status "$_REALM_SERVICE_NAME" --no-pager
+    elif _realm_openrc_service_configured; then
+        echo ""
+        rc-service "$_REALM_SERVICE_NAME" status || true
+    else
+        local pid
+        pid=$(_realm_running_pid 2>/dev/null || true)
+        echo ""
+        if [[ -n "$pid" ]]; then
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: %s)\n" "$pid"
+        else
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
+        fi
+        if [[ -f "$_REALM_CONFIG_FILE" ]]; then
+            _info "配置文件: $_REALM_CONFIG_FILE"
+            echo ""
+            _realm_list_rules
+        fi
+    fi
+    _press_any_key
+}
+
+_realm_log() {
+    _header "Realm 日志"
+
+    if _realm_systemd_service_configured; then
+        _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
+        _separator
+        echo ""
+        journalctl -u "$_REALM_SERVICE_NAME" --no-pager -n 50
+        echo ""
+        _separator
+        local follow
+        read -rp "  实时跟踪日志? [y/N]: " follow
+        if [[ "$follow" =~ ^[Yy] ]]; then
+            journalctl -u "$_REALM_SERVICE_NAME" -f
+        fi
+    else
+        if ! _tail_log_files_interactive "realm" "$_REALM_LOG_FILE" "$_REALM_ERR_FILE" "rc-service ${_REALM_SERVICE_NAME} status"; then
+            _warn "realm 当前未使用 systemd 管理，且未检测到日志文件"
+        fi
+    fi
+    _press_any_key
+}
+
+_realm_uninstall() {
+    _header "Realm 卸载"
+
+    local confirm remove_config removed_count=0
+
+    _warn "将停止并卸载 Realm，可删除配置目录。"
+    printf "    systemd 服务文件: %s\n" "$_REALM_SYSTEMD_SERVICE_FILE"
+    printf "    OpenRC 服务文件 : %s\n" "$_REALM_OPENRC_SERVICE_FILE"
+    printf "    可执行文件: %s\n" "$_REALM_BIN"
+    printf "    配置目录: %s\n" "$_REALM_CONFIG_DIR"
+    read -rp "  确认卸载 Realm? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    if _has_systemd; then
+        systemctl stop "$_REALM_SERVICE_NAME" >/dev/null 2>&1 || true
+        systemctl disable "$_REALM_SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+    if _has_openrc; then
+        rc-service "$_REALM_SERVICE_NAME" stop >/dev/null 2>&1 || true
+        rc-update del "$_REALM_SERVICE_NAME" default >/dev/null 2>&1 || true
+    fi
+    pkill -x realm >/dev/null 2>&1 || pkill realm >/dev/null 2>&1 || true
+
+    if [[ -f "$_REALM_SYSTEMD_SERVICE_FILE" ]]; then
+        rm -f "$_REALM_SYSTEMD_SERVICE_FILE"
+        removed_count=$((removed_count + 1))
+    fi
+    if [[ -f "$_REALM_OPENRC_SERVICE_FILE" ]]; then
+        rm -f "$_REALM_OPENRC_SERVICE_FILE"
+        removed_count=$((removed_count + 1))
+    fi
+    if _has_systemd; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed "$_REALM_SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+
+    if [[ -f "$_REALM_BIN" || -L "$_REALM_BIN" ]]; then
+        rm -f "$_REALM_BIN"
+        removed_count=$((removed_count + 1))
+    fi
+
+    if [[ -f "$_REALM_LOG_FILE" || -f "$_REALM_ERR_FILE" ]]; then
+        rm -f "$_REALM_LOG_FILE" "$_REALM_ERR_FILE"
+        removed_count=$((removed_count + 1))
+    fi
+
+    if [[ -d "$_REALM_CONFIG_DIR" ]]; then
+        read -rp "  同时删除配置目录 ${_REALM_CONFIG_DIR}? [y/N]: " remove_config
+        if [[ "$remove_config" =~ ^[Yy] ]]; then
+            rm -rf "$_REALM_CONFIG_DIR"
+            removed_count=$((removed_count + 1))
+        fi
+    fi
+
+    if (( removed_count == 0 )); then
+        _warn "未检测到可删除的 Realm 文件，已完成服务清理。"
+    else
+        _success "Realm 卸载完成"
+    fi
+    _press_any_key
+}
+
+# ---- Realm 规则查看 ----
+
+_realm_list_rules() {
+    if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
+        _info "暂无转发规则"
+        return
+    fi
+
+    local count=0 l r
+    printf "  ${BOLD}当前转发规则${PLAIN}\n"
+    _separator
+    while IFS=$'\x1f' read -r l r; do
+        [[ -z "$l" ]] && continue
+        printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$l" "$r"
+        ((count++))
+    done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+
+    if (( count == 0 )); then
+        _info "暂无转发规则"
+    else
+        _info "共 ${count} 条规则"
+    fi
+}
+
+_realm_auto_restart_if_active() {
+    if ! _realm_service_is_active; then
+        return 0
+    fi
+    _info "检测到 realm 正在运行，自动重启以应用更改..."
+    if _realm_systemd_service_configured; then
+        systemctl restart "$_REALM_SERVICE_NAME" >/dev/null 2>&1 || true
+    elif _realm_openrc_service_configured; then
+        rc-service "$_REALM_SERVICE_NAME" restart >/dev/null 2>&1 || true
+    else
+        local pid
+        pid=$(_realm_running_pid 2>/dev/null || true)
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+        sleep 1
+        nohup "$_REALM_BIN" -c "$_REALM_CONFIG_FILE" >>"$_REALM_LOG_FILE" 2>>"$_REALM_ERR_FILE" &
+    fi
+    sleep 1
+    if _realm_service_is_active; then
+        _success "realm 已重启，更改已生效"
+    else
+        _warn "realm 重启可能失败，请手动检查"
+    fi
+}
+
+# ---- Realm 规则管理 UI ----
+
+_realm_add_rule() {
+    _header "添加转发规则"
+
+    local listen_input listen_port listen_addr remote_host remote_port
+    local listen_value remote_value rc
+
+    _info "配置监听端 → 转发目标"
+    echo ""
+
+    listen_port=$(_realm_pick_listen_port "8000")
+
+    read -rp "  监听地址 [默认 0.0.0.0，IPv6 使用 ::]: " listen_input
+    listen_addr=$(_mihomoconf_trim "${listen_input:-0.0.0.0}")
+    if [[ -z "$listen_addr" ]]; then
+        _error_no_exit "监听地址不能为空"
+        _press_any_key
+        return
+    fi
+
+    if [[ "$listen_addr" == *:* ]]; then
+        listen_value="[${listen_addr}]:${listen_port}"
+    else
+        listen_value="${listen_addr}:${listen_port}"
+    fi
+
+    while true; do
+        read -rp "  转发目标 IP/域名: " remote_host
+        remote_host=$(_mihomoconf_trim "${remote_host:-}")
+        if [[ -z "$remote_host" ]]; then
+            _warn "转发目标不能为空"
+            continue
+        fi
+        break
+    done
+
+    while true; do
+        read -rp "  转发目标端口 [1-65535]: " remote_port
+        remote_port=$(_mihomoconf_trim "${remote_port:-}")
+        if ! _is_valid_port "$remote_port"; then
+            _warn "端口无效，请输入 1-65535 的数字"
+            continue
+        fi
+        break
+    done
+
+    if [[ "$remote_host" == *:* ]]; then
+        remote_value="[${remote_host}]:${remote_port}"
+    else
+        remote_value="${remote_host}:${remote_port}"
+    fi
+
+    _realm_add_endpoint_to_config "$listen_value" "$remote_value"
+    rc=$?
+    if [[ $rc -eq 2 ]]; then
+        _error_no_exit "监听地址 ${listen_value} 已存在，请先删除旧规则"
+        _press_any_key
+        return
+    elif [[ $rc -ne 0 ]]; then
+        _error_no_exit "写入配置失败"
+        _press_any_key
+        return
+    fi
+
+    _success "转发规则已添加: ${listen_value} → ${remote_value}"
+    _realm_auto_restart_if_active
+    _press_any_key
+}
+
+_realm_delete_rule() {
+    _header "删除转发规则"
+
+    if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
+        _info "暂无转发规则"
+        _press_any_key
+        return
+    fi
+
+    _realm_list_rules
+    echo ""
+
+    local count=0 l r
+    while IFS=$'\x1f' read -r l r; do
+        [[ -z "$l" ]] && continue
+        ((count++))
+    done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+
+    if (( count == 0 )); then
+        _press_any_key
+        return
+    fi
+
+    local index
+    read -rp "  输入要删除的规则编号 [0-$((count - 1))，或按 Enter 取消]: " index
+    if [[ -z "${index:-}" ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+    if ! _is_digit "${index:-}" || (( index < 0 || index >= count )); then
+        _error_no_exit "无效的编号"
+        _press_any_key
+        return
+    fi
+
+    _realm_delete_endpoint_from_config "$index"
+    _success "规则已删除"
+    _realm_auto_restart_if_active
+    _press_any_key
+}
+
+_realm_view_rules() {
+    _header "查看转发规则"
+    echo ""
+    _realm_list_rules
+    echo ""
+
+    if _realm_service_is_active; then
+        _success "Realm 服务状态: 运行中"
+    else
+        _warn "Realm 服务状态: 未运行"
+    fi
+    _press_any_key
+}
+
+_realm_configure() {
+    _header "Realm 转发规则管理"
+
+    if [[ ! -x "$_REALM_BIN" ]]; then
+        local install_confirm
+        read -rp "  未检测到 realm，先安装? [Y/n]: " install_confirm
+        if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
+            _info "已取消"
+            _press_any_key
+            return
+        fi
+        _time_sync_check_and_enable
+        if ! _realm_install_latest_core; then
+            _press_any_key
+            return
+        fi
+    fi
+
+    while true; do
+        _header "Realm 转发规则管理"
+        echo ""
+
+        if [[ -f "$_REALM_CONFIG_FILE" ]]; then
+            _realm_list_rules
+        else
+            _info "暂无转发规则，配置文件未创建"
+        fi
+
+        echo ""
+        _separator
+        _menu_item "1" "添加转发规则" "监听端口 → 目标地址" "green"
+        _menu_item "2" "删除转发规则" "" "yellow"
+        _menu_item "3" "启动/重启 Realm" "启用服务" "green"
+        _menu_item "0" "返回" "" "red"
+        _separator
+
+        local ch
+        read -rp "  选择 [0-3]: " ch
+        case "$ch" in
+            1) _realm_add_rule ;;
+            2) _realm_delete_rule ;;
+            3) _realm_enable_now ; _press_any_key ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
+_realm_manage() {
+    while true; do
+        _header "Realm 端口转发管理"
+        echo ""
+
+        if [[ -x "$_REALM_BIN" ]]; then
+            local ver
+            ver=$(_realm_bin_version)
+            [[ -n "$ver" ]] && _info "当前版本: ${ver}" || _info "当前已安装 realm"
+        else
+            _info "当前未安装 realm"
+        fi
+        if [[ -f "$_REALM_CONFIG_FILE" ]]; then
+            local rule_count=0 l r
+            while IFS=$'\x1f' read -r l r; do
+                [[ -z "$l" ]] && continue
+                ((rule_count++))
+            done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+            _info "配置文件: ${_REALM_CONFIG_FILE} (${rule_count} 条规则)"
+        fi
+        if _realm_service_is_active; then
+            _info "服务状态: ${GREEN}运行中${PLAIN}"
+        fi
+
+        _separator
+        _menu_pair "1" "安装/更新 Realm" "下载二进制" "green" "2" "管理转发规则" "添加/删除规则" "green"
+        _menu_pair "3" "查看转发规则" "规则列表" "green" "4" "重启 Realm" "" "green"
+        _menu_pair "5" "查看状态" "" "green" "6" "查看日志" "" "green"
+        _menu_item "7" "卸载 Realm" "停止并清理" "yellow"
+        _menu_item "0" "返回上级菜单" "" "red"
+        _separator
+
+        local ch
+        read -rp "  选择 [0-7]: " ch
+        case "$ch" in
+            1) _realm_install_or_update ;;
+            2) _realm_configure ;;
+            3) _realm_view_rules ;;
+            4) _realm_restart ;;
+            5) _realm_status ;;
+            6) _realm_log ;;
+            7) _realm_uninstall ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- 13. Shadowsocks-Rust 管理 ---
 
 _SSRUST_CONFIG_DIR="/etc/shadowsocks-rust"
 _SSRUST_CONFIG_FILE="/etc/shadowsocks-rust/config.json"
@@ -13653,7 +14617,7 @@ _ssrust_manage() {
     done
 }
 
-# --- 13. WireGuard 原生节点 ---
+# --- 14. WireGuard 原生节点 ---
 
 _WIREGUARD_DIR="/etc/wireguard"
 _WIREGUARD_CLIENT_DIR="/etc/wireguard/clients"
@@ -15335,7 +16299,7 @@ _acme_manage() {
     done
 }
 
-# --- 14. Akile DNS 解锁检测与配置 ---
+# --- 15. Akile DNS 解锁检测与配置 ---
 
 _akdns_install_deps() {
     local need_install=0
@@ -15514,7 +16478,7 @@ _akdns_setup() {
     _press_any_key
 }
 
-# --- 15. Linux DNS 管理 ---
+# --- 16. Linux DNS 管理 ---
 
 _DNS_SERVERS=()
 _DNS_V4_SERVERS=()
@@ -16358,7 +17322,7 @@ _dns_manage() {
     done
 }
 
-# --- 16. Swap 管理 ---
+# --- 17. Swap 管理 ---
 
 _swap_human_readable() {
     local bytes=$1
@@ -17196,18 +18160,20 @@ _proxy_tools_menu() {
         _header "代理工具"
         _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
         _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
-        _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "ACME 证书" "申请/续期证书" "green"
+        _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "Realm 转发" "端口转发管理" "green"
+        _menu_item "7" "ACME 证书" "申请/续期证书" "green"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
         local ch
-        read -rp "  选择 [0-6]: " ch
+        read -rp "  选择 [0-7]: " ch
         case "$ch" in
             1) _mihomo_manage ;;
             2) _singbox_manage ;;
             3) _snell_manage ;;
             4) _wireguard_manage ;;
             5) _ssrust_manage ;;
-            6) _acme_manage ;;
+            6) _realm_manage ;;
+            7) _acme_manage ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
