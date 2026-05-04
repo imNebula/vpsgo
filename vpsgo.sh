@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.45"
+VERSION="2.46"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -703,6 +703,56 @@ _is_alpine() {
         . /etc/os-release
         [[ "${ID:-}" == "alpine" ]]
     )
+}
+
+# ── Cron abstraction (Alpine busybox crond vs vixie-cron /etc/cron.d) ──
+
+# Write a named daily cron job. On Alpine uses /etc/crontabs/root
+# (no username field, no per-file env vars); elsewhere /etc/cron.d/<name>.
+_cron_job_write() {
+    local name="$1" minute="$2" hour="$3" cmd="$4"
+    if _is_alpine; then
+        mkdir -p /etc/crontabs
+        _cron_job_remove "$name"
+        echo "${minute} ${hour} * * * TZ=Asia/Shanghai ${cmd}  # ${name}" >> /etc/crontabs/root
+    else
+        mkdir -p /etc/cron.d
+        cat > "/etc/cron.d/${name}" <<EOF
+# Managed by VPSGo. Runs by Beijing time.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+${minute} ${hour} * * * root ${cmd}
+EOF
+        chmod 0644 "/etc/cron.d/${name}"
+    fi
+}
+
+_cron_job_remove() {
+    local name="$1"
+    if _is_alpine; then
+        sed -i "/# ${name}$/d" /etc/crontabs/root 2>/dev/null || true
+    else
+        rm -f "/etc/cron.d/${name}"
+    fi
+}
+
+_cron_job_exists() {
+    local name="$1"
+    if _is_alpine; then
+        [ -f /etc/crontabs/root ] && grep -q "# ${name}$" /etc/crontabs/root 2>/dev/null
+    else
+        [ -f "/etc/cron.d/${name}" ]
+    fi
+}
+
+_cron_job_show() {
+    local name="$1"
+    if _is_alpine; then
+        grep "# ${name}$" /etc/crontabs/root 2>/dev/null || true
+    else
+        cat "/etc/cron.d/${name}" 2>/dev/null || true
+    fi
 }
 
 _has_systemd() {
@@ -1824,14 +1874,7 @@ _warp_configure_refresh_cron() {
     minute=$((10#$minute))
 
     _warp_write_refresh_script "$mode" "$ip_choice" "$region" "$max_minutes"
-    cat > "$_WARP_REFRESH_CRON" <<EOF
-# Managed by VPSGo. Runs by Beijing time.
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-CRON_TZ=Asia/Shanghai
-${minute} ${hour} * * * root ${_WARP_REFRESH_SCRIPT}
-EOF
-    chmod 0644 "$_WARP_REFRESH_CRON"
+    _cron_job_write "vpsgo-warp-refresh" "$minute" "$hour" "$_WARP_REFRESH_SCRIPT"
 
     _restart_first_available_service cron crond >/dev/null 2>&1 || true
 
@@ -1847,10 +1890,10 @@ EOF
 _warp_show_refresh_cron() {
     _header "WARP 定时刷新状态"
 
-    if [ -f "$_WARP_REFRESH_CRON" ]; then
+    if _cron_job_exists "vpsgo-warp-refresh"; then
         printf "  ${BOLD}Cron 配置${PLAIN}\n"
         _separator
-        sed 's/^/    /' "$_WARP_REFRESH_CRON"
+        _cron_job_show "vpsgo-warp-refresh" | sed 's/^/    /'
     else
         _warn "未检测到 WARP 定时刷新配置。"
     fi
@@ -1871,7 +1914,7 @@ _warp_show_refresh_cron() {
 _warp_remove_refresh_cron() {
     _header "删除 WARP 定时刷新"
 
-    if [ ! -f "$_WARP_REFRESH_CRON" ] && [ ! -f "$_WARP_REFRESH_SCRIPT" ]; then
+    if ! _cron_job_exists "vpsgo-warp-refresh" && [ ! -f "$_WARP_REFRESH_SCRIPT" ]; then
         _info "未检测到 WARP 定时刷新配置。"
         _press_any_key
         return
@@ -1885,7 +1928,8 @@ _warp_remove_refresh_cron() {
         return
     fi
 
-    rm -f "$_WARP_REFRESH_CRON" "$_WARP_REFRESH_SCRIPT"
+    _cron_job_remove "vpsgo-warp-refresh"
+    rm -f "$_WARP_REFRESH_SCRIPT"
     _restart_first_available_service cron crond >/dev/null 2>&1 || true
     _success "已删除 WARP 定时刷新配置。"
     _press_any_key
@@ -3824,14 +3868,7 @@ _mihomo_configure_auto_update_cron() {
     minute=$((10#$minute))
 
     _mihomo_write_auto_update_script
-    cat > "$_MIHOMO_AUTO_UPDATE_CRON" <<EOF
-# Managed by VPSGo. Runs by Beijing time.
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-CRON_TZ=Asia/Shanghai
-${minute} ${hour} * * * root ${_MIHOMO_AUTO_UPDATE_SCRIPT}
-EOF
-    chmod 0644 "$_MIHOMO_AUTO_UPDATE_CRON"
+    _cron_job_write "vpsgo-mihomo-auto-update" "$minute" "$hour" "$_MIHOMO_AUTO_UPDATE_SCRIPT"
     _restart_first_available_service cron crond >/dev/null 2>&1 || true
 
     echo ""
@@ -3848,10 +3885,10 @@ EOF
 _mihomo_show_auto_update_cron() {
     _header "Mihomo 定时自动更新状态"
 
-    if [ -f "$_MIHOMO_AUTO_UPDATE_CRON" ]; then
+    if _cron_job_exists "vpsgo-mihomo-auto-update"; then
         printf "  ${BOLD}Cron 配置${PLAIN}\n"
         _separator
-        sed 's/^/    /' "$_MIHOMO_AUTO_UPDATE_CRON"
+        _cron_job_show "vpsgo-mihomo-auto-update" | sed 's/^/    /'
     else
         _warn "未检测到 Mihomo 定时自动更新配置。"
     fi
@@ -3872,7 +3909,7 @@ _mihomo_show_auto_update_cron() {
 _mihomo_remove_auto_update_cron() {
     _header "删除 Mihomo 定时自动更新"
 
-    if [ ! -f "$_MIHOMO_AUTO_UPDATE_CRON" ] && [ ! -f "$_MIHOMO_AUTO_UPDATE_SCRIPT" ]; then
+    if ! _cron_job_exists "vpsgo-mihomo-auto-update" && [ ! -f "$_MIHOMO_AUTO_UPDATE_SCRIPT" ]; then
         _info "未检测到 Mihomo 定时自动更新配置。"
         _press_any_key
         return
@@ -3886,7 +3923,8 @@ _mihomo_remove_auto_update_cron() {
         return
     fi
 
-    rm -f "$_MIHOMO_AUTO_UPDATE_CRON" "$_MIHOMO_AUTO_UPDATE_SCRIPT"
+    _cron_job_remove "vpsgo-mihomo-auto-update"
+    rm -f "$_MIHOMO_AUTO_UPDATE_SCRIPT"
     _restart_first_available_service cron crond >/dev/null 2>&1 || true
     _success "已删除 Mihomo 定时自动更新配置。"
     _press_any_key
@@ -3895,7 +3933,7 @@ _mihomo_remove_auto_update_cron() {
 _mihomo_auto_update_manage() {
     while true; do
         _header "Mihomo 定时自动更新"
-        if [ -f "$_MIHOMO_AUTO_UPDATE_CRON" ]; then
+        if _cron_job_exists "vpsgo-mihomo-auto-update"; then
             _info "当前状态: 已配置"
         else
             _info "当前状态: 未配置"
@@ -7112,8 +7150,9 @@ _mihomo_uninstall() {
         removed_count=$((removed_count + 1))
         _info "已删除服务文件: $openrc_service_file"
     fi
-    if [[ -f "$_MIHOMO_AUTO_UPDATE_CRON" || -f "$_MIHOMO_AUTO_UPDATE_SCRIPT" ]]; then
-        rm -f "$_MIHOMO_AUTO_UPDATE_CRON" "$_MIHOMO_AUTO_UPDATE_SCRIPT"
+    if _cron_job_exists "vpsgo-mihomo-auto-update" || [[ -f "$_MIHOMO_AUTO_UPDATE_SCRIPT" ]]; then
+        _cron_job_remove "vpsgo-mihomo-auto-update"
+        rm -f "$_MIHOMO_AUTO_UPDATE_SCRIPT"
         removed_count=$((removed_count + 1))
         _info "已删除定时自动更新配置"
         _restart_first_available_service cron crond >/dev/null 2>&1 || true
