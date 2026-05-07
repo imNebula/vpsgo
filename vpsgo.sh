@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.49"
+VERSION="2.50"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -7300,10 +7300,10 @@ _mihomo_read_config() {
         return
     fi
 
-    read -rp "  输出模式: 1) 完整信息  2) 仅分享链接 [默认 1]: " output_mode_answer
-    case "${output_mode_answer:-1}" in
+    read -rp "  输出模式: 1) 完整信息  2) 仅分享链接 [默认 2]: " output_mode_answer
+    case "${output_mode_answer:-2}" in
         2) OUTPUT_LINK_ONLY="1" ;;
-        1|"") OUTPUT_LINK_ONLY="0" ;;
+        1) OUTPUT_LINK_ONLY="0" ;;
         *)
             _error_no_exit "输入格式错误：请输入 1 或 2"
             _press_any_key
