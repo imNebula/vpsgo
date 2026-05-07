@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.48"
+VERSION="2.49"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -7285,6 +7285,7 @@ _mihomo_read_config() {
     local SS_EXPORT_UDP_BOOL="true" SS_EXPORT_UOT_BOOL="false"
     local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
     local GEO_LOOKUP_IP=""
+    local OUTPUT_LINK_ONLY="0" output_mode_answer
 
     if [[ ! -f "$config_file" ]]; then
         _error_no_exit "未找到配置文件: ${config_file}"
@@ -7299,25 +7300,40 @@ _mihomo_read_config() {
         return
     fi
 
-    _info "配置文件: ${config_file}"
-    _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2 / Tuic) 与 proxies(WireGuard Beta)"
+    read -rp "  输出模式: 1) 完整信息  2) 仅分享链接 [默认 1]: " output_mode_answer
+    case "${output_mode_answer:-1}" in
+        2) OUTPUT_LINK_ONLY="1" ;;
+        1|"") OUTPUT_LINK_ONLY="0" ;;
+        *)
+            _error_no_exit "输入格式错误：请输入 1 或 2"
+            _press_any_key
+            return
+            ;;
+    esac
+
+    if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
+        _info "配置文件: ${config_file}"
+        _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2 / Tuic) 与 proxies(WireGuard Beta)"
+    fi
     saved_host=$(_mihomoconf_get_saved_host "$config_file")
     if [[ -n "$saved_host" ]]; then
         server_ip="$saved_host"
-        _info "导出 Host(配置中): ${server_ip}"
+        [[ "$OUTPUT_LINK_ONLY" != "1" ]] && _info "导出 Host(配置中): ${server_ip}"
     else
         server_ip=$(_mihomoconf_get_server_ip)
-        _info "导出 Host(公网IP): ${server_ip}"
+        [[ "$OUTPUT_LINK_ONLY" != "1" ]] && _info "导出 Host(公网IP): ${server_ip}"
     fi
     GEO_LOOKUP_IP="$server_ip"
     if [[ ! "$GEO_LOOKUP_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         GEO_LOOKUP_IP=$(_mihomoconf_get_server_ip)
     fi
     IFS=$'\x1f' read -r NODE_COUNTRY NODE_CITY NODE_COUNTRY_CODE NODE_FLAG < <(_mihomoconf_get_geo_profile "$GEO_LOOKUP_IP")
-    if [[ -n "$NODE_CITY" ]]; then
-        _info "地区识别: ${NODE_COUNTRY} ${NODE_CITY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
-    else
-        _info "地区识别: ${NODE_COUNTRY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
+        if [[ -n "$NODE_CITY" ]]; then
+            _info "地区识别: ${NODE_COUNTRY} ${NODE_CITY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+        else
+            _info "地区识别: ${NODE_COUNTRY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+        fi
     fi
 
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
@@ -7371,13 +7387,16 @@ _mihomo_read_config() {
                 listener_export=$((listener_export + 1))
                 ss_name="$(_mihomoconf_make_node_name "SS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${ss_user_name}"
                 ss_link=$(_mihomoconf_gen_ss_link "$server_ip" "$port" "$cipher" "$password" "$ss_name" "$SS_EXPORT_UDP" "$SS_EXPORT_UOT")
-                _separator
-                printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$ss_name"
-                printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
-                printf "    用户: ${GREEN}%s${PLAIN}\n" "$ss_user_name"
-                printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_link"
-                printf "    JSON:\n"
-                cat <<MIHOMO_SS2022_JSON
+                if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                    printf "%s\n" "$ss_link"
+                else
+                    _separator
+                    printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$ss_name"
+                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$ss_user_name"
+                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_link"
+                    printf "    JSON:\n"
+                    cat <<MIHOMO_SS2022_JSON
     {
       "type": "shadowsocks",
       "tag": "${ss_name}",
@@ -7389,6 +7408,7 @@ _mihomo_read_config() {
       "udp_over_tcp": { "enabled": ${SS_EXPORT_UOT_BOOL}, "version": 2 }
     }
 MIHOMO_SS2022_JSON
+                fi
                 ;;
             anytls)
                 if [[ -z "$port" ]]; then
@@ -7403,14 +7423,17 @@ MIHOMO_SS2022_JSON
                     listener_export=$((listener_export + 1))
                     anytls_name="$(_mihomoconf_make_node_name "AnyTLS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${anytls_user}"
                     anytls_link=$(_mihomoconf_gen_anytls_link "$server_ip" "$port" "$anytls_pass" "$anytls_name" "$sni")
-                    _separator
-                    printf "  ${BOLD}[AnyTLS] %s${PLAIN}\n" "$anytls_name"
-                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
-                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$anytls_user"
-                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$anytls_link"
-                    [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
-                    printf "    JSON:\n"
-                    cat <<MIHOMO_ANYTLS_JSON
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$anytls_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[AnyTLS] %s${PLAIN}\n" "$anytls_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$anytls_user"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$anytls_link"
+                        [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
+                        printf "    JSON:\n"
+                        cat <<MIHOMO_ANYTLS_JSON
     {
       "type": "anytls",
       "tag": "${anytls_name}",
@@ -7422,6 +7445,7 @@ MIHOMO_SS2022_JSON
       "tfo": true
     }
 MIHOMO_ANYTLS_JSON
+                    fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$anytls_found" -eq 0 ]]; then
                     _warn "跳过 ${name}: 未配置可用 user"
@@ -7442,17 +7466,20 @@ MIHOMO_ANYTLS_JSON
                     listener_export=$((listener_export + 1))
                     vless_name="$(_mihomoconf_make_node_name "VLESS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
                     vless_link=$(_mihomoconf_gen_vless_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$sni" "$vless_public_key" "$vless_short_id" "$vless_flow_value" "$vless_fp_value")
-                    _separator
-                    printf "  ${BOLD}[VLESS Reality] %s${PLAIN}\n" "$vless_name"
-                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
-                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$vless_user"
-                    printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vless_uuid"
-                    printf "    伪造域名: ${GREEN}%s${PLAIN}\n" "$sni"
-                    printf "    Reality 公钥: ${GREEN}%s${PLAIN}\n" "$vless_public_key"
-                    printf "    Short ID: ${GREEN}%s${PLAIN}\n" "$vless_short_id"
-                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
-                    printf "    YAML:\n"
-                    cat <<MIHOMO_VLESS_YAML
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$vless_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[VLESS Reality] %s${PLAIN}\n" "$vless_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$vless_user"
+                        printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vless_uuid"
+                        printf "    伪造域名: ${GREEN}%s${PLAIN}\n" "$sni"
+                        printf "    Reality 公钥: ${GREEN}%s${PLAIN}\n" "$vless_public_key"
+                        printf "    Short ID: ${GREEN}%s${PLAIN}\n" "$vless_short_id"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_VLESS_YAML
     proxies:
       - name: "${vless_name}"
         type: vless
@@ -7469,6 +7496,7 @@ MIHOMO_ANYTLS_JSON
           public-key: "${vless_public_key}"
           short-id: "${vless_short_id}"
 MIHOMO_VLESS_YAML
+                    fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$vless_found" -eq 0 ]]; then
                     _warn "跳过 ${name}: 未配置可用 user"
@@ -7487,18 +7515,21 @@ MIHOMO_VLESS_YAML
                     listener_export=$((listener_export + 1))
                     hy2_name="$(_mihomoconf_make_node_name "HY2" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${hy2_user}"
                     hy2_link=$(_mihomoconf_gen_hy2_link "$server_ip" "$port" "$hy2_pass" "$hy2_name" "$sni" "${hy2_insecure:-0}" "$hy2_obfs" "$hy2_obfs_password" "$hy2_mport" "${hy2_congestion_control:-brutal}")
-                    _separator
-                    printf "  ${BOLD}[HY2] %s${PLAIN}\n" "$hy2_name"
-                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
-                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$hy2_user"
-                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$hy2_link"
-                    [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
-                    [[ -n "$hy2_mport" ]] && printf "    端口跳跃: ${GREEN}%s${PLAIN}\n" "$hy2_mport"
-                    [[ -n "$hy2_up" || -n "$hy2_down" ]] && printf "    up/down: ${GREEN}%s/%s Mbps${PLAIN}\n" "${hy2_up:-1000}" "${hy2_down:-1000}"
-                    [[ -n "$hy2_obfs" ]] && printf "    obfs: ${GREEN}%s${PLAIN}\n" "$hy2_obfs"
-                    [[ -n "$hy2_masquerade" ]] && printf "    masquerade: ${GREEN}%s${PLAIN}\n" "$hy2_masquerade"
-                    printf "    JSON:\n"
-                    cat <<MIHOMO_HY2_JSON
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$hy2_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[HY2] %s${PLAIN}\n" "$hy2_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$hy2_user"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$hy2_link"
+                        [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
+                        [[ -n "$hy2_mport" ]] && printf "    端口跳跃: ${GREEN}%s${PLAIN}\n" "$hy2_mport"
+                        [[ -n "$hy2_up" || -n "$hy2_down" ]] && printf "    up/down: ${GREEN}%s/%s Mbps${PLAIN}\n" "${hy2_up:-1000}" "${hy2_down:-1000}"
+                        [[ -n "$hy2_obfs" ]] && printf "    obfs: ${GREEN}%s${PLAIN}\n" "$hy2_obfs"
+                        [[ -n "$hy2_masquerade" ]] && printf "    masquerade: ${GREEN}%s${PLAIN}\n" "$hy2_masquerade"
+                        printf "    JSON:\n"
+                        cat <<MIHOMO_HY2_JSON
     {
       "type": "hysteria2",
       "tag": "${hy2_name}",
@@ -7515,6 +7546,7 @@ MIHOMO_VLESS_YAML
       "congestion_control": "${hy2_congestion_control:-brutal}"
     }
 MIHOMO_HY2_JSON
+                    fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$hy2_found" -eq 0 ]]; then
                     _warn "跳过 ${name}: 未配置可用 user"
@@ -7544,17 +7576,20 @@ MIHOMO_HY2_JSON
                     listener_export=$((listener_export + 1))
                     tuic_name="$(_mihomoconf_make_node_name "Tuic" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${tuic_display_name}"
                     tuic_link=$(_mihomoconf_gen_tuic_link "$server_ip" "$port" "$tuic_user_uuid" "$tuic_user_pass" "$tuic_name" "$sni" "$tuic_cc" "$tuic_alpn_val" "$tuic_urm")
-                    _separator
-                    printf "  ${BOLD}[Tuic] %s${PLAIN}\n" "$tuic_name"
-                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
-                    printf "    用户: ${GREEN}%s${PLAIN}\n" "$tuic_display_name"
-                    printf "    UUID: ${GREEN}%s${PLAIN}\n" "$tuic_user_uuid"
-                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$tuic_link"
-                    [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
-                    printf "    拥塞控制: ${GREEN}%s${PLAIN}\n" "$tuic_cc"
-                    printf "    ALPN: ${GREEN}%s${PLAIN}\n" "$tuic_alpn_val"
-                    printf "    链接 JSON:\n"
-                    cat <<MIHOMO_TUIC_JSON
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$tuic_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[Tuic] %s${PLAIN}\n" "$tuic_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$tuic_display_name"
+                        printf "    UUID: ${GREEN}%s${PLAIN}\n" "$tuic_user_uuid"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$tuic_link"
+                        [[ -n "$sni" ]] && printf "    SNI: ${GREEN}%s${PLAIN}\n" "$sni"
+                        printf "    拥塞控制: ${GREEN}%s${PLAIN}\n" "$tuic_cc"
+                        printf "    ALPN: ${GREEN}%s${PLAIN}\n" "$tuic_alpn_val"
+                        printf "    链接 JSON:\n"
+                        cat <<MIHOMO_TUIC_JSON
     {
       "type": "tuic",
       "tag": "${tuic_name}",
@@ -7568,6 +7603,7 @@ MIHOMO_HY2_JSON
       "udp_relay_mode": "${tuic_urm}"
     }
 MIHOMO_TUIC_JSON
+                    fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$tuic_found" -eq 0 ]]; then
                     _warn "跳过 ${name}: 未配置可用 user"
@@ -7591,6 +7627,7 @@ MIHOMO_TUIC_JSON
                     _warn "跳过 ${p_name}: wireguard(Beta) 字段不完整(server/port/ip/private-key/public-key)"
                     continue
                 fi
+                [[ "$OUTPUT_LINK_ONLY" == "1" ]] && continue
                 proxy_export=$((proxy_export + 1))
                 export_count=$((export_count + 1))
                 local wg_allowed_yaml
@@ -7639,15 +7676,17 @@ MIHOMO_WG_YAML2
         esac
     done < <(_mihomochain_read_proxy_rows "$config_file")
 
-    _separator
-    if [[ "$total_count" -eq 0 ]]; then
-        _warn "未在配置中检测到可读节点 (listeners/proxies)"
-    elif [[ "$export_count" -eq 0 ]]; then
-        _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/VLESS/SS2022/HY2/WireGuard(Beta) 节点"
-    else
-        _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
-        _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (WireGuard Beta)"
-        _info "总计: 读取 ${total_count}，导出 ${export_count}"
+    if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
+        _separator
+        if [[ "$total_count" -eq 0 ]]; then
+            _warn "未在配置中检测到可读节点 (listeners/proxies)"
+        elif [[ "$export_count" -eq 0 ]]; then
+            _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/VLESS/SS2022/HY2/WireGuard(Beta) 节点"
+        else
+            _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
+            _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (WireGuard Beta)"
+            _info "总计: 读取 ${total_count}，导出 ${export_count}"
+        fi
     fi
 
     _press_any_key
@@ -10291,7 +10330,7 @@ _mihomo_manage() {
         _separator
         _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
-        _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "" "green"
+        _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
         _menu_pair "7" "服务端链式代理" "入站绑定出站" "green" "8" "Gemini/Google IPv4" "定向规则" "green"
         _menu_pair "9" "定时自动更新" "检查新版本" "green" "10" "卸载 Mihomo" "停止并清理" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
