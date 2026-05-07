@@ -10049,11 +10049,23 @@ _mihomo_chain_proxy_manage() {
                 _separator
                 idx=0
                 listener_users=()
+                local -a tuic_usernames=()
+                local _tuname
+                while IFS= read -r _tuname; do
+                    [[ -n "${_tuname:-}" ]] && tuic_usernames+=("$_tuname")
+                done < <(_mihomoconf_read_tuic_usernames_by_tag "$config_file" "$user_listener_tag")
+                local _tuic_uidx=0 _display_name
                 while IFS=$'\x1f' read -r u_name u_pass; do
                     [[ -z "${u_name:-}" ]] && continue
                     listener_users+=("$u_name")
                     idx=$((idx + 1))
-                    printf "      [%d] %s\n" "$idx" "$u_name"
+                    if (( ${#tuic_usernames[@]} > 0 )); then
+                        _display_name="${tuic_usernames[$_tuic_uidx]:-${u_name:0:8}}"
+                        _tuic_uidx=$((_tuic_uidx + 1))
+                    else
+                        _display_name="$u_name"
+                    fi
+                    printf "      [%d] %s\n" "$idx" "$_display_name"
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$user_listener_tag")
                 if (( ${#listener_users[@]} == 0 )); then
                     _warn "该入站没有可用用户"
