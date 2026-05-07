@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.50"
+VERSION="2.53"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -4803,6 +4803,11 @@ _mihomoconf_is_valid_username() {
     [[ "$username" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
+_mihomoconf_is_valid_uuid() {
+    local uuid="$1"
+    [[ "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
 _mihomoconf_collect_users_input() {
     local label="$1"
     local forced_mode="${2:-}"
@@ -5317,6 +5322,187 @@ _mihomoconf_add_or_update_listener_user() {
                     print_item()
                 } else {
                     upsert_user()
+                    print_item()
+                }
+            } else {
+                print_item()
+            }
+            in_item=0
+            clear_item()
+        }
+        BEGIN {
+            in_listeners=0
+            in_item=0
+            matched=0
+            unsupported=0
+            changed=0
+            clear_item()
+        }
+        /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
+            if (in_listeners) flush_item()
+            in_listeners = ($0 ~ /^listeners:[[:space:]]*$/)
+            print
+            next
+        }
+        !in_listeners {
+            print
+            next
+        }
+        /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+            flush_item()
+            in_item=1
+            clear_item()
+            push_line($0)
+            next
+        }
+        in_item {
+            push_line($0)
+            next
+        }
+        { print }
+        END {
+            if (in_listeners) flush_item()
+            if (!matched) exit 2
+            if (unsupported) exit 3
+            if (!changed) exit 4
+        }
+    ' "$config_file" > "$tmp"
+    ec=$?
+    if [[ "$ec" -eq 0 ]]; then
+        mv "$tmp" "$config_file"
+        return 0
+    fi
+    rm -f "$tmp"
+    return "$ec"
+}
+
+_mihomoconf_add_tuic_listener_user() {
+    local config_file="$1" listener_tag="$2" display_name="$3" uuid="$4" password="$5"
+    local quoted_display quoted_uuid quoted_pass tmp ec
+
+    [[ -f "$config_file" ]] || return 1
+    [[ -n "$listener_tag" && -n "$display_name" && -n "$uuid" && -n "$password" ]] || return 1
+    _mihomoconf_is_valid_username "$display_name" || return 1
+    _mihomoconf_is_valid_uuid "$uuid" || return 1
+
+    quoted_display=$(_mihomochain_yaml_quote "$display_name")
+    quoted_uuid=$(_mihomochain_yaml_quote "$(printf '%s' "$uuid" | tr '[:upper:]' '[:lower:]')")
+    quoted_pass=$(_mihomochain_yaml_quote "$password")
+    tmp=$(mktemp)
+    awk -v target="$listener_tag" -v q_display="$quoted_display" -v q_uuid="$quoted_uuid" -v q_pass="$quoted_pass" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function lindent(s, p) {
+            p = match(s, /[^ ]/)
+            if (p == 0) return length(s)
+            return p - 1
+        }
+        function unquote(s) {
+            gsub(/^"/, "", s)
+            gsub(/"$/, "", s)
+            return s
+        }
+        function clear_item(   i) {
+            for (i in item_lines) delete item_lines[i]
+            line_count=0
+            item_name=""
+            item_tag=""
+            item_type=""
+        }
+        function push_line(line, raw) {
+            line_count++
+            item_lines[line_count]=line
+            if (line ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/) {
+                raw=line
+                sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", raw)
+                item_name=unquote(trim(raw))
+                if (item_tag == "") item_tag=item_name
+            } else if (line ~ /^[[:space:]]+tag:[[:space:]]*/) {
+                raw=line
+                sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
+                item_tag=unquote(trim(raw))
+            } else if (line ~ /^[[:space:]]+type:[[:space:]]*/) {
+                raw=line
+                sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
+                item_type=unquote(trim(raw))
+            }
+        }
+        function print_item(   i) {
+            for (i=1; i<=line_count; i++) print item_lines[i]
+        }
+        function upsert_tuic_user(   i, j, line, pos, key, users_idx, users_end, user_line, comment_line, curr_indent) {
+            users_idx=0
+            users_end=0
+            user_line=0
+            comment_line=0
+
+            for (i=1; i<=line_count; i++) {
+                if (item_lines[i] ~ /^[[:space:]]+users:[[:space:]]*$/) {
+                    users_idx=i
+                    users_end=i
+                    break
+                }
+            }
+
+            if (users_idx > 0) {
+                for (i=users_idx + 1; i<=line_count; i++) {
+                    curr_indent=lindent(item_lines[i])
+                    if (curr_indent <= 4) break
+                    users_end=i
+                    if (item_lines[i] ~ /^[[:space:]]+#[[:space:]]*vpsgo-tuic-username:/) {
+                        comment_line=i
+                    } else if (item_lines[i] ~ /^[[:space:]]+[^[:space:]#].*:/) {
+                        line=item_lines[i]
+                        sub(/^[[:space:]]+/, "", line)
+                        pos=index(line, ":")
+                        if (pos > 0) {
+                            key=unquote(trim(substr(line, 1, pos - 1)))
+                            if (tolower(key) == tolower(q_uuid)) {
+                                user_line=i
+                                break
+                            }
+                        }
+                    }
+                }
+                if (user_line > 0) {
+                    item_lines[user_line] = "      \"" q_uuid "\": \"" q_pass "\""
+                    if (comment_line == user_line - 1) {
+                        item_lines[comment_line] = "      # vpsgo-tuic-username: " q_display
+                    }
+                } else {
+                    for (j=line_count; j>=users_end + 1; j--) {
+                        item_lines[j + 2] = item_lines[j]
+                    }
+                    item_lines[users_end + 1] = "      # vpsgo-tuic-username: " q_display
+                    item_lines[users_end + 2] = "      \"" q_uuid "\": \"" q_pass "\""
+                    line_count += 2
+                }
+                changed=1
+                return
+            }
+
+            line_count++
+            item_lines[line_count] = "    users:"
+            line_count++
+            item_lines[line_count] = "      # vpsgo-tuic-username: " q_display
+            line_count++
+            item_lines[line_count] = "      \"" q_uuid "\": \"" q_pass "\""
+            changed=1
+        }
+        function flush_item(   resolved_tag) {
+            if (!in_item) return
+            resolved_tag=item_tag
+            if (resolved_tag == "") resolved_tag=item_name
+            if (resolved_tag == target || item_name == target) {
+                matched=1
+                if (item_type != "tuic") {
+                    unsupported=1
+                    print_item()
+                } else {
+                    upsert_tuic_user()
                     print_item()
                 }
             } else {
@@ -10128,11 +10314,13 @@ _mihomo_chain_proxy_manage() {
             7)
                 local add_listener_pick add_listener_tag add_listener_name add_listener_type
                 local add_listener_cipher
-                local add_username add_password add_overwrite add_result add_action
+                local add_mode add_username add_uuid add_password add_overwrite add_result add_action
+                local add_count add_prefix add_idx add_suffix add_attempt
                 local idx li user_count l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
                 local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
                 local u_name u_pass
+                local -a add_created_users=() add_created_uuids=() add_created_passwords=()
                 local -a add_listener_tags=() add_listener_names=() add_listener_types=() add_listener_ciphers=()
 
                 printf "  ${BOLD}可新增用户的入站节点:${PLAIN}\n"
@@ -10143,7 +10331,7 @@ _mihomo_chain_proxy_manage() {
                     l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint; do
                     [[ -z "${l_name:-}" ]] && continue
                     case "$l_type" in
-                        anytls|hysteria2|hy2) ;;
+                        anytls|hysteria2|hy2|tuic) ;;
                         *) continue ;;
                     esac
                     l_listener_tag="${l_listener_tag:-$l_name}"
@@ -10161,7 +10349,7 @@ _mihomo_chain_proxy_manage() {
                         "$idx" "$l_name" "$l_type" "${l_port:-N/A}" "$user_count"
                 done < <(_mihomoconf_read_listener_rows "$config_file")
                 if (( ${#add_listener_tags[@]} == 0 )); then
-                    _warn "未找到支持 users 的入站节点 (AnyTLS/HY2)"
+                    _warn "未找到支持 users 的入站节点 (AnyTLS/HY2/TUIC)"
                     _press_any_key
                     continue
                 fi
@@ -10184,56 +10372,156 @@ _mihomo_chain_proxy_manage() {
                 add_listener_type="${add_listener_types[$((li - 1))]}"
                 add_listener_cipher="${add_listener_ciphers[$((li - 1))]}"
 
-                read -rp "  新用户名: " add_username
-                add_username=$(_mihomoconf_trim "${add_username:-}")
-                if [[ -z "$add_username" ]]; then
-                    _error_no_exit "用户名不能为空"
-                    _press_any_key
-                    continue
-                fi
-                if ! _mihomoconf_is_valid_username "$add_username"; then
-                    _error_no_exit "用户名无效，仅支持字母/数字/.-_"
-                    _press_any_key
-                    continue
-                fi
+                printf "  ${BOLD}创建方式:${PLAIN}\n"
+                _menu_pair "1" "单个用户" "可指定用户名/密码" "green" "2" "快速批量生成" "指定数量自动生成" "green"
+                read -rp "  选择 [1/2，默认 1]: " add_mode
+                add_mode=$(_mihomoconf_trim "${add_mode:-1}")
+                case "$add_mode" in
+                    1|2) ;;
+                    *)
+                        _error_no_exit "无效选项，请输入 1 或 2"
+                        _press_any_key
+                        continue
+                        ;;
+                esac
 
-                add_action="新增"
-                if _mihomoconf_listener_has_user "$config_file" "$add_listener_tag" "$add_username"; then
-                    add_action="更新"
-                    read -rp "  用户已存在，将更新密码，继续? [Y/n]: " add_overwrite
-                    add_overwrite=$(_mihomoconf_trim "${add_overwrite:-Y}")
-                    if [[ "$add_overwrite" =~ ^[Nn]$ ]]; then
-                        _info "已取消"
+                if [[ "$add_mode" == "1" ]]; then
+                    read -rp "  新用户名: " add_username
+                    add_username=$(_mihomoconf_trim "${add_username:-}")
+                    if [[ -z "$add_username" ]]; then
+                        _error_no_exit "用户名不能为空"
                         _press_any_key
                         continue
                     fi
-                fi
-
-                read -rp "  用户密码 [留空自动生成]: " add_password
-                add_password=$(_mihomoconf_trim "${add_password:-}")
-                if [[ -z "$add_password" ]]; then
-                    if [[ "$add_listener_type" == "shadowsocks" ]]; then
-                        add_password=$(_mihomoconf_gen_ss_password_for_cipher "$add_listener_cipher")
-                    else
-                        add_password=$(_mihomoconf_gen_anytls_password)
+                    if ! _mihomoconf_is_valid_username "$add_username"; then
+                        _error_no_exit "用户名无效，仅支持字母/数字/.-_"
+                        _press_any_key
+                        continue
                     fi
-                    _info "已自动生成密码: ${add_password}"
+
+                    add_action="新增"
+                    if _mihomoconf_listener_has_user "$config_file" "$add_listener_tag" "$add_username"; then
+                        add_action="更新"
+                        read -rp "  用户已存在，将更新密码，继续? [Y/n]: " add_overwrite
+                        add_overwrite=$(_mihomoconf_trim "${add_overwrite:-Y}")
+                        if [[ "$add_overwrite" =~ ^[Nn]$ ]]; then
+                            _info "已取消"
+                            _press_any_key
+                            continue
+                        fi
+                    fi
+
+                    read -rp "  用户密码 [留空自动生成]: " add_password
+                    add_password=$(_mihomoconf_trim "${add_password:-}")
+                    if [[ -z "$add_password" ]]; then
+                        if [[ "$add_listener_type" == "shadowsocks" ]]; then
+                            add_password=$(_mihomoconf_gen_ss_password_for_cipher "$add_listener_cipher")
+                        else
+                            add_password=$(_mihomoconf_gen_anytls_password)
+                        fi
+                        _info "已自动生成密码: ${add_password}"
+                    fi
+
+                    add_uuid=""
+                    if [[ "$add_listener_type" == "tuic" ]]; then
+                        add_uuid=$(_mihomoconf_gen_uuid)
+                        _mihomoconf_add_tuic_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "$add_password"
+                    else
+                        _mihomoconf_add_or_update_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_password"
+                    fi
+                    add_result=$?
+                    if [[ "$add_result" -ne 0 ]]; then
+                        case "$add_result" in
+                            2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
+                            3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC）" ;;
+                            *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
+                        esac
+                        _press_any_key
+                        continue
+                    fi
+
+                    add_created_users+=("$add_username")
+                    add_created_uuids+=("$add_uuid")
+                    add_created_passwords+=("$add_password")
+                    _info "已${add_action}用户: ${add_listener_name}[user=${add_username}]"
+                else
+                    read -rp "  快速创建数量 [默认 1]: " add_count
+                    add_count=$(_mihomoconf_trim "${add_count:-1}")
+                    if ! _is_digit "$add_count" || [[ "$add_count" -le 0 ]]; then
+                        _error_no_exit "数量必须是正整数"
+                        _press_any_key
+                        continue
+                    fi
+                    read -rp "  用户名前缀 [默认 user]: " add_prefix
+                    add_prefix=$(_mihomoconf_trim "${add_prefix:-user}")
+                    if [[ -z "$add_prefix" ]] || ! _mihomoconf_is_valid_username "$add_prefix"; then
+                        _error_no_exit "用户名前缀无效，仅支持字母/数字/.-_"
+                        _press_any_key
+                        continue
+                    fi
+
+                    for ((add_idx=1; add_idx<=add_count; add_idx++)); do
+                        add_attempt=0
+                        while true; do
+                            add_attempt=$((add_attempt + 1))
+                            add_suffix=$(_mihomoconf_gen_uuid | cut -d'-' -f1)
+                            add_username="${add_prefix}-${add_idx}-${add_suffix}"
+                            if ! _mihomoconf_listener_has_user "$config_file" "$add_listener_tag" "$add_username"; then
+                                break
+                            fi
+                            if (( add_attempt >= 20 )); then
+                                _error_no_exit "生成唯一用户名失败，请更换前缀后重试"
+                                _press_any_key
+                                continue 3
+                            fi
+                        done
+
+                        if [[ "$add_listener_type" == "shadowsocks" ]]; then
+                            add_password=$(_mihomoconf_gen_ss_password_for_cipher "$add_listener_cipher")
+                        else
+                            add_password=$(_mihomoconf_gen_anytls_password)
+                        fi
+
+                        add_uuid=""
+                        if [[ "$add_listener_type" == "tuic" ]]; then
+                            add_uuid=$(_mihomoconf_gen_uuid)
+                            _mihomoconf_add_tuic_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "$add_password"
+                        else
+                            _mihomoconf_add_or_update_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_password"
+                        fi
+                        add_result=$?
+                        if [[ "$add_result" -ne 0 ]]; then
+                            case "$add_result" in
+                                2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
+                                3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC）" ;;
+                                *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
+                            esac
+                            _press_any_key
+                            continue 2
+                        fi
+
+                        add_created_users+=("$add_username")
+                        add_created_uuids+=("$add_uuid")
+                        add_created_passwords+=("$add_password")
+                    done
+
+                    _info "已批量新增 ${#add_created_users[@]} 个用户: ${add_listener_name}"
                 fi
 
-                _mihomoconf_add_or_update_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_password"
-                add_result=$?
-                if [[ "$add_result" -ne 0 ]]; then
-                    case "$add_result" in
-                        2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
-                        3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2）" ;;
-                        *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
-                    esac
-                    _press_any_key
-                    continue
+                if (( ${#add_created_users[@]} > 0 )); then
+                    printf "  ${BOLD}新增用户列表:${PLAIN}\n"
+                    for add_idx in "${!add_created_users[@]}"; do
+                        if [[ -n "${add_created_uuids[$add_idx]:-}" ]]; then
+                            printf "    [%d] user=${GREEN}%s${PLAIN} uuid=${GREEN}%s${PLAIN} password=${GREEN}%s${PLAIN}\n" \
+                                "$((add_idx + 1))" "${add_created_users[$add_idx]}" "${add_created_uuids[$add_idx]}" "${add_created_passwords[$add_idx]}"
+                        else
+                            printf "    [%d] user=${GREEN}%s${PLAIN} password=${GREEN}%s${PLAIN}\n" \
+                                "$((add_idx + 1))" "${add_created_users[$add_idx]}" "${add_created_passwords[$add_idx]}"
+                        fi
+                    done
                 fi
 
-                _info "已${add_action}用户: ${add_listener_name}[user=${add_username}]"
-                _info "可使用 [4] 将该用户绑定到指定出口节点"
+                _info "可使用 [4] 将用户绑定到指定出口节点"
                 if ! _mihomochain_apply_and_restart; then
                     _warn "自动应用或重启失败，请检查日志后重试"
                 fi
