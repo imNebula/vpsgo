@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.57"
+VERSION="2.58"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -631,14 +631,24 @@ _version_ge() {
     test "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1"
 }
 
+_read_single_key_safely() {
+    local saved_stty
+    saved_stty=$(stty -g < /dev/tty 2>/dev/null || true)
+    if [[ -n "$saved_stty" ]]; then
+        trap 'stty "$saved_stty" < /dev/tty 2>/dev/null || true; trap - RETURN' RETURN
+        stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || true
+        dd if=/dev/tty of=/dev/null bs=1 count=1 2>/dev/null || true
+        stty "$saved_stty" < /dev/tty 2>/dev/null || true
+        trap - RETURN
+    else
+        read -r -n 1 _ < /dev/tty 2>/dev/null || true
+    fi
+}
+
 _press_any_key() {
     echo ""
     printf "${DIM}  继续请按任意键...${PLAIN}"
-    local SAVEDSTTY
-    SAVEDSTTY=$(stty -g)
-    stty -echo -icanon
-    dd if=/dev/tty bs=1 count=1 2>/dev/null
-    stty "$SAVEDSTTY"
+    _read_single_key_safely
     echo ""
     _ui_clear_screen
 }
@@ -6361,11 +6371,7 @@ _mihomoconf_setup() {
             printf "    私钥: ${YELLOW}${SSL_DIR}/cert.key${PLAIN}\n"
             _info "目录 ${SSL_DIR}/ 已自动创建"
             printf "${YELLOW}  按任意键继续...${PLAIN}"
-            local SAVEDSTTY
-            SAVEDSTTY=$(stty -g)
-            stty -echo -icanon
-            dd if=/dev/tty bs=1 count=1 2>/dev/null
-            stty "$SAVEDSTTY"
+            _read_single_key_safely
             echo ""
         fi
     fi
@@ -9826,12 +9832,12 @@ _mihomochain_apply_and_restart() {
     if ! _mihomo_restart_now; then
         return 1
     fi
-    _success "链式代理变更已实时生效"
+    _success "出口管理变更已实时生效"
     return 0
 }
 
 _mihomo_chain_proxy_manage() {
-    _header "服务端链式代理"
+    _header "出口管理（支持链式）"
 
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
 
@@ -9843,7 +9849,7 @@ _mihomo_chain_proxy_manage() {
     fi
 
     while true; do
-        _header "服务端链式代理"
+        _header "出口管理（支持链式）"
         _info "配置文件: ${config_file}"
         _info "实时生效: 保存后将自动写入并重启 mihomo"
         _info "提示: WireGuard 出站为 Beta 功能"
@@ -11263,7 +11269,7 @@ _mihomo_manage() {
         _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
         _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
-        _menu_pair "7" "服务端链式代理" "入站绑定出站" "green" "8" "出站分流规则" "Google/Netflix/端口/mrs" "green"
+        _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "Google/Netflix/端口/mrs" "green"
         _menu_pair "9" "Gemini/Google IPv4" "定向规则" "green" "10" "定时自动更新" "检查新版本" "green"
         _menu_item "11" "卸载 Mihomo" "停止并清理" "yellow"
         _menu_item "0" "返回主菜单" "" "red"

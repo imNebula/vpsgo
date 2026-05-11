@@ -83,7 +83,7 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 | 7 | Ookla Speedtest CLI | 安装/更新 Speedtest CLI |
 | 8 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
 | 9 | Docker 日志轮转 | 限制容器日志大小 |
-| 10 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志；支持服务端链式代理、Google/Netflix/端口出站分流、自定义远程规则集 (yaml/text/mrs)、socks5 链接导入 |
+| 10 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志；支持出口管理（含链式代理）、Google/Netflix/端口出站分流、自定义远程规则集 (yaml/text/mrs)、socks5 链接导入 |
 | 11 | sing-box 安装 | 安装、启动、查看状态和日志 |
 | 12 | Snell V5 管理 | 安装、配置、导出、查看日志和状态 |
 | 13 | WireGuard 原生节点 | 部署节点、管理客户端、查看状态 |
