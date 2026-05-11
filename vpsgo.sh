@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.58"
+VERSION="2.60"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -631,17 +631,28 @@ _version_ge() {
     test "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1"
 }
 
+_restore_tty_echo() {
+    if [[ -t 0 ]]; then
+        stty echo icanon 2>/dev/null || stty sane 2>/dev/null || true
+        return 0
+    fi
+    if { : 2>/dev/null < /dev/tty; }; then
+        stty echo icanon 2>/dev/null < /dev/tty || stty sane 2>/dev/null < /dev/tty || true
+    fi
+}
+
+read() {
+    _restore_tty_echo
+    builtin read "$@"
+}
+
 _read_single_key_safely() {
-    local saved_stty
-    saved_stty=$(stty -g < /dev/tty 2>/dev/null || true)
-    if [[ -n "$saved_stty" ]]; then
-        trap 'stty "$saved_stty" < /dev/tty 2>/dev/null || true; trap - RETURN' RETURN
-        stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || true
-        dd if=/dev/tty of=/dev/null bs=1 count=1 2>/dev/null || true
-        stty "$saved_stty" < /dev/tty 2>/dev/null || true
-        trap - RETURN
-    else
-        read -r -n 1 _ < /dev/tty 2>/dev/null || true
+    local _key
+    _restore_tty_echo
+    if [[ -t 0 ]]; then
+        IFS= builtin read -r -n 1 _key || true
+    elif { : 2>/dev/null < /dev/tty; }; then
+        IFS= builtin read -r -n 1 _key 2>/dev/null < /dev/tty || true
     fi
 }
 
