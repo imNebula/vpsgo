@@ -37,11 +37,11 @@ fi
 
 set -uo pipefail
 
-VERSION="2.54"
+VERSION="2.57"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
-UPDATE_URL="https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
+UPDATE_URL="${VPSGO_UPDATE_URL:-${VPSGO_URL:-https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh}}"
 VPSGO_CONFIG_FILE="${VPSGO_CONFIG_FILE:-/etc/vpsgo/config}"
 _SPEEDTEST_VERSION="1.2.0"
 _SPEEDTEST_DOWNLOAD_BASE="https://install.speedtest.net/app/cli"
@@ -166,7 +166,7 @@ _github_proxy_supports_url() {
     host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
 
     case "$host" in
-        github.com|www.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
+        github.com|www.github.com|api.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
             return 0
             ;;
     esac
@@ -300,12 +300,43 @@ _mktemp_file() {
     printf '%s' "$tmp"
 }
 
+_download_file() {
+    local url="$1" output="$2" fetch_url
+    [[ -n "${url:-}" && -n "${output:-}" ]] || return 1
+
+    fetch_url=$(_github_proxy_url "$url")
+    rm -f "$output"
+
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsSL --retry 2 --connect-timeout 10 --max-time 180 -o "$output" "$fetch_url"; then
+            [[ -s "$output" ]] && return 0
+        fi
+        rm -f "$output"
+    fi
+
+    if command -v wget >/dev/null 2>&1; then
+        if wget -q -T 30 -O "$output" "$fetch_url"; then
+            [[ -s "$output" ]] && return 0
+        fi
+        rm -f "$output"
+    fi
+
+    return 1
+}
+
 _ensure_script_mode_ok() {
     local path="$1"
     [[ -f "$path" ]] || return 1
     [[ -r "$path" && -x "$path" ]] && return 0
     chmod 0755 "$path" 2>/dev/null || return 1
     [[ -r "$path" && -x "$path" ]]
+}
+
+_script_file_looks_like_vpsgo() {
+    local path="$1"
+    [[ -f "$path" && -r "$path" ]] || return 1
+    grep -q '^VERSION=' "$path" 2>/dev/null || return 1
+    grep -q 'VPS Go' "$path" 2>/dev/null || return 1
 }
 
 _status_kv() {
@@ -3400,23 +3431,7 @@ _dockerlog_setup() {
 # --- 8. Mihomo 安装 ---
 
 _mihomo_download() {
-    local url="$1" output="$2" fetch_url
-    [[ -n "${output:-}" ]] || return 1
-    fetch_url=$(_github_proxy_url "$url")
-    rm -f "$output"
-    if command -v curl >/dev/null 2>&1; then
-        if curl -fL --retry 2 --connect-timeout 10 -o "$output" "$fetch_url"; then
-            [[ -s "$output" ]] && return 0
-        fi
-        rm -f "$output"
-    fi
-    if command -v wget >/dev/null 2>&1; then
-        if wget -q -O "$output" "$fetch_url"; then
-            [[ -s "$output" ]] && return 0
-        fi
-        rm -f "$output"
-    fi
-    return 1
+    _download_file "$1" "$2"
 }
 
 _mihomo_detect_amd64_level() {
@@ -3467,19 +3482,30 @@ _mihomo_detect_arch() {
 }
 
 _mihomo_get_latest_version() {
-    local version latest_url api_url latest_release_url
+    local version latest_url api_url latest_release_url fetch_api fetch_latest
 
     api_url="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
     latest_release_url="https://github.com/MetaCubeX/mihomo/releases/latest"
+    fetch_api=$(_github_proxy_url "$api_url")
+    fetch_latest=$(_github_proxy_url "$latest_release_url")
 
-    version=$(curl -fsSL "$api_url" 2>/dev/null \
-        | awk -F'"' '$2=="tag_name"{print $4; exit}')
+    if command -v curl >/dev/null 2>&1; then
+        version=$(curl -fsSL "$fetch_api" 2>/dev/null \
+            | awk -F'"' '$2=="tag_name"{print $4; exit}')
+    elif command -v wget >/dev/null 2>&1; then
+        version=$(wget -qO- "$fetch_api" 2>/dev/null \
+            | awk -F'"' '$2=="tag_name"{print $4; exit}')
+    fi
     if [[ -n "${version:-}" ]] && [[ "$version" =~ ^v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]]; then
         printf '%s' "$version"
         return 0
     fi
 
-    latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$latest_release_url" 2>/dev/null || true)
+    if command -v curl >/dev/null 2>&1; then
+        latest_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$fetch_latest" 2>/dev/null || true)
+    elif command -v wget >/dev/null 2>&1; then
+        latest_url=$(wget -S --spider "$fetch_latest" 2>&1 | awk '/^  Location: /{u=$2} END{print u}' | tr -d '\r')
+    fi
     if [[ "$latest_url" == *"/releases/tag/"* ]]; then
         version="${latest_url##*/}"
         if [[ -n "${version:-}" ]] && [[ "$version" =~ ^v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$ ]]; then
@@ -3552,7 +3578,7 @@ supports_proxy_url() {
     host="${host%%\?*}"
     host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
     case "$host" in
-        github.com|www.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
+        github.com|www.github.com|api.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
             return 0
             ;;
     esac
@@ -3578,13 +3604,13 @@ download_file() {
     fetch_url=$(proxy_url "$url")
     rm -f "$output"
     if command -v curl >/dev/null 2>&1; then
-        if curl -fL --retry 2 --connect-timeout 10 -o "$output" "$fetch_url"; then
+        if curl -fsSL --retry 2 --connect-timeout 10 --max-time 180 -o "$output" "$fetch_url"; then
             [ -s "$output" ] && return 0
         fi
         rm -f "$output"
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget -q -O "$output" "$fetch_url"; then
+        if wget -q -T 30 -O "$output" "$fetch_url"; then
             [ -s "$output" ] && return 0
         fi
         rm -f "$output"
@@ -3603,11 +3629,12 @@ resolve_install_path() {
 }
 
 latest_version() {
-    local version latest_url fetch_latest
+    local version latest_url fetch_latest fetch_api
+    fetch_api=$(proxy_url "$RELEASE_API")
     if command -v curl >/dev/null 2>&1; then
-        version=$(curl -fsSL "$RELEASE_API" 2>/dev/null | awk -F'"' '$2=="tag_name"{print $4; exit}')
+        version=$(curl -fsSL "$fetch_api" 2>/dev/null | awk -F'"' '$2=="tag_name"{print $4; exit}')
     elif command -v wget >/dev/null 2>&1; then
-        version=$(wget -qO- "$RELEASE_API" 2>/dev/null | awk -F'"' '$2=="tag_name"{print $4; exit}')
+        version=$(wget -qO- "$fetch_api" 2>/dev/null | awk -F'"' '$2=="tag_name"{print $4; exit}')
     fi
     if [ -n "${version:-}" ] && printf '%s' "$version" | grep -Eq '^v?[0-9]+([.][0-9]+){1,3}([._-][0-9A-Za-z]+)*$'; then
         printf '%s' "$version"
@@ -8487,6 +8514,28 @@ _mihomochain_extract_link_name() {
     printf '%s' "$frag"
 }
 
+_mihomochain_parse_host_port() {
+    local input="${1:-}" _host_var="$2" _port_var="$3"
+    local host port rest
+
+    if [[ "$input" == \[*\]:* ]]; then
+        host="${input#\[}"
+        host="${host%%\]*}"
+        rest="${input#*\]}"
+        rest="${rest#:}"
+        port="$rest"
+    else
+        host="${input%:*}"
+        port="${input##*:}"
+    fi
+
+    [[ -n "$host" && "$host" != "$input" ]] || return 1
+    _is_valid_port "$port" || return 1
+    printf -v "$_host_var" '%s' "$host"
+    printf -v "$_port_var" '%s' "$port"
+    return 0
+}
+
 _mihomochain_default_outbound_name() {
     local out_type="${1:-outbound}" out_server="${2:-server}" out_port="${3:-0}"
     case "$out_type" in
@@ -8915,6 +8964,555 @@ _mihomochain_remove_user_rule() {
     rm -f "$tmp_other" "$tmp_user" "$tmp_name"
 }
 
+_mihomorule_safe_provider_name() {
+    local raw="${1:-}" safe
+    safe=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '_')
+    safe="${safe##_}"
+    safe="${safe%%_}"
+    [[ -n "$safe" ]] || safe="custom"
+    [[ "$safe" == vpsgo_* ]] || safe="vpsgo_${safe}"
+    printf '%s' "$safe"
+}
+
+_mihomorule_provider_block_upsert() {
+    local config_file="$1" provider_name="$2" block_file="$3"
+    local tmp
+    tmp=$(mktemp)
+    awk -v target="$provider_name" -v blockf="$block_file" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function flush_item() {
+            if (!in_item) return
+            if (item_name == target) {
+                if (!replaced) {
+                    printf "%s", new_block
+                    replaced=1
+                }
+            } else {
+                printf "%s", item_buf
+            }
+            item_buf=""
+            item_name=""
+            in_item=0
+        }
+        BEGIN {
+            in_providers=0
+            in_item=0
+            has_providers=0
+            replaced=0
+            item_buf=""
+            item_name=""
+            new_block=""
+            while ((getline line < blockf) > 0) {
+                new_block = new_block line "\n"
+            }
+            close(blockf)
+        }
+        /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
+            if (in_providers) {
+                flush_item()
+                if (!replaced) {
+                    printf "%s", new_block
+                    replaced=1
+                }
+            }
+            in_providers = ($0 ~ /^rule-providers:[[:space:]]*$/)
+            if (in_providers) has_providers=1
+            print
+            next
+        }
+        !in_providers {
+            print
+            next
+        }
+        /^  [^[:space:]#][^:]*:[[:space:]]*$/ {
+            flush_item()
+            in_item=1
+            item_buf=$0 "\n"
+            line=$0
+            sub(/^  /, "", line)
+            sub(/:[[:space:]]*$/, "", line)
+            item_name=trim(line)
+            next
+        }
+        in_item {
+            item_buf=item_buf $0 "\n"
+            next
+        }
+        { print }
+        END {
+            if (in_providers) {
+                flush_item()
+                if (!replaced) {
+                    printf "%s", new_block
+                    replaced=1
+                }
+            }
+            if (!has_providers) {
+                print ""
+                print "rule-providers:"
+                printf "%s", new_block
+            }
+        }
+    ' "$config_file" > "$tmp"
+    mv "$tmp" "$config_file"
+}
+
+_mihomorule_provider_remove() {
+    local config_file="$1" provider_name="$2"
+    local tmp
+    tmp=$(mktemp)
+    awk -v target="$provider_name" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function flush_item() {
+            if (!in_item) return
+            if (item_name != target) {
+                printf "%s", item_buf
+            }
+            item_buf=""
+            item_name=""
+            in_item=0
+        }
+        BEGIN {
+            in_providers=0
+            in_item=0
+            item_buf=""
+            item_name=""
+        }
+        /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
+            if (in_providers) flush_item()
+            in_providers = ($0 ~ /^rule-providers:[[:space:]]*$/)
+            print
+            next
+        }
+        !in_providers {
+            print
+            next
+        }
+        /^  [^[:space:]#][^:]*:[[:space:]]*$/ {
+            flush_item()
+            in_item=1
+            item_buf=$0 "\n"
+            line=$0
+            sub(/^  /, "", line)
+            sub(/:[[:space:]]*$/, "", line)
+            item_name=trim(line)
+            next
+        }
+        in_item {
+            item_buf=item_buf $0 "\n"
+            next
+        }
+        { print }
+        END {
+            if (in_providers) flush_item()
+        }
+    ' "$config_file" > "$tmp"
+    mv "$tmp" "$config_file"
+}
+
+_mihomorule_upsert_remote_provider() {
+    local config_file="$1" provider_name="$2" url="$3" behavior="$4" format="$5" interval="${6:-86400}" path="${7:-}"
+    local q_url q_path tmp_block suffix
+
+    [[ "$behavior" == "domain" || "$behavior" == "ipcidr" || "$behavior" == "classical" ]] || return 1
+    [[ "$format" == "yaml" || "$format" == "text" || "$format" == "mrs" ]] || return 1
+    if [[ "$format" == "mrs" && "$behavior" == "classical" ]]; then
+        _error_no_exit "mrs 规则集仅支持 behavior=domain/ipcidr，不支持 classical"
+        return 1
+    fi
+    _is_digit "$interval" || interval="86400"
+    if [[ -z "$path" ]]; then
+        suffix="$format"
+        path="./ruleset/${provider_name}.${suffix}"
+    fi
+
+    q_url=$(_mihomochain_yaml_quote "$url")
+    q_path=$(_mihomochain_yaml_quote "$path")
+    tmp_block=$(mktemp)
+    cat > "$tmp_block" <<EOF
+  ${provider_name}:
+    type: http
+    behavior: ${behavior}
+    format: ${format}
+    url: "${q_url}"
+    path: "${q_path}"
+    interval: ${interval}
+EOF
+    _mihomorule_provider_block_upsert "$config_file" "$provider_name" "$tmp_block"
+    rm -f "$tmp_block"
+}
+
+_mihomorule_add_policy_rule() {
+    local config_file="$1" prefix="$2" value="$3" out_name="$4"
+    local tmp_other tmp_user tmp_name tmp_new
+
+    tmp_other=$(mktemp)
+    tmp_user=$(mktemp)
+    tmp_name=$(mktemp)
+    tmp_new=$(mktemp)
+    _mihomochain_rule_split_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+    awk -v p="${prefix},${value}," 'index($0, p) != 1 { print }' "$tmp_other" > "$tmp_new"
+    printf '%s,%s,%s\n' "$prefix" "$value" "$out_name" >> "$tmp_new"
+    mv "$tmp_new" "$tmp_other"
+    _mihomochain_rule_write_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+    rm -f "$tmp_other" "$tmp_user" "$tmp_name"
+}
+
+_mihomorule_remove_policy_rule() {
+    local config_file="$1" prefix="$2" value="$3"
+    local tmp_other tmp_user tmp_name tmp_new
+
+    tmp_other=$(mktemp)
+    tmp_user=$(mktemp)
+    tmp_name=$(mktemp)
+    tmp_new=$(mktemp)
+    _mihomochain_rule_split_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+    awk -v p="${prefix},${value}," 'index($0, p) != 1 { print }' "$tmp_other" > "$tmp_new"
+    mv "$tmp_new" "$tmp_other"
+    _mihomochain_rule_write_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+    rm -f "$tmp_other" "$tmp_user" "$tmp_name"
+}
+
+_mihomorule_read_policy_rules() {
+    local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}"
+    [[ -f "$config_file" ]] || return 1
+    awk '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        BEGIN { in_rules=0 }
+        /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
+            in_rules = ($0 ~ /^rules:[[:space:]]*$/)
+            next
+        }
+        !in_rules { next }
+        /^[[:space:]]*-[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+            sub(/[[:space:]]+#.*/, "", line)
+            line=trim(line)
+            if (line ~ /^RULE-SET,[^,]+,[^,]+$/) {
+                split(line, a, ",")
+                printf "RULE-SET\037%s\037%s\n", a[2], a[3]
+            } else if (line ~ /^DST-PORT,[^,]+,[^,]+$/) {
+                split(line, a, ",")
+                printf "DST-PORT\037%s\037%s\n", a[2], a[3]
+            }
+        }
+    ' "$config_file"
+}
+
+_mihomorule_list_policy_rules() {
+    local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}"
+    local shown=0 kind value out_name out_show
+    while IFS=$'\x1f' read -r kind value out_name; do
+        [[ -z "${kind:-}" ]] && continue
+        shown=1
+        out_show=$(_mihomochain_display_name "$out_name")
+        case "$kind" in
+            RULE-SET) printf "      远程规则 %-28s ${DIM}-->${PLAIN} %s\n" "$value" "$out_show" ;;
+            DST-PORT) printf "      目标端口 %-28s ${DIM}-->${PLAIN} %s\n" "$value" "$out_show" ;;
+        esac
+    done < <(_mihomorule_read_policy_rules "$config_file")
+    if [[ "$shown" -eq 0 ]]; then
+        _warn "暂无服务/端口分流规则"
+        return 1
+    fi
+    return 0
+}
+
+_mihomorule_pick_outbound() {
+    local config_file="$1" _name_var="$2" _show_var="$3"
+    local idx=0 pick oi out_name out_show type server port cipher username password sni insecure obfs obfs_password mport
+    local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+    local -a outbound_names=() outbound_show_names=()
+
+    printf "  ${BOLD}可用出口节点:${PLAIN}\n"
+    _separator
+    while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
+        wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+        [[ -z "${out_name:-}" ]] && continue
+        [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
+        out_show=$(_mihomochain_display_name "$out_name")
+        outbound_names+=("$out_name")
+        outbound_show_names+=("$out_show")
+        idx=$((idx + 1))
+        printf "      [%d] %s (type=%s, %s:%s)\n" "$idx" "$out_show" "$type" "$server" "$port"
+    done < <(_mihomochain_read_proxy_rows "$config_file")
+
+    if (( ${#outbound_names[@]} == 0 )); then
+        _warn "暂无落地节点/二层代理，请先添加出口节点"
+        return 1
+    fi
+
+    read -rp "  选择出口节点 [序号]: " pick
+    pick=$(_mihomoconf_trim "${pick:-}")
+    if [[ -z "$pick" || ! "$pick" =~ ^[0-9]+$ ]]; then
+        _error_no_exit "请输入有效序号"
+        return 1
+    fi
+    oi=$((10#$pick))
+    if (( oi < 1 || oi > ${#outbound_names[@]} )); then
+        _error_no_exit "出口序号超出范围: ${pick}"
+        return 1
+    fi
+    printf -v "$_name_var" '%s' "${outbound_names[$((oi - 1))]}"
+    printf -v "$_show_var" '%s' "${outbound_show_names[$((oi - 1))]}"
+    return 0
+}
+
+_mihomorule_normalize_port_match() {
+    local raw="${1:-}" _out_var="$2" token start end
+    local -a parts=() normalized=()
+
+    raw=$(_mihomoconf_trim "$raw")
+    raw="${raw//\// }"
+    raw="${raw//,/ }"
+    raw="${raw//;/ }"
+    raw="${raw//	/ }"
+    read -r -a parts <<< "$raw"
+    for token in "${parts[@]}"; do
+        token=$(_mihomoconf_trim "$token")
+        [[ -z "$token" ]] && continue
+        if [[ "$token" == *-* ]]; then
+            start="${token%-*}"
+            end="${token#*-}"
+            if ! _is_valid_port "$start" || ! _is_valid_port "$end" || (( 10#$start > 10#$end )); then
+                return 1
+            fi
+            normalized+=("${start}-${end}")
+        else
+            _is_valid_port "$token" || return 1
+            normalized+=("$token")
+        fi
+    done
+    (( ${#normalized[@]} > 0 )) || return 1
+    local joined="" i
+    for i in "${!normalized[@]}"; do
+        [[ "$i" -gt 0 ]] && joined+="/"
+        joined+="${normalized[$i]}"
+    done
+    printf -v "$_out_var" '%s' "$joined"
+    return 0
+}
+
+_mihomorule_apply_and_restart() {
+    if ! _mihomochain_apply_to_config; then
+        return 1
+    fi
+    if ! _mihomo_restart_now; then
+        return 1
+    fi
+    _success "出站分流规则已实时生效"
+    return 0
+}
+
+_mihomo_outbound_rule_manage() {
+    local config_file="$_MIHOMOCONF_CONFIG_FILE"
+    if [[ ! -f "$config_file" ]]; then
+        _error_no_exit "未找到配置文件: ${config_file}"
+        _info "请先在 Mihomo 菜单中生成基础配置"
+        _press_any_key
+        return
+    fi
+
+    while true; do
+        _header "Mihomo 出站分流规则"
+        _info "配置文件: ${config_file}"
+        _info "预置规则来源: blackmatrix7/ios_rule_script (Clash classical yaml)"
+        _info "自定义远程规则支持 yaml/text/mrs；mrs 仅支持 domain/ipcidr"
+        _separator
+        _menu_pair "1" "查看当前分流" "" "green" "2" "分流 Google" "远程规则" "green"
+        _menu_pair "3" "分流 Netflix" "远程规则" "green" "4" "分流指定端口" "DST-PORT" "green"
+        _menu_pair "5" "自定义远程规则" "支持 mrs" "green" "6" "删除分流规则" "" "yellow"
+        _menu_item "0" "返回上级菜单" "" "red"
+        _separator
+
+        local ch
+        read -rp "  选择 [0-6]: " ch
+        case "$ch" in
+            1)
+                printf "  ${BOLD}服务/端口分流:${PLAIN}\n"
+                _separator
+                _mihomorule_list_policy_rules "$config_file"
+                _press_any_key
+                ;;
+            2|3)
+                local provider_name service_name url out_name out_show
+                if [[ "$ch" == "2" ]]; then
+                    service_name="Google"
+                    provider_name="vpsgo_google"
+                    url="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.yaml"
+                else
+                    service_name="Netflix"
+                    provider_name="vpsgo_netflix"
+                    url="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Netflix/Netflix.yaml"
+                fi
+                if ! _mihomorule_pick_outbound "$config_file" out_name out_show; then
+                    _press_any_key
+                    continue
+                fi
+                _mihomorule_upsert_remote_provider "$config_file" "$provider_name" "$url" "classical" "yaml" "86400" "./ruleset/${provider_name}.yaml"
+                _mihomorule_add_policy_rule "$config_file" "RULE-SET" "$provider_name" "$out_name"
+                _info "规则已保存: ${service_name} -> ${out_show}"
+                if ! _mihomorule_apply_and_restart; then
+                    _warn "自动应用或重启失败，请检查日志后重试"
+                fi
+                _press_any_key
+                ;;
+            4)
+                local port_input port_match out_name out_show
+                read -rp "  目标端口/范围 (如 443 或 80/443/8000-9000): " port_input
+                if ! _mihomorule_normalize_port_match "$port_input" port_match; then
+                    _error_no_exit "端口格式无效，支持单端口、范围和 / 分隔的多个端口"
+                    _press_any_key
+                    continue
+                fi
+                if ! _mihomorule_pick_outbound "$config_file" out_name out_show; then
+                    _press_any_key
+                    continue
+                fi
+                _mihomorule_add_policy_rule "$config_file" "DST-PORT" "$port_match" "$out_name"
+                _info "规则已保存: 目标端口 ${port_match} -> ${out_show}"
+                if ! _mihomorule_apply_and_restart; then
+                    _warn "自动应用或重启失败，请检查日志后重试"
+                fi
+                _press_any_key
+                ;;
+            5)
+                local rule_label provider_name url behavior format interval path out_name out_show
+                read -rp "  规则名称 [如 youtube_domain]: " rule_label
+                rule_label=$(_mihomoconf_trim "${rule_label:-}")
+                provider_name=$(_mihomorule_safe_provider_name "$rule_label")
+                read -rp "  远程规则 URL: " url
+                url=$(_mihomoconf_trim "${url:-}")
+                if [[ "$url" != http://* && "$url" != https://* ]]; then
+                    _error_no_exit "远程规则 URL 必须以 http:// 或 https:// 开头"
+                    _press_any_key
+                    continue
+                fi
+                if [[ "$url" == *.mrs* ]]; then
+                    format="mrs"
+                    behavior="domain"
+                else
+                    format="yaml"
+                    behavior="classical"
+                fi
+                read -rp "  format [默认 ${format}; yaml/text/mrs]: " format
+                format=$(_mihomoconf_trim "${format:-}")
+                [[ -n "$format" ]] || format=$([[ "$url" == *.mrs* ]] && printf 'mrs' || printf 'yaml')
+                case "$format" in
+                    yaml|text|mrs) ;;
+                    *) _error_no_exit "format 仅支持 yaml/text/mrs"; _press_any_key; continue ;;
+                esac
+                if [[ "$format" == "mrs" ]]; then
+                    read -rp "  behavior [默认 domain; domain/ipcidr]: " behavior
+                    behavior=$(_mihomoconf_trim "${behavior:-domain}")
+                    case "$behavior" in
+                        domain|ipcidr) ;;
+                        *) _error_no_exit "mrs 仅支持 behavior=domain/ipcidr"; _press_any_key; continue ;;
+                    esac
+                else
+                    read -rp "  behavior [默认 classical; classical/domain/ipcidr]: " behavior
+                    behavior=$(_mihomoconf_trim "${behavior:-classical}")
+                    case "$behavior" in
+                        classical|domain|ipcidr) ;;
+                        *) _error_no_exit "behavior 仅支持 classical/domain/ipcidr"; _press_any_key; continue ;;
+                    esac
+                fi
+                read -rp "  更新间隔秒数 [默认 86400]: " interval
+                interval=$(_mihomoconf_trim "${interval:-86400}")
+                if ! _is_digit "$interval" || [[ "$interval" -le 0 ]]; then
+                    _error_no_exit "更新间隔必须为正整数"
+                    _press_any_key
+                    continue
+                fi
+                path="./ruleset/${provider_name}.${format}"
+                read -rp "  本地缓存路径 [默认 ${path}]: " path
+                path=$(_mihomoconf_trim "${path:-./ruleset/${provider_name}.${format}}")
+                if ! _mihomorule_pick_outbound "$config_file" out_name out_show; then
+                    _press_any_key
+                    continue
+                fi
+                if ! _mihomorule_upsert_remote_provider "$config_file" "$provider_name" "$url" "$behavior" "$format" "$interval" "$path"; then
+                    _press_any_key
+                    continue
+                fi
+                _mihomorule_add_policy_rule "$config_file" "RULE-SET" "$provider_name" "$out_name"
+                _info "规则已保存: ${provider_name} (${format}/${behavior}) -> ${out_show}"
+                if ! _mihomorule_apply_and_restart; then
+                    _warn "自动应用或重启失败，请检查日志后重试"
+                fi
+                _press_any_key
+                ;;
+            6)
+                local idx=0 kind value out_name out_show pick ri
+                local -a rule_kinds=() rule_values=() rule_outs=()
+                printf "  ${BOLD}可删除的服务/端口分流:${PLAIN}\n"
+                _separator
+                while IFS=$'\x1f' read -r kind value out_name; do
+                    [[ -z "${kind:-}" ]] && continue
+                    idx=$((idx + 1))
+                    rule_kinds+=("$kind")
+                    rule_values+=("$value")
+                    rule_outs+=("$out_name")
+                    out_show=$(_mihomochain_display_name "$out_name")
+                    case "$kind" in
+                        RULE-SET) printf "      [%d] 远程规则 %s -> %s\n" "$idx" "$value" "$out_show" ;;
+                        DST-PORT) printf "      [%d] 目标端口 %s -> %s\n" "$idx" "$value" "$out_show" ;;
+                    esac
+                done < <(_mihomorule_read_policy_rules "$config_file")
+                if (( idx == 0 )); then
+                    _warn "暂无可删除的服务/端口分流规则"
+                    _press_any_key
+                    continue
+                fi
+                read -rp "  选择要删除的规则 [序号]: " pick
+                pick=$(_mihomoconf_trim "${pick:-}")
+                if [[ -z "$pick" || ! "$pick" =~ ^[0-9]+$ ]]; then
+                    _error_no_exit "请输入有效序号"
+                    _press_any_key
+                    continue
+                fi
+                ri=$((10#$pick))
+                if (( ri < 1 || ri > idx )); then
+                    _error_no_exit "序号超出范围: ${pick}"
+                    _press_any_key
+                    continue
+                fi
+                kind="${rule_kinds[$((ri - 1))]}"
+                value="${rule_values[$((ri - 1))]}"
+                _mihomorule_remove_policy_rule "$config_file" "$kind" "$value"
+                if [[ "$kind" == "RULE-SET" && "$value" == vpsgo_* ]]; then
+                    _mihomorule_provider_remove "$config_file" "$value"
+                fi
+                _info "规则已删除: ${kind},${value}"
+                if ! _mihomorule_apply_and_restart; then
+                    _warn "自动应用或重启失败，请检查日志后重试"
+                fi
+                _press_any_key
+                ;;
+            0) return ;;
+            *)
+                _error_no_exit "无效选项"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 _mihomochain_upsert_proxy_block() {
     local config_file="$1" proxy_name="$2" block_file="$3"
     local tmp
@@ -9217,7 +9815,7 @@ _mihomochain_apply_to_config() {
     _mihomoconf_force_rule_mode "$config_file"
     _mihomoconf_ensure_match_direct_rule "$config_file"
     _mihomoconf_apply_ipv4_google_policy "$config_file"
-    _info "链式代理配置已写入: ${config_file}"
+    _info "Mihomo 出站/分流配置已写入: ${config_file}"
     return 0
 }
 
@@ -9275,7 +9873,7 @@ _mihomo_chain_proxy_manage() {
             2)
                 printf "  ${BOLD}添加出口节点${PLAIN}\n"
                 _separator
-                _menu_pair "1" "通过链接导入" "ss:// hy2:// anytls:// vless:// tuic:// wireguard:// (Beta)" "green" "2" "手动录入" "" "green"
+                _menu_pair "1" "通过链接导入" "ss:// socks5:// hy2:// anytls:// vless:// tuic:// wireguard:// (Beta)" "green" "2" "手动录入" "" "green"
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
                 local out_sni out_insecure out_obfs out_obfs_pass out_mport
@@ -9326,7 +9924,7 @@ _mihomo_chain_proxy_manage() {
                         local rename_confirm custom_name_input
                         local ss_decoded kv k v
                         local -a _qarr
-                        read -rp "  输入链接 (ss:// / hy2:// / hysteria2:// / anytls:// / vless:// / wireguard://[Beta]): " in_link
+                        read -rp "  输入链接 (ss:// / socks5:// / hy2:// / hysteria2:// / anytls:// / vless:// / wireguard://[Beta]): " in_link
                         in_link=$(_mihomoconf_trim "${in_link:-}")
                         if [[ -z "$in_link" ]]; then
                             _error_no_exit "链接不能为空"
@@ -9537,6 +10135,40 @@ _mihomo_chain_proxy_manage() {
                                     fi
                                 fi
                                 ;;
+                            socks5://*|socks://*)
+                                if [[ "$in_link" == socks5://* ]]; then
+                                    link_body="${in_link#socks5://}"
+                                else
+                                    link_body="${in_link#socks://}"
+                                fi
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                link_body="${link_body%%/*}"
+                                out_user=""
+                                out_pass=""
+                                if [[ "$link_body" == *@* ]]; then
+                                    link_userinfo="${link_body%@*}"
+                                    link_hostport="${link_body#*@}"
+                                    if [[ "$link_userinfo" == *:* ]]; then
+                                        out_user=$(_mihomochain_urldecode "${link_userinfo%%:*}")
+                                        out_pass=$(_mihomochain_urldecode "${link_userinfo#*:}")
+                                    else
+                                        out_user=$(_mihomochain_urldecode "$link_userinfo")
+                                    fi
+                                else
+                                    link_hostport="$link_body"
+                                fi
+                                if ! _mihomochain_parse_host_port "$link_hostport" out_server out_port; then
+                                    _error_no_exit "socks5 链接解析失败，需为 socks5://[user:pass@]server:port"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="socks5"
+                                ;;
                             wireguard://*|wg://*)
                                 if [[ "$in_link" == wireguard://* ]]; then
                                     link_body="${in_link#wireguard://}"
@@ -9651,7 +10283,7 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                             *)
-                                _error_no_exit "暂不支持该链接类型，请使用 ss:// / hy2:// / hysteria2:// / anytls:// / vless:// / tuic:// / wireguard://(Beta)"
+                                _error_no_exit "暂不支持该链接类型，请使用 ss:// / socks5:// / hy2:// / hysteria2:// / anytls:// / vless:// / tuic:// / wireguard://(Beta)"
                                 _press_any_key
                                 continue
                                 ;;
@@ -10631,13 +11263,14 @@ _mihomo_manage() {
         _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
         _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
-        _menu_pair "7" "服务端链式代理" "入站绑定出站" "green" "8" "Gemini/Google IPv4" "定向规则" "green"
-        _menu_pair "9" "定时自动更新" "检查新版本" "green" "10" "卸载 Mihomo" "停止并清理" "yellow"
+        _menu_pair "7" "服务端链式代理" "入站绑定出站" "green" "8" "出站分流规则" "Google/Netflix/端口/mrs" "green"
+        _menu_pair "9" "Gemini/Google IPv4" "定向规则" "green" "10" "定时自动更新" "检查新版本" "green"
+        _menu_item "11" "卸载 Mihomo" "停止并清理" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
         _separator
 
         local choice
-        read -rp "  选择 [0-10]: " choice
+        read -rp "  选择 [0-11]: " choice
         case "$choice" in
             1) _mihomo_setup ;;
             2) _mihomoconf_setup ;;
@@ -10646,9 +11279,10 @@ _mihomo_manage() {
             5) _mihomo_log ;;
             6) _mihomo_read_config ;;
             7) _mihomo_chain_proxy_manage ;;
-            8) _mihomo_ipv4_google_manage ;;
-            9) _mihomo_auto_update_manage ;;
-            10) _mihomo_uninstall ;;
+            8) _mihomo_outbound_rule_manage ;;
+            9) _mihomo_ipv4_google_manage ;;
+            10) _mihomo_auto_update_manage ;;
+            11) _mihomo_uninstall ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
@@ -18322,8 +18956,8 @@ _onepanel_apply_iptables_chains() {
 _self_update() {
     _header "VPSGo 更新"
 
-    if ! command -v curl >/dev/null 2>&1; then
-        _error_no_exit "需要 curl 命令"
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        _error_no_exit "需要 curl 或 wget 命令"
         _press_any_key
         return
     fi
@@ -18331,15 +18965,13 @@ _self_update() {
     _info "当前版本: v${VERSION}"
     _info "正在检查更新..."
 
-    local tmp_file
-    local update_url
-    update_url=$(_github_proxy_url "$UPDATE_URL")
+    local tmp_file remote_ver current_file backup_file need_update="1"
     tmp_file=$(_mktemp_file vpsgo .sh) || {
         _error_no_exit "创建临时文件失败"
         _press_any_key
         return
     }
-    if ! curl -fsSL -o "$tmp_file" "$update_url"; then
+    if ! _download_file "$UPDATE_URL" "$tmp_file"; then
         rm -f "$tmp_file"
         _error_no_exit "下载失败，请检查网络连接，或在首页按 g 开启 GitHub 代理"
         _press_any_key
@@ -18353,6 +18985,20 @@ _self_update() {
         return
     fi
 
+    if ! _script_file_looks_like_vpsgo "$tmp_file"; then
+        rm -f "$tmp_file"
+        _error_no_exit "下载内容不像 VPSGo 脚本，已取消更新"
+        _press_any_key
+        return
+    fi
+
+    if ! bash -n "$tmp_file" >/dev/null 2>&1; then
+        rm -f "$tmp_file"
+        _error_no_exit "下载到的脚本语法校验失败，已取消更新"
+        _press_any_key
+        return
+    fi
+
     if [[ -d "$INSTALL_PATH" ]]; then
         rm -f "$tmp_file"
         _error_no_exit "${INSTALL_PATH} 是目录，无法写入可执行文件"
@@ -18360,7 +19006,6 @@ _self_update() {
         return
     fi
 
-    local remote_ver
     remote_ver=$(grep '^VERSION=' "$tmp_file" | head -1 | sed 's/VERSION=//;s/[\"'"'"']//g')
 
     if [[ -z "$remote_ver" ]]; then
@@ -18370,15 +19015,53 @@ _self_update() {
         return
     else
         _info "最新版本: v${remote_ver}"
-        if [[ "$remote_ver" == "$VERSION" ]]; then
-            _info "已是最新版本，无需更新"
+    fi
+    if [[ "$remote_ver" != "$VERSION" ]] && _version_ge "$VERSION" "$remote_ver" && ! _version_ge "$remote_ver" "$VERSION"; then
+        if ! _is_truthy "${VPSGO_ALLOW_DOWNGRADE:-0}"; then
+            _warn "远程版本 v${remote_ver} 低于当前版本 v${VERSION}，已取消更新"
+            _info "如确需降级，可设置 VPSGO_ALLOW_DOWNGRADE=1 后重试"
             rm -f "$tmp_file"
+            _press_any_key
+            return
+        fi
+        _warn "即将按 VPSGO_ALLOW_DOWNGRADE=1 降级到 v${remote_ver}"
+    fi
+
+    current_file="$INSTALL_PATH"
+    if [[ ! -f "$current_file" ]]; then
+        current_file="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    fi
+    if [[ "$remote_ver" == "$VERSION" && -f "$current_file" ]] && cmp -s "$tmp_file" "$current_file"; then
+        need_update="0"
+    fi
+    if [[ "$need_update" == "0" ]]; then
+        _info "已是最新版本，无需更新"
+        rm -f "$tmp_file"
+        _press_any_key
+        return
+    fi
+    if [[ "$remote_ver" == "$VERSION" ]]; then
+        _warn "远程版本号相同，但脚本内容不同，将重新覆盖安装以修复本地脚本"
+    fi
+
+    backup_file=""
+    if [[ -f "$INSTALL_PATH" ]]; then
+        backup_file=$(_mktemp_file vpsgo-backup .sh) || {
+            rm -f "$tmp_file"
+            _error_no_exit "创建备份文件失败"
+            _press_any_key
+            return
+        }
+        if ! cp -p "$INSTALL_PATH" "$backup_file"; then
+            rm -f "$tmp_file" "$backup_file"
+            _error_no_exit "备份当前脚本失败，已取消更新"
             _press_any_key
             return
         fi
     fi
 
     if ! _install_script_file "$tmp_file" "$INSTALL_PATH"; then
+        [[ -n "$backup_file" ]] && cp -p "$backup_file" "$INSTALL_PATH" 2>/dev/null || true
         rm -f "$tmp_file"
         _error_no_exit "更新失败，无法写入 ${INSTALL_PATH}"
         _warn "请检查目录权限或挂载参数（如 noexec），或改用 VPSGO_INSTALL_PATH 指定其他路径"
@@ -18387,6 +19070,7 @@ _self_update() {
     fi
 
     if ! _ensure_script_mode_ok "$INSTALL_PATH"; then
+        [[ -n "$backup_file" ]] && cp -p "$backup_file" "$INSTALL_PATH" 2>/dev/null || true
         rm -f "$tmp_file"
         _error_no_exit "更新失败，${INSTALL_PATH} 权限异常"
         _warn "请手动执行: chmod 0755 ${INSTALL_PATH}"
@@ -18394,7 +19078,15 @@ _self_update() {
         return
     fi
 
-    rm -f "$tmp_file"
+    if ! bash -n "$INSTALL_PATH" >/dev/null 2>&1; then
+        [[ -n "$backup_file" ]] && cp -p "$backup_file" "$INSTALL_PATH" 2>/dev/null || true
+        rm -f "$tmp_file" "$backup_file"
+        _error_no_exit "安装后的脚本语法校验失败，已尝试恢复旧版本"
+        _press_any_key
+        return
+    fi
+
+    rm -f "$tmp_file" "$backup_file"
 
     _info "更新完成! v${VERSION} -> v${remote_ver}"
     _info "正在重新启动..."
@@ -18405,7 +19097,7 @@ _self_update() {
 # --- 自安装 ---
 
 _self_install() {
-    local self
+    local self tmp_self=""
     self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
     if [[ -d "$INSTALL_PATH" ]]; then
@@ -18422,9 +19114,19 @@ _self_install() {
         return
     fi
 
-    # 检查源文件是否可读（防止管道运行时 $0 不可用）
-    if [[ ! -f "$self" ]] || [[ ! -r "$self" ]]; then
-        return
+    # 检查源文件是否为当前脚本；管道运行时 $0 可能是 bash 或不可读路径。
+    if ! _script_file_looks_like_vpsgo "$self"; then
+        if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+            tmp_self=$(_mktemp_file vpsgo-install .sh) || return
+            if _download_file "$UPDATE_URL" "$tmp_self" && _script_file_looks_like_vpsgo "$tmp_self" && bash -n "$tmp_self" >/dev/null 2>&1; then
+                self="$tmp_self"
+            else
+                rm -f "$tmp_self"
+                return
+            fi
+        else
+            return
+        fi
     fi
 
     # 如果目标不存在，或者源文件更新了，则安装/更新
@@ -18443,6 +19145,8 @@ _self_install() {
     elif ! _ensure_script_mode_ok "$INSTALL_PATH"; then
         _warn "检测到 ${INSTALL_PATH} 权限异常，请执行: chmod 0755 ${INSTALL_PATH}"
     fi
+
+    [[ -n "$tmp_self" ]] && rm -f "$tmp_self"
 }
 
 # --- 卸载 ---

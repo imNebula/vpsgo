@@ -16,17 +16,21 @@ SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
   if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else echo "请使用 root 运行，或先安装 sudo"; exit 1; fi
 fi
-if ! command -v bash >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+if ! command -v bash >/dev/null 2>&1 || { ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; }; then
   if command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache bash curl
   elif command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y bash curl
   elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y bash curl
   elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y bash curl
   elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -Sy --noconfirm bash curl
-  else echo "请先安装 bash 和 curl"; exit 1; fi
+  else echo "请先安装 bash，并确保 curl 或 wget 至少可用一个"; exit 1; fi
 fi
 tmp="$(mktemp)"
 trap "rm -f \"$tmp\"" EXIT
-curl -fsSL "$URL" -o "$tmp"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$URL" -o "$tmp"
+else
+  wget -qO "$tmp" "$URL"
+fi
 $SUDO bash "$tmp"'
 ```
 
@@ -40,9 +44,9 @@ vpsgo
 export VPSGO_URL="https://gh-proxy.org/https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
 ```
 
-安装命令会自动补齐 `bash` 和 `curl`，脚本首次启动会自安装到 `/usr/local/bin/vpsgo`。Alpine 默认没有 `sudo`，直接用 root 执行即可。
+安装命令会自动补齐 `bash` 和下载工具（优先 `curl`，已有 `wget` 也可运行），脚本首次启动会自安装到 `/usr/local/bin/vpsgo`。Alpine 默认没有 `sudo`，直接用 root 执行即可。
 
-首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.org/`，会自动作用到脚本自更新、Mihomo、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载。
+首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.org/`，会自动作用到脚本自更新、GitHub API、Mihomo、Realm、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载。
 
 如果出现 `-ash: vpsgo: Permission denied`，可执行：
 
@@ -79,7 +83,7 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 | 7 | Ookla Speedtest CLI | 安装/更新 Speedtest CLI |
 | 8 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
 | 9 | Docker 日志轮转 | 限制容器日志大小 |
-| 10 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志 |
+| 10 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志；支持服务端链式代理、Google/Netflix/端口出站分流、自定义远程规则集 (yaml/text/mrs)、socks5 链接导入 |
 | 11 | sing-box 安装 | 安装、启动、查看状态和日志 |
 | 12 | Snell V5 管理 | 安装、配置、导出、查看日志和状态 |
 | 13 | WireGuard 原生节点 | 部署节点、管理客户端、查看状态 |
@@ -105,7 +109,7 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 
 - **操作系统**: Linux (Debian / Ubuntu / Alpine / CentOS / RHEL / Arch 等)
 - **权限**: 需要 root 权限；非 root 用户可通过 `sudo vpsgo` 运行
-- **依赖**: `bash`, `curl`
+- **依赖**: `bash`，以及 `curl` 或 `wget`
 
 Ookla Speedtest CLI 安装项额外适配 macOS(Homebrew) 与 FreeBSD 12/13 x86_64；Windows 版官方 CLI 仍需按 Ookla 页面手动下载 zip。
 
@@ -114,6 +118,8 @@ Ookla Speedtest CLI 安装项额外适配 macOS(Homebrew) 与 FreeBSD 12/13 x86_
 在脚本菜单中输入 `u` 即可自动从 GitHub 拉取最新版本并重启。
 
 如果在国内网络下访问较慢，可先在首页按 `g` 开启 GitHub 代理后再更新或安装相关组件。
+
+如需固定自更新来源，可设置 `VPSGO_UPDATE_URL`；临时安装来源仍可使用 `VPSGO_URL`。
 
 ## License
 
