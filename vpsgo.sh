@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.64"
+VERSION="2.65"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
