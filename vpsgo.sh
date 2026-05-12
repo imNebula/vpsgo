@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.60"
+VERSION="2.63"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -512,6 +512,7 @@ _menu_item() {
     local key="$1" label="$2" desc="${3:-}" tone="${4:-green}"
     local color="$GREEN" key_token cols
     local label_txt desc_txt line_max label_w desc_w desc_max
+    local key_col_w=4 key_w key_pad label_col_w=18 label_pad
     case "$tone" in
         red) color="$RED" ;;
         yellow) color="$YELLOW" ;;
@@ -519,6 +520,9 @@ _menu_item() {
     esac
 
     key_token="[${key}]"
+    key_w=$(_ui_display_width "$key_token")
+    key_pad=$((key_col_w - key_w))
+    [ "$key_pad" -lt 1 ] && key_pad=1
 
     cols=$(_ui_term_cols)
     line_max=$((cols - 8))
@@ -527,7 +531,13 @@ _menu_item() {
     if [[ -n "$desc" ]]; then
         label_w=$(_ui_display_width "$label_txt")
         desc_w=$(_ui_display_width "$desc")
-        desc_max=$((line_max - $(_ui_display_width "$key_token") - 2 - label_w))
+        if [ "$label_w" -lt "$label_col_w" ]; then
+            label_pad=$((label_col_w - label_w))
+            desc_max=$((line_max - key_col_w - 1 - label_col_w - 1))
+        else
+            label_pad=1
+            desc_max=$((line_max - key_col_w - 1 - label_w - 1))
+        fi
         if [ "$desc_max" -ge "$desc_w" ]; then
             desc_txt="$desc"
         elif [ "$desc_max" -ge 8 ]; then
@@ -537,10 +547,16 @@ _menu_item() {
         fi
     else
         desc_txt=""
+        label_pad=0
     fi
 
-    printf "  ${color}%s${PLAIN} %s" "$key_token" "$label_txt"
-    [[ -n "$desc_txt" ]] && printf " ${DIM}%s${PLAIN}" "$desc_txt"
+    printf "  ${color}%s${PLAIN}" "$key_token"
+    _ui_repeat_char " " "$key_pad"
+    printf "%s" "$label_txt"
+    if [[ -n "$desc_txt" ]]; then
+        _ui_repeat_char " " "$label_pad"
+        printf "${DIM}%s${PLAIN}" "$desc_txt"
+    fi
     printf "\n"
 }
 
@@ -3786,6 +3802,26 @@ install_latest() {
     return 1
 }
 
+mihomo_pid() {
+    local pid ps_output
+    pid=$(pgrep -x mihomo 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+    [ -n "${pid:-}" ] && { printf '%s' "$pid"; return 0; }
+    pid=$(pidof mihomo 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+    [ -n "${pid:-}" ] && { printf '%s' "$pid"; return 0; }
+    ps_output=$(ps -w 2>/dev/null || ps 2>/dev/null || true)
+    pid=$(printf '%s\n' "$ps_output" | awk '
+        NR == 1 { next }
+        {
+            line=$0
+            pid=$1
+            if (pid !~ /^[0-9]+$/) next
+            if (line ~ /(^|[\/[:space:]])mihomo([[:space:]]|$)/ && line !~ /awk|grep|vpsgo/) print pid
+        }
+    ' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+    [ -n "${pid:-}" ] && { printf '%s' "$pid"; return 0; }
+    return 1
+}
+
 mihomo_running() {
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet mihomo 2>/dev/null; then
         return 0
@@ -3793,7 +3829,7 @@ mihomo_running() {
     if command -v rc-service >/dev/null 2>&1 && [ -x /etc/init.d/mihomo ] && rc-service mihomo status >/dev/null 2>&1; then
         return 0
     fi
-    pgrep -x mihomo >/dev/null 2>&1
+    mihomo_pid >/dev/null 2>&1
 }
 
 restart_mihomo() {
@@ -3809,14 +3845,18 @@ restart_mihomo() {
         rc-service mihomo restart >/dev/null 2>&1 || rc-service mihomo start >/dev/null 2>&1
         return $?
     fi
-    if pgrep -x mihomo >/dev/null 2>&1; then
-        pkill -x mihomo >/dev/null 2>&1 || true
+    local mihomo_pids one_pid
+    mihomo_pids=$(mihomo_pid 2>/dev/null || true)
+    if [[ -n "$mihomo_pids" ]]; then
+        for one_pid in $mihomo_pids; do
+            kill "$one_pid" 2>/dev/null || true
+        done
         sleep 1
     fi
     if [ -d /etc/mihomo ]; then
         nohup "$INSTALL_BIN" -d /etc/mihomo >/dev/null 2>&1 &
         sleep 1
-        pgrep -x mihomo >/dev/null 2>&1
+        mihomo_pid >/dev/null 2>&1
         return $?
     fi
     return 0
@@ -7058,7 +7098,42 @@ _mihomo_service_is_active() {
     if _has_openrc && [[ -x "$_MIHOMO_OPENRC_SERVICE_FILE" ]] && rc-service mihomo status >/dev/null 2>&1; then
         return 0
     fi
-    pgrep -x mihomo >/dev/null 2>&1
+    _mihomo_pid >/dev/null 2>&1
+}
+
+_mihomo_pid() {
+    local pid ps_output
+
+    pid=$(pgrep -x mihomo 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+    if [[ -n "${pid:-}" ]]; then
+        printf '%s' "$pid"
+        return 0
+    fi
+
+    pid=$(pidof mihomo 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]*$//' || true)
+    if [[ -n "${pid:-}" ]]; then
+        printf '%s' "$pid"
+        return 0
+    fi
+
+    ps_output=$(ps -w 2>/dev/null || ps 2>/dev/null || true)
+    pid=$(printf '%s\n' "$ps_output" | awk '
+        NR == 1 { next }
+        {
+            line=$0
+            pid=$1
+            if (pid !~ /^[0-9]+$/) next
+            if (line ~ /(^|[\/[:space:]])mihomo([[:space:]]|$)/ && line !~ /awk|grep|vpsgo/) {
+                print pid
+            }
+        }
+    ' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+    if [[ -n "${pid:-}" ]]; then
+        printf '%s' "$pid"
+        return 0
+    fi
+
+    return 1
 }
 
 _mihomo_service_is_configured() {
@@ -7120,11 +7195,13 @@ _mihomo_restart_now() {
         _error_no_exit "mihomo 重启失败，请检查 rc-service mihomo status"
         return 1
     else
-        local pid
-        pid=$(pgrep -x mihomo 2>/dev/null || true)
+        local pid p
+        pid=$(_mihomo_pid 2>/dev/null || true)
         if [[ -n "$pid" ]]; then
             _info "终止旧进程 (PID: $pid)..."
-            kill "$pid" 2>/dev/null
+            for p in $pid; do
+                kill "$p" 2>/dev/null || true
+            done
             sleep 1
         fi
         local config_dir="/etc/mihomo"
@@ -7135,8 +7212,8 @@ _mihomo_restart_now() {
         _info "启动 mihomo -d ${config_dir}..."
         nohup mihomo -d "$config_dir" >/dev/null 2>&1 &
         sleep 1
-        if pgrep -x mihomo &>/dev/null; then
-            _info "mihomo 已成功启动 (PID: $!)"
+        if pid=$(_mihomo_pid 2>/dev/null); then
+            _info "mihomo 已成功启动 (PID: $pid)"
             return 0
         fi
         _error_no_exit "mihomo 启动失败"
@@ -7402,8 +7479,12 @@ _mihomo_uninstall() {
         fi
     fi
 
-    if pgrep -x mihomo >/dev/null 2>&1; then
-        pkill -x mihomo >/dev/null 2>&1 || true
+    local mihomo_pids mihomo_pid
+    mihomo_pids=$(_mihomo_pid 2>/dev/null || true)
+    if [[ -n "$mihomo_pids" ]]; then
+        for mihomo_pid in $mihomo_pids; do
+            kill "$mihomo_pid" 2>/dev/null || true
+        done
         sleep 1
     fi
 
@@ -9250,23 +9331,23 @@ _mihomorule_list_policy_rules() {
 
 _mihomorule_pick_outbound() {
     local config_file="$1" _name_var="$2" _show_var="$3"
-    local idx=0 pick oi out_name out_show type server port cipher username password sni insecure obfs obfs_password mport
+    local idx=0 pick oi row_out_name row_out_show type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
     local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
     local -a outbound_names=() outbound_show_names=()
 
     printf "  ${BOLD}可用出口节点:${PLAIN}\n"
     _separator
-    while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
+    while IFS=$'\x1f' read -r row_out_name type server port cipher username password sni insecure obfs obfs_password mport \
         wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
         vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
-        [[ -z "${out_name:-}" ]] && continue
-        [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
-        out_show=$(_mihomochain_display_name "$out_name")
-        outbound_names+=("$out_name")
-        outbound_show_names+=("$out_show")
+        [[ -z "${row_out_name:-}" ]] && continue
+        [[ "$row_out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
+        row_out_show=$(_mihomochain_display_name "$row_out_name")
+        outbound_names+=("$row_out_name")
+        outbound_show_names+=("$row_out_show")
         idx=$((idx + 1))
-        printf "      [%d] %s (type=%s, %s:%s)\n" "$idx" "$out_show" "$type" "$server" "$port"
+        printf "      [%d] %s (type=%s, %s:%s)\n" "$idx" "$row_out_show" "$type" "$server" "$port"
     done < <(_mihomochain_read_proxy_rows "$config_file")
 
     if (( ${#outbound_names[@]} == 0 )); then
@@ -11259,7 +11340,7 @@ _mihomo_manage() {
             ver=$(mihomo -v 2>/dev/null | head -1)
             _info "当前版本: ${ver:-未知}"
             local pid
-            pid=$(pgrep -x mihomo 2>/dev/null || true)
+            pid=$(_mihomo_pid 2>/dev/null || true)
             if [[ -n "$pid" ]]; then
                 printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
             else
