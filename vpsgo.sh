@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.63"
+VERSION="2.64"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -4153,6 +4153,8 @@ _ACME_HOME="/root/.acme.sh"
 _ACME_BIN="/root/.acme.sh/acme.sh"
 _ACME_CERT_DEFAULT_DIR="/etc/mihomo/ssl"
 _MIHOMOCONF_IPV4_FORCE_PROXY_NAME="vpsgo-ipv4-direct-google"
+_MIHOMORULE_IOS_TREE_API="https://api.github.com/repos/blackmatrix7/ios_rule_script/git/trees/master?recursive=1"
+_MIHOMORULE_IOS_RAW_BASE="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master"
 _MIHOMO_WG_PROXY_SUPPORT_CACHE="unknown"
 _MIHOMO_SYSTEMD_SERVICE_FILE="/etc/systemd/system/mihomo.service"
 _MIHOMO_OPENRC_SERVICE_FILE="/etc/init.d/mihomo"
@@ -8027,6 +8029,10 @@ _mihomochain_yaml_list_from_csv() {
         printf '%s' "$raw"
         return 0
     fi
+    if [[ -z "$raw" ]]; then
+        printf '["0.0.0.0/0","::/0"]'
+        return 0
+    fi
 
     raw="${raw//;/,}"
     raw="${raw// /,}"
@@ -9249,16 +9255,24 @@ EOF
 }
 
 _mihomorule_add_policy_rule() {
-    local config_file="$1" prefix="$2" value="$3" out_name="$4"
-    local tmp_other tmp_user tmp_name tmp_new
+    local config_file="$1" prefix="$2" value="$3" out_name="$4" position="${5:-bottom}"
+    local tmp_other tmp_user tmp_name tmp_new tmp_ordered new_rule
 
     tmp_other=$(mktemp)
     tmp_user=$(mktemp)
     tmp_name=$(mktemp)
     tmp_new=$(mktemp)
+    new_rule="${prefix},${value},${out_name}"
     _mihomochain_rule_split_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
     awk -v p="${prefix},${value}," 'index($0, p) != 1 { print }' "$tmp_other" > "$tmp_new"
-    printf '%s,%s,%s\n' "$prefix" "$value" "$out_name" >> "$tmp_new"
+    if [[ "$position" == "top" ]]; then
+        tmp_ordered=$(mktemp)
+        printf '%s\n' "$new_rule" > "$tmp_ordered"
+        cat "$tmp_new" >> "$tmp_ordered"
+        mv "$tmp_ordered" "$tmp_new"
+    else
+        printf '%s\n' "$new_rule" >> "$tmp_new"
+    fi
     mv "$tmp_new" "$tmp_other"
     _mihomochain_rule_write_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
     rm -f "$tmp_other" "$tmp_user" "$tmp_name"
@@ -9312,14 +9326,15 @@ _mihomorule_read_policy_rules() {
 
 _mihomorule_list_policy_rules() {
     local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}"
-    local shown=0 kind value out_name out_show
+    local shown=0 idx=0 kind value out_name out_show
     while IFS=$'\x1f' read -r kind value out_name; do
         [[ -z "${kind:-}" ]] && continue
         shown=1
+        idx=$((idx + 1))
         out_show=$(_mihomochain_display_name "$out_name")
         case "$kind" in
-            RULE-SET) printf "      远程规则 %-28s ${DIM}-->${PLAIN} %s\n" "$value" "$out_show" ;;
-            DST-PORT) printf "      目标端口 %-28s ${DIM}-->${PLAIN} %s\n" "$value" "$out_show" ;;
+            RULE-SET) printf "      [%d] 远程规则 %-28s ${DIM}-->${PLAIN} %s\n" "$idx" "$value" "$out_show" ;;
+            DST-PORT) printf "      [%d] 目标端口 %-28s ${DIM}-->${PLAIN} %s\n" "$idx" "$value" "$out_show" ;;
         esac
     done < <(_mihomorule_read_policy_rules "$config_file")
     if [[ "$shown" -eq 0 ]]; then
@@ -9406,6 +9421,434 @@ _mihomorule_normalize_port_match() {
     return 0
 }
 
+_mihomorule_ios_rule_fallback_paths() {
+    cat <<'EOF'
+rule/Clash/AppStore/AppStore.yaml
+rule/Clash/Apple/Apple.yaml
+rule/Clash/AppleMusic/AppleMusic.yaml
+rule/Clash/AppleNews/AppleNews.yaml
+rule/Clash/AppleTV/AppleTV.yaml
+rule/Clash/Gemini/Gemini.yaml
+rule/Clash/GitHub/GitHub.yaml
+rule/Clash/Google/Google.yaml
+rule/Clash/GoogleDrive/GoogleDrive.yaml
+rule/Clash/GoogleEarth/GoogleEarth.yaml
+rule/Clash/GoogleFCM/GoogleFCM.yaml
+rule/Clash/GoogleSearch/GoogleSearch.yaml
+rule/Clash/GoogleVoice/GoogleVoice.yaml
+rule/Clash/Netflix/Netflix.yaml
+rule/Clash/OpenAI/OpenAI.yaml
+rule/Clash/Telegram/Telegram.yaml
+rule/Clash/TestFlight/TestFlight.yaml
+rule/Clash/YouTube/YouTube.yaml
+rule/Clash/iCloud/iCloud.yaml
+EOF
+}
+
+_mihomorule_related_terms() {
+    local raw="${1:-}" lower
+    raw=$(_mihomoconf_trim "$raw")
+    lower=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+    {
+        case "$lower" in
+            yt) printf '%s\n' YouTube ;;
+            nf) printf '%s\n' Netflix ;;
+            *) printf '%s\n' "$raw" ;;
+        esac
+        case "$lower" in
+            *apple*|*icloud*|*itunes*|*appstore*|*ios*|*macos*|*testflight*)
+                printf '%s\n' Apple iCloud AppStore AppleMusic AppleNews AppleTV TestFlight
+                ;;
+        esac
+        case "$lower" in
+            *youtube*|yt)
+                printf '%s\n' YouTube Google Gemini GoogleDrive GoogleFCM GoogleSearch GoogleVoice GoogleEarth
+                ;;
+            *gemini*|*bard*)
+                printf '%s\n' Gemini Google YouTube GoogleDrive GoogleFCM GoogleSearch GoogleVoice GoogleEarth
+                ;;
+            *google*)
+                printf '%s\n' Google YouTube Gemini GoogleDrive GoogleFCM GoogleSearch GoogleVoice GoogleEarth
+                ;;
+        esac
+        case "$lower" in
+            *netflix*|nf)
+                printf '%s\n' Netflix
+                ;;
+        esac
+    } | awk '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        {
+            t=trim($0)
+            k=tolower(t)
+            if (t != "" && !seen[k]++) print t
+        }
+    '
+}
+
+_mihomorule_fetch_ios_rule_paths() {
+    local output_file="$1" tmp_json fetch_status=0
+    tmp_json=$(mktemp) || return 1
+
+    if _download_file "$_MIHOMORULE_IOS_TREE_API" "$tmp_json" >/dev/null 2>&1; then
+        awk -F'"' '$2=="path" && $4 ~ /^rule\/Clash\/[^\/]+\/[^\/]+\.yaml$/ { print $4 }' "$tmp_json" \
+            | awk -F/ '{
+                name=$3
+                file=$4
+                sub(/\.yaml$/, "", file)
+                if (file == name) print
+            }' > "$output_file"
+    else
+        fetch_status=2
+    fi
+    rm -f "$tmp_json"
+
+    if [[ ! -s "$output_file" ]]; then
+        _mihomorule_ios_rule_fallback_paths > "$output_file"
+        fetch_status=2
+    fi
+    return "$fetch_status"
+}
+
+_mihomorule_search_ios_rules() {
+    local query="$1" output_file="$2"
+    local tmp_paths tmp_terms fetch_status=0 tab
+    tmp_paths=$(mktemp) || return 1
+    tmp_terms=$(mktemp) || {
+        rm -f "$tmp_paths"
+        return 1
+    }
+    tab=$'\t'
+
+    _mihomorule_related_terms "$query" > "$tmp_terms"
+    _mihomorule_fetch_ios_rule_paths "$tmp_paths"
+    fetch_status=$?
+
+    awk -v termsf="$tmp_terms" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function compact(s) {
+            gsub(/[[:space:]_.-]+/, "", s)
+            return s
+        }
+        BEGIN {
+            while ((getline t < termsf) > 0) {
+                t=trim(t)
+                if (t == "") continue
+                terms[++term_count]=tolower(t)
+            }
+            close(termsf)
+        }
+        {
+            path=$0
+            split(path, a, "/")
+            if (a[1] != "rule" || a[2] != "Clash" || a[3] == "") next
+            name=a[3]
+            lname=tolower(name)
+            lpath=tolower(path)
+            lname_compact=compact(lname)
+            score=0
+            for (i=1; i<=term_count; i++) {
+                term=terms[i]
+                term_compact=compact(term)
+                one=0
+                if (lname == term || lname_compact == term_compact) {
+                    one=100
+                } else if (term != "" && (index(lname, term) == 1 || index(lname_compact, term_compact) == 1)) {
+                    one=90
+                } else if (term != "" && (index(lname, term) > 0 || index(lname_compact, term_compact) > 0)) {
+                    one=80
+                } else if (term != "" && index(lpath, term) > 0) {
+                    one=65
+                }
+                if (i > 1 && one > 20) one-=15
+                if (one > score) score=one
+            }
+            if (score > 0) printf "%03d\t%s\t%s\n", score, name, path
+        }
+    ' "$tmp_paths" \
+        | LC_ALL=C sort -t "$tab" -k1,1nr -k2,2f \
+        | awk -F'\t' '!seen[tolower($2)]++ { printf "%s\037%s\n", $2, $3; count++; if (count >= 30) exit }' \
+        > "$output_file"
+
+    rm -f "$tmp_paths" "$tmp_terms"
+    return "$fetch_status"
+}
+
+_mihomorule_ios_rule_name_from_path() {
+    local rule_path="${1:-}" rest name
+    rest="${rule_path#rule/Clash/}"
+    name="${rest%%/*}"
+    [[ -n "$name" && "$name" != "$rest" ]] || return 1
+    printf '%s' "$name"
+}
+
+_mihomorule_prompt_priority() {
+    local _out_var="$1" choice position
+    printf "  ${BOLD}规则优先级:${PLAIN}\n"
+    _separator
+    _menu_pair "1" "靠前" "优先匹配" "green" "2" "靠后" "低优先级" "yellow"
+    read -rp "  选择优先级 [1/2，默认 1]: " choice
+    choice=$(_mihomoconf_trim "${choice:-1}")
+    case "$choice" in
+        1) position="top" ;;
+        2) position="bottom" ;;
+        *)
+            _error_no_exit "无效优先级，请输入 1 或 2"
+            return 1
+            ;;
+    esac
+    printf -v "$_out_var" '%s' "$position"
+    return 0
+}
+
+_mihomorule_add_ios_rule_path() {
+    local config_file="$1" rule_path="$2" out_name="$3" position="${4:-bottom}"
+    local rule_name provider_name url
+    rule_name=$(_mihomorule_ios_rule_name_from_path "$rule_path") || return 1
+    provider_name=$(_mihomorule_safe_provider_name "$rule_name")
+    url="${_MIHOMORULE_IOS_RAW_BASE}/${rule_path}"
+
+    _mihomorule_upsert_remote_provider "$config_file" "$provider_name" "$url" "classical" "yaml" "86400" "./ruleset/${provider_name}.yaml" || return 1
+    _mihomorule_add_policy_rule "$config_file" "RULE-SET" "$provider_name" "$out_name" "$position"
+}
+
+_mihomorule_search_ios_rule_add() {
+    local config_file="$1" query tmp_results fetch_status pick out_name out_show position token idx selected_count=0
+    local rule_name rule_path related_text applied=0 failed=0
+    local -a result_names=() result_paths=() selected_names=() selected_paths=() tokens=()
+
+    read -rp "  输入要搜索的规则/服务名称: " query
+    query=$(_mihomoconf_trim "${query:-}")
+    if [[ -z "$query" ]]; then
+        _error_no_exit "搜索名称不能为空"
+        return 1
+    fi
+
+    tmp_results=$(mktemp) || return 1
+    _mihomorule_search_ios_rules "$query" "$tmp_results"
+    fetch_status=$?
+    if [[ "$fetch_status" -eq 2 ]]; then
+        _warn "在线检索 iOS rule 仓库失败，已使用内置常用规则兜底"
+    fi
+
+    while IFS=$'\x1f' read -r rule_name rule_path; do
+        [[ -z "${rule_name:-}" || -z "${rule_path:-}" ]] && continue
+        result_names+=("$rule_name")
+        result_paths+=("$rule_path")
+    done < "$tmp_results"
+    rm -f "$tmp_results"
+
+    if (( ${#result_names[@]} == 0 )); then
+        _warn "未找到匹配规则"
+        return 1
+    fi
+
+    related_text=$(_mihomorule_related_terms "$query" | awk '{ out = (out == "" ? $0 : out "/" $0) } END { print out }')
+    [[ -n "$related_text" ]] && _info "关联搜索: ${related_text}"
+    printf "  ${BOLD}匹配规则:${PLAIN}\n"
+    _separator
+    for idx in "${!result_names[@]}"; do
+        printf "      [%d] %s  ${DIM}%s${PLAIN}\n" "$((idx + 1))" "${result_names[$idx]}" "${result_paths[$idx]}"
+    done
+
+    read -rp "  选择规则 [序号，可多选如 1 3 5，Enter 取消]: " pick
+    pick=$(_mihomoconf_trim "${pick:-}")
+    [[ -n "$pick" ]] || return 1
+    pick="${pick//,/ }"
+    pick="${pick//;/ }"
+    read -r -a tokens <<< "$pick"
+    local seen_picks=" "
+    for token in "${tokens[@]}"; do
+        token=$(_mihomoconf_trim "$token")
+        [[ -n "$token" ]] || continue
+        if [[ ! "$token" =~ ^[0-9]+$ ]]; then
+            _error_no_exit "无效序号: ${token}"
+            return 1
+        fi
+        idx=$((10#$token))
+        if (( idx < 1 || idx > ${#result_names[@]} )); then
+            _error_no_exit "序号超出范围: ${token}"
+            return 1
+        fi
+        if [[ "$seen_picks" == *" ${idx} "* ]]; then
+            continue
+        fi
+        seen_picks+="${idx} "
+        selected_names+=("${result_names[$((idx - 1))]}")
+        selected_paths+=("${result_paths[$((idx - 1))]}")
+        selected_count=$((selected_count + 1))
+    done
+    if (( selected_count == 0 )); then
+        _error_no_exit "未选择任何规则"
+        return 1
+    fi
+
+    if ! _mihomorule_pick_outbound "$config_file" out_name out_show; then
+        return 1
+    fi
+    if ! _mihomorule_prompt_priority position; then
+        return 1
+    fi
+
+    if [[ "$position" == "top" ]]; then
+        for ((idx=selected_count - 1; idx>=0; idx--)); do
+            if _mihomorule_add_ios_rule_path "$config_file" "${selected_paths[$idx]}" "$out_name" "$position"; then
+                applied=$((applied + 1))
+            else
+                failed=1
+                _warn "规则保存失败: ${selected_names[$idx]}"
+            fi
+        done
+    else
+        for idx in "${!selected_paths[@]}"; do
+            if _mihomorule_add_ios_rule_path "$config_file" "${selected_paths[$idx]}" "$out_name" "$position"; then
+                applied=$((applied + 1))
+            else
+                failed=1
+                _warn "规则保存失败: ${selected_names[$idx]}"
+            fi
+        done
+    fi
+
+    if (( applied == 0 )); then
+        return 1
+    fi
+    _info "已保存 ${applied} 个 iOS rule 规则 -> ${out_show}"
+    [[ "$failed" -eq 1 ]] && _warn "部分规则保存失败，请核对上方提示"
+    if ! _mihomorule_apply_and_restart; then
+        _warn "自动应用或重启失败，请检查日志后重试"
+    fi
+    return 0
+}
+
+_mihomorule_manage_priority() {
+    local config_file="$1"
+    local tmp_other tmp_user tmp_name tmp_reordered line kind value out_name out_show pick action ri idx target
+    local -a policy_lines=() new_policy_lines=()
+
+    tmp_other=$(mktemp)
+    tmp_user=$(mktemp)
+    tmp_name=$(mktemp)
+    tmp_reordered=$(mktemp)
+    _mihomochain_rule_split_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^(RULE-SET|DST-PORT),[^,]+,[^,]+$ ]]; then
+            policy_lines+=("$line")
+        fi
+    done < "$tmp_other"
+
+    if (( ${#policy_lines[@]} < 2 )); then
+        _warn "至少需要 2 条服务/端口分流规则才能调整优先级"
+        rm -f "$tmp_other" "$tmp_user" "$tmp_name" "$tmp_reordered"
+        return 1
+    fi
+
+    printf "  ${BOLD}当前优先级（越靠前越先匹配）:${PLAIN}\n"
+    _separator
+    for idx in "${!policy_lines[@]}"; do
+        IFS=',' read -r kind value out_name <<< "${policy_lines[$idx]}"
+        out_show=$(_mihomochain_display_name "$out_name")
+        case "$kind" in
+            RULE-SET) printf "      [%d] 远程规则 %s -> %s\n" "$((idx + 1))" "$value" "$out_show" ;;
+            DST-PORT) printf "      [%d] 目标端口 %s -> %s\n" "$((idx + 1))" "$value" "$out_show" ;;
+        esac
+    done
+
+    read -rp "  选择要调整的规则 [序号]: " pick
+    pick=$(_mihomoconf_trim "${pick:-}")
+    if [[ -z "$pick" || ! "$pick" =~ ^[0-9]+$ ]]; then
+        _error_no_exit "请输入有效序号"
+        rm -f "$tmp_other" "$tmp_user" "$tmp_name" "$tmp_reordered"
+        return 1
+    fi
+    ri=$((10#$pick - 1))
+    if (( ri < 0 || ri >= ${#policy_lines[@]} )); then
+        _error_no_exit "序号超出范围: ${pick}"
+        rm -f "$tmp_other" "$tmp_user" "$tmp_name" "$tmp_reordered"
+        return 1
+    fi
+
+    printf "  ${BOLD}调整方式:${PLAIN}\n"
+    _separator
+    _menu_pair "1" "上移" "" "green" "2" "下移" "" "green"
+    _menu_pair "3" "置顶" "" "green" "4" "置底" "" "yellow"
+    read -rp "  选择 [1-4]: " action
+    action=$(_mihomoconf_trim "${action:-}")
+
+    case "$action" in
+        1)
+            if (( ri == 0 )); then
+                _warn "该规则已经在最前"
+            else
+                target="${policy_lines[$ri]}"
+                policy_lines[$ri]="${policy_lines[$((ri - 1))]}"
+                policy_lines[$((ri - 1))]="$target"
+            fi
+            ;;
+        2)
+            if (( ri == ${#policy_lines[@]} - 1 )); then
+                _warn "该规则已经在最后"
+            else
+                target="${policy_lines[$ri]}"
+                policy_lines[$ri]="${policy_lines[$((ri + 1))]}"
+                policy_lines[$((ri + 1))]="$target"
+            fi
+            ;;
+        3)
+            target="${policy_lines[$ri]}"
+            new_policy_lines=("$target")
+            for idx in "${!policy_lines[@]}"; do
+                (( idx == ri )) && continue
+                new_policy_lines+=("${policy_lines[$idx]}")
+            done
+            policy_lines=("${new_policy_lines[@]}")
+            ;;
+        4)
+            target="${policy_lines[$ri]}"
+            new_policy_lines=()
+            for idx in "${!policy_lines[@]}"; do
+                (( idx == ri )) && continue
+                new_policy_lines+=("${policy_lines[$idx]}")
+            done
+            new_policy_lines+=("$target")
+            policy_lines=("${new_policy_lines[@]}")
+            ;;
+        *)
+            _error_no_exit "无效选项"
+            rm -f "$tmp_other" "$tmp_user" "$tmp_name" "$tmp_reordered"
+            return 1
+            ;;
+    esac
+
+    idx=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^(RULE-SET|DST-PORT),[^,]+,[^,]+$ ]]; then
+            printf '%s\n' "${policy_lines[$idx]}" >> "$tmp_reordered"
+            idx=$((idx + 1))
+        else
+            printf '%s\n' "$line" >> "$tmp_reordered"
+        fi
+    done < "$tmp_other"
+    mv "$tmp_reordered" "$tmp_other"
+    _mihomochain_rule_write_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+    rm -f "$tmp_other" "$tmp_user" "$tmp_name"
+
+    _info "规则优先级已更新"
+    if ! _mihomorule_apply_and_restart; then
+        _warn "自动应用或重启失败，请检查日志后重试"
+    fi
+    return 0
+}
+
 _mihomorule_apply_and_restart() {
     if ! _mihomochain_apply_to_config; then
         return 1
@@ -9430,16 +9873,18 @@ _mihomo_outbound_rule_manage() {
         _header "Mihomo 出站分流规则"
         _info "配置文件: ${config_file}"
         _info "预置规则来源: blackmatrix7/ios_rule_script (Clash classical yaml)"
+        _info "支持 iOS rule 模糊搜索、多选添加和规则优先级调整"
         _info "自定义远程规则支持 yaml/text/mrs；mrs 仅支持 domain/ipcidr"
         _separator
-        _menu_pair "1" "查看当前分流" "" "green" "2" "分流 Google" "远程规则" "green"
-        _menu_pair "3" "分流 Netflix" "远程规则" "green" "4" "分流指定端口" "DST-PORT" "green"
-        _menu_pair "5" "自定义远程规则" "支持 mrs" "green" "6" "删除分流规则" "" "yellow"
+        _menu_pair "1" "查看当前分流" "含优先级" "green" "2" "搜索 iOS 规则" "模糊搜索/多选" "green"
+        _menu_pair "3" "分流 Google" "远程规则" "green" "4" "分流 Netflix" "远程规则" "green"
+        _menu_pair "5" "分流指定端口" "DST-PORT" "green" "6" "自定义远程规则" "支持 mrs" "green"
+        _menu_pair "7" "调整规则优先级" "上移/置顶" "green" "8" "删除分流规则" "" "yellow"
         _menu_item "0" "返回上级菜单" "" "red"
         _separator
 
         local ch
-        read -rp "  选择 [0-6]: " ch
+        read -rp "  选择 [0-8]: " ch
         case "$ch" in
             1)
                 printf "  ${BOLD}服务/端口分流:${PLAIN}\n"
@@ -9447,9 +9892,13 @@ _mihomo_outbound_rule_manage() {
                 _mihomorule_list_policy_rules "$config_file"
                 _press_any_key
                 ;;
-            2|3)
-                local provider_name service_name url out_name out_show
-                if [[ "$ch" == "2" ]]; then
+            2)
+                _mihomorule_search_ios_rule_add "$config_file"
+                _press_any_key
+                ;;
+            3|4)
+                local provider_name service_name url out_name out_show position
+                if [[ "$ch" == "3" ]]; then
                     service_name="Google"
                     provider_name="vpsgo_google"
                     url="https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/Google/Google.yaml"
@@ -9462,16 +9911,20 @@ _mihomo_outbound_rule_manage() {
                     _press_any_key
                     continue
                 fi
+                if ! _mihomorule_prompt_priority position; then
+                    _press_any_key
+                    continue
+                fi
                 _mihomorule_upsert_remote_provider "$config_file" "$provider_name" "$url" "classical" "yaml" "86400" "./ruleset/${provider_name}.yaml"
-                _mihomorule_add_policy_rule "$config_file" "RULE-SET" "$provider_name" "$out_name"
+                _mihomorule_add_policy_rule "$config_file" "RULE-SET" "$provider_name" "$out_name" "$position"
                 _info "规则已保存: ${service_name} -> ${out_show}"
                 if ! _mihomorule_apply_and_restart; then
                     _warn "自动应用或重启失败，请检查日志后重试"
                 fi
                 _press_any_key
                 ;;
-            4)
-                local port_input port_match out_name out_show
+            5)
+                local port_input port_match out_name out_show position
                 read -rp "  目标端口/范围 (如 443 或 80/443/8000-9000): " port_input
                 if ! _mihomorule_normalize_port_match "$port_input" port_match; then
                     _error_no_exit "端口格式无效，支持单端口、范围和 / 分隔的多个端口"
@@ -9482,15 +9935,19 @@ _mihomo_outbound_rule_manage() {
                     _press_any_key
                     continue
                 fi
-                _mihomorule_add_policy_rule "$config_file" "DST-PORT" "$port_match" "$out_name"
+                if ! _mihomorule_prompt_priority position; then
+                    _press_any_key
+                    continue
+                fi
+                _mihomorule_add_policy_rule "$config_file" "DST-PORT" "$port_match" "$out_name" "$position"
                 _info "规则已保存: 目标端口 ${port_match} -> ${out_show}"
                 if ! _mihomorule_apply_and_restart; then
                     _warn "自动应用或重启失败，请检查日志后重试"
                 fi
                 _press_any_key
                 ;;
-            5)
-                local rule_label provider_name url behavior format interval path out_name out_show
+            6)
+                local rule_label provider_name url behavior format interval path out_name out_show position
                 read -rp "  规则名称 [如 youtube_domain]: " rule_label
                 rule_label=$(_mihomoconf_trim "${rule_label:-}")
                 provider_name=$(_mihomorule_safe_provider_name "$rule_label")
@@ -9544,18 +10001,26 @@ _mihomo_outbound_rule_manage() {
                     _press_any_key
                     continue
                 fi
+                if ! _mihomorule_prompt_priority position; then
+                    _press_any_key
+                    continue
+                fi
                 if ! _mihomorule_upsert_remote_provider "$config_file" "$provider_name" "$url" "$behavior" "$format" "$interval" "$path"; then
                     _press_any_key
                     continue
                 fi
-                _mihomorule_add_policy_rule "$config_file" "RULE-SET" "$provider_name" "$out_name"
+                _mihomorule_add_policy_rule "$config_file" "RULE-SET" "$provider_name" "$out_name" "$position"
                 _info "规则已保存: ${provider_name} (${format}/${behavior}) -> ${out_show}"
                 if ! _mihomorule_apply_and_restart; then
                     _warn "自动应用或重启失败，请检查日志后重试"
                 fi
                 _press_any_key
                 ;;
-            6)
+            7)
+                _mihomorule_manage_priority "$config_file"
+                _press_any_key
+                ;;
+            8)
                 local idx=0 kind value out_name out_show pick ri
                 local -a rule_kinds=() rule_values=() rule_outs=()
                 printf "  ${BOLD}可删除的服务/端口分流:${PLAIN}\n"
@@ -11361,7 +11826,7 @@ _mihomo_manage() {
         _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
         _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
-        _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "Google/Netflix/端口/mrs" "green"
+        _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "iOS 搜索/优先级" "green"
         _menu_pair "9" "Gemini/Google IPv4" "定向规则" "green" "10" "定时自动更新" "检查新版本" "green"
         _menu_item "11" "卸载 Mihomo" "停止并清理" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
