@@ -9591,21 +9591,21 @@ _mihomorule_ios_rule_name_from_path() {
 }
 
 _mihomorule_prompt_priority() {
-    local _out_var="$1" choice position
+    local _out_var="$1" choice _pos
     printf "  ${BOLD}规则优先级:${PLAIN}\n"
     _separator
     _menu_pair "1" "靠前" "优先匹配" "green" "2" "靠后" "低优先级" "yellow"
     read -rp "  选择优先级 [1/2，默认 1]: " choice
     choice=$(_mihomoconf_trim "${choice:-1}")
     case "$choice" in
-        1) position="top" ;;
-        2) position="bottom" ;;
+        1) _pos="top" ;;
+        2) _pos="bottom" ;;
         *)
             _error_no_exit "无效优先级，请输入 1 或 2"
             return 1
             ;;
     esac
-    printf -v "$_out_var" '%s' "$position"
+    printf -v "$_out_var" '%s' "$_pos"
     return 0
 }
 
@@ -11826,7 +11826,7 @@ _mihomo_manage() {
         _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
         _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
         _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
-        _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "iOS 搜索/优先级" "green"
+        _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "检索规则/优先级" "green"
         _menu_pair "9" "Gemini/Google IPv4" "定向规则" "green" "10" "定时自动更新" "检查新版本" "green"
         _menu_item "11" "卸载 Mihomo" "停止并清理" "yellow"
         _menu_item "0" "返回主菜单" "" "red"
