@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.65"
+VERSION="2.66"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -370,6 +370,21 @@ _ui_clear_screen() {
         tput clear 2>/dev/null || printf '\033[2J\033[H'
     else
         printf '\033[2J\033[H'
+    fi
+}
+
+_ui_print_screen() {
+    local out
+    out="$("$@")"
+
+    if [ -t 1 ]; then
+        # Synchronized updates are ignored by terminals that do not support them,
+        # but prevent visible top-to-bottom redraws in modern terminal emulators.
+        printf '\033[?2026h\033[2J\033[H'
+    fi
+    printf '%s\n' "$out"
+    if [ -t 1 ]; then
+        printf '\033[?2026l'
     fi
 }
 
@@ -2003,15 +2018,19 @@ _warp_remove_refresh_cron() {
     _press_any_key
 }
 
+_warp_manage_screen() {
+    _header "WARP 管理"
+    _menu_pair "1" "打开 warp-sh" "安装/管理 WARP" "green" "2" "刷新 WARP 网络" "重连 WARP" "green"
+    _menu_pair "3" "刷 Netflix IP" "IPv4/IPv6" "green" "4" "定时刷新" "北京时间" "green"
+    _menu_pair "5" "查看定时任务" "配置/日志" "cyan" "6" "删除定时任务" "" "yellow"
+    _separator
+    _menu_item "0" "返回上级菜单" "" "red"
+    _separator
+}
+
 _warp_manage() {
     while true; do
-        _header "WARP 管理"
-        _menu_pair "1" "打开 warp-sh" "安装/管理 WARP" "green" "2" "刷新 WARP 网络" "重连 WARP" "green"
-        _menu_pair "3" "刷 Netflix IP" "IPv4/IPv6" "green" "4" "定时刷新" "北京时间" "green"
-        _menu_pair "5" "查看定时任务" "配置/日志" "cyan" "6" "删除定时任务" "" "yellow"
-        _separator
-        _menu_item "0" "返回上级菜单" "" "red"
-        _separator
+        _ui_print_screen _warp_manage_screen
         local ch
         read -rp "  选择 [0-6]: " ch
         case "$ch" in
@@ -11794,43 +11813,47 @@ _mihomo_ipv4_google_manage() {
     done
 }
 
+_mihomo_manage_screen() {
+    _header "Mihomo 管理"
+    local config_dir="$_MIHOMOCONF_CONFIG_DIR"
+    local config_file="$_MIHOMOCONF_CONFIG_FILE"
+
+    if command -v mihomo >/dev/null 2>&1; then
+        local ver
+        ver=$(mihomo -v 2>/dev/null | head -1)
+        _info "当前版本: ${ver:-未知}"
+        local pid
+        pid=$(_mihomo_pid 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
+        else
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
+        fi
+    else
+        _info "当前未安装 mihomo"
+    fi
+    _info "配置目录: ${config_dir}"
+    _info "配置文件: ${config_file}"
+    if [[ -f "$config_file" ]]; then
+        printf "${GREEN}  ✔ ${PLAIN}配置状态: ${GREEN}已存在${PLAIN}\n"
+    else
+        printf "${GREEN}  ✔ ${PLAIN}配置状态: ${YELLOW}不存在${PLAIN} (可通过选项 2 生成)\n"
+    fi
+
+    _separator
+    _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
+    _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
+    _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
+    _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "检索规则/优先级" "green"
+    _menu_pair "9" "Gemini/Google IPv4" "定向规则" "green" "10" "定时自动更新" "检查新版本" "green"
+    _menu_item "11" "卸载 Mihomo" "停止并清理" "yellow"
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _mihomo_manage() {
     while true; do
-        _header "Mihomo 管理"
-        local config_dir="$_MIHOMOCONF_CONFIG_DIR"
-        local config_file="$_MIHOMOCONF_CONFIG_FILE"
-
-        if command -v mihomo >/dev/null 2>&1; then
-            local ver
-            ver=$(mihomo -v 2>/dev/null | head -1)
-            _info "当前版本: ${ver:-未知}"
-            local pid
-            pid=$(_mihomo_pid 2>/dev/null || true)
-            if [[ -n "$pid" ]]; then
-                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
-            else
-                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
-            fi
-        else
-            _info "当前未安装 mihomo"
-        fi
-        _info "配置目录: ${config_dir}"
-        _info "配置文件: ${config_file}"
-        if [[ -f "$config_file" ]]; then
-            printf "${GREEN}  ✔ ${PLAIN}配置状态: ${GREEN}已存在${PLAIN}\n"
-        else
-            printf "${GREEN}  ✔ ${PLAIN}配置状态: ${YELLOW}不存在${PLAIN} (可通过选项 2 生成)\n"
-        fi
-
-        _separator
-        _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
-        _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
-        _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
-        _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "检索规则/优先级" "green"
-        _menu_pair "9" "Gemini/Google IPv4" "定向规则" "green" "10" "定时自动更新" "检查新版本" "green"
-        _menu_item "11" "卸载 Mihomo" "停止并清理" "yellow"
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _mihomo_manage_screen
 
         local choice
         read -rp "  选择 [0-11]: " choice
@@ -13021,32 +13044,36 @@ _singbox_uninstall() {
     _press_any_key
 }
 
+_singbox_manage_screen() {
+    _header "Sing-Box 管理"
+
+    echo ""
+    if command -v sing-box >/dev/null 2>&1; then
+        local ver
+        ver=$(sing-box version 2>/dev/null | head -1)
+        _info "当前版本: ${ver:-未知}"
+        local pid
+        pid=$(pgrep -x sing-box 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
+        else
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
+        fi
+    else
+        _info "当前未安装 sing-box"
+    fi
+
+    _separator
+    _menu_pair "1" "安装/更新 Sing-Box" "" "green" "2" "配置自启并启动" "" "green"
+    _menu_pair "3" "重启 Sing-Box" "" "green" "4" "查看状态" "" "green"
+    _menu_pair "5" "查看日志" "" "green" "6" "卸载 Sing-Box" "停止并清理" "yellow"
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _singbox_manage() {
     while true; do
-        _header "Sing-Box 管理"
-
-        echo ""
-        if command -v sing-box >/dev/null 2>&1; then
-            local ver
-            ver=$(sing-box version 2>/dev/null | head -1)
-            _info "当前版本: ${ver:-未知}"
-            local pid
-            pid=$(pgrep -x sing-box 2>/dev/null || true)
-            if [[ -n "$pid" ]]; then
-                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
-            else
-                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
-            fi
-        else
-            _info "当前未安装 sing-box"
-        fi
-
-        _separator
-        _menu_pair "1" "安装/更新 Sing-Box" "" "green" "2" "配置自启并启动" "" "green"
-        _menu_pair "3" "重启 Sing-Box" "" "green" "4" "查看状态" "" "green"
-        _menu_pair "5" "查看日志" "" "green" "6" "卸载 Sing-Box" "停止并清理" "yellow"
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _singbox_manage_screen
 
         local choice
         read -rp "  选择 [0-6]: " choice
@@ -13922,37 +13949,41 @@ _snell_uninstall() {
     _press_any_key
 }
 
+_snell_manage_screen() {
+    _header "Snell V5 管理"
+    echo ""
+
+    if [[ -x "$_SNELL_BIN" ]]; then
+        local ver
+        ver=$(_snell_bin_version)
+        [[ -n "$ver" ]] && _info "当前版本: ${ver}" || _info "当前已安装 snell-server"
+    else
+        _info "当前未安装 snell-server"
+    fi
+    if [[ -f "$_SNELL_CONFIG_FILE" ]]; then
+        local p
+        p=$(_snell_conf_get_value "port" 2>/dev/null || true)
+        if ! _is_valid_port "${p:-}"; then
+            local l
+            l=$(_snell_conf_get_value "listen" 2>/dev/null || true)
+            p=$(_snell_parse_port_from_listen "$l" 2>/dev/null || true)
+        fi
+        _info "配置文件: ${_SNELL_CONFIG_FILE}"
+        [[ -n "$p" ]] && _info "监听端口: ${p}"
+    fi
+
+    _separator
+    _menu_pair "1" "安装/更新 Snell V5" "安装服务端" "green" "2" "配置并启动 Snell" "检查端口" "green"
+    _menu_pair "3" "重启 Snell" "" "green" "4" "查看状态" "" "green"
+    _menu_pair "5" "导出 Surge V5 配置" "直接输出配置行" "green" "6" "查看日志" "" "green"
+    _menu_item "7" "卸载 Snell" "停止并清理" "yellow"
+    _menu_item "0" "返回上级菜单" "" "red"
+    _separator
+}
+
 _snell_manage() {
     while true; do
-        _header "Snell V5 管理"
-        echo ""
-
-        if [[ -x "$_SNELL_BIN" ]]; then
-            local ver
-            ver=$(_snell_bin_version)
-            [[ -n "$ver" ]] && _info "当前版本: ${ver}" || _info "当前已安装 snell-server"
-        else
-            _info "当前未安装 snell-server"
-        fi
-        if [[ -f "$_SNELL_CONFIG_FILE" ]]; then
-            local p
-            p=$(_snell_conf_get_value "port" 2>/dev/null || true)
-            if ! _is_valid_port "${p:-}"; then
-                local l
-                l=$(_snell_conf_get_value "listen" 2>/dev/null || true)
-                p=$(_snell_parse_port_from_listen "$l" 2>/dev/null || true)
-            fi
-            _info "配置文件: ${_SNELL_CONFIG_FILE}"
-            [[ -n "$p" ]] && _info "监听端口: ${p}"
-        fi
-
-        _separator
-        _menu_pair "1" "安装/更新 Snell V5" "安装服务端" "green" "2" "配置并启动 Snell" "检查端口" "green"
-        _menu_pair "3" "重启 Snell" "" "green" "4" "查看状态" "" "green"
-        _menu_pair "5" "导出 Surge V5 配置" "直接输出配置行" "green" "6" "查看日志" "" "green"
-        _menu_item "7" "卸载 Snell" "停止并清理" "yellow"
-        _menu_item "0" "返回上级菜单" "" "red"
-        _separator
+        _ui_print_screen _snell_manage_screen
 
         local ch
         read -rp "  选择 [0-7]: " ch
@@ -14857,22 +14888,7 @@ _realm_configure() {
     fi
 
     while true; do
-        _header "Realm 转发规则管理"
-        echo ""
-
-        if [[ -f "$_REALM_CONFIG_FILE" ]]; then
-            _realm_list_rules
-        else
-            _info "暂无转发规则，配置文件未创建"
-        fi
-
-        echo ""
-        _separator
-        _menu_item "1" "添加转发规则" "监听端口 → 目标地址" "green"
-        _menu_item "2" "删除转发规则" "" "yellow"
-        _menu_item "3" "启动/重启 Realm" "启用服务" "green"
-        _menu_item "0" "返回" "" "red"
-        _separator
+        _ui_print_screen _realm_configure_screen
 
         local ch
         read -rp "  选择 [0-3]: " ch
@@ -14886,37 +14902,60 @@ _realm_configure() {
     done
 }
 
+_realm_configure_screen() {
+    _header "Realm 转发规则管理"
+    echo ""
+
+    if [[ -f "$_REALM_CONFIG_FILE" ]]; then
+        _realm_list_rules
+    else
+        _info "暂无转发规则，配置文件未创建"
+    fi
+
+    echo ""
+    _separator
+    _menu_item "1" "添加转发规则" "监听端口 → 目标地址" "green"
+    _menu_item "2" "删除转发规则" "" "yellow"
+    _menu_item "3" "启动/重启 Realm" "启用服务" "green"
+    _menu_item "0" "返回" "" "red"
+    _separator
+}
+
+_realm_manage_screen() {
+    _header "Realm 端口转发管理"
+    echo ""
+
+    if [[ -x "$_REALM_BIN" ]]; then
+        local ver
+        ver=$(_realm_bin_version)
+        [[ -n "$ver" ]] && _info "当前版本: ${ver}" || _info "当前已安装 realm"
+    else
+        _info "当前未安装 realm"
+    fi
+    if [[ -f "$_REALM_CONFIG_FILE" ]]; then
+        local rule_count=0 l r
+        while IFS=$'\x1f' read -r l r; do
+            [[ -z "$l" ]] && continue
+            ((rule_count++))
+        done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+        _info "配置文件: ${_REALM_CONFIG_FILE} (${rule_count} 条规则)"
+    fi
+    if _realm_service_is_active; then
+        _info "服务状态: ${GREEN}运行中${PLAIN}"
+    fi
+
+    _separator
+    _menu_pair "1" "安装/更新 Realm" "下载二进制" "green" "2" "管理转发规则" "添加/删除规则" "green"
+    _menu_pair "3" "查看转发规则" "规则列表" "green" "4" "重启 Realm" "" "green"
+    _menu_pair "5" "查看状态" "" "green" "6" "查看日志" "" "green"
+    _menu_item "7" "卸载 Realm" "停止并清理" "yellow"
+    _menu_item "0" "返回上级菜单" "" "red"
+    _separator
+}
+
 _realm_manage() {
     while true; do
-        _header "Realm 端口转发管理"
-        echo ""
-
-        if [[ -x "$_REALM_BIN" ]]; then
-            local ver
-            ver=$(_realm_bin_version)
-            [[ -n "$ver" ]] && _info "当前版本: ${ver}" || _info "当前已安装 realm"
-        else
-            _info "当前未安装 realm"
-        fi
-        if [[ -f "$_REALM_CONFIG_FILE" ]]; then
-            local rule_count=0 l r
-            while IFS=$'\x1f' read -r l r; do
-                [[ -z "$l" ]] && continue
-                ((rule_count++))
-            done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
-            _info "配置文件: ${_REALM_CONFIG_FILE} (${rule_count} 条规则)"
-        fi
-        if _realm_service_is_active; then
-            _info "服务状态: ${GREEN}运行中${PLAIN}"
-        fi
-
-        _separator
-        _menu_pair "1" "安装/更新 Realm" "下载二进制" "green" "2" "管理转发规则" "添加/删除规则" "green"
-        _menu_pair "3" "查看转发规则" "规则列表" "green" "4" "重启 Realm" "" "green"
-        _menu_pair "5" "查看状态" "" "green" "6" "查看日志" "" "green"
-        _menu_item "7" "卸载 Realm" "停止并清理" "yellow"
-        _menu_item "0" "返回上级菜单" "" "red"
-        _separator
+        _ui_print_screen _realm_manage_screen
 
         local ch
         read -rp "  选择 [0-7]: " ch
@@ -16185,44 +16224,48 @@ _ssrust_uninstall() {
     _press_any_key
 }
 
-_ssrust_manage() {
-    while true; do
-        _header "Shadowsocks-Rust 管理"
-        echo ""
+_ssrust_manage_screen() {
+    _header "Shadowsocks-Rust 管理"
+    echo ""
 
-        if command -v ssserver >/dev/null 2>&1 || [[ -x "$_SSRUST_BIN" ]]; then
-            local ver
-            ver=$(_ssrust_bin_version)
-            [[ -n "$ver" ]] && _info "当前版本: ${ver}" || _info "当前已安装 ssserver"
-            local pid
-            pid=$(_ssrust_running_pid 2>/dev/null || true)
-            if _ssrust_service_is_active; then
-                if [[ -n "$pid" ]]; then
-                    printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
-                else
-                    printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN}\n"
-                fi
+    if command -v ssserver >/dev/null 2>&1 || [[ -x "$_SSRUST_BIN" ]]; then
+        local ver
+        ver=$(_ssrust_bin_version)
+        [[ -n "$ver" ]] && _info "当前版本: ${ver}" || _info "当前已安装 ssserver"
+        local pid
+        pid=$(_ssrust_running_pid 2>/dev/null || true)
+        if _ssrust_service_is_active; then
+            if [[ -n "$pid" ]]; then
+                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
             else
-                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
+                printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN}\n"
             fi
         else
-            _info "当前未安装 shadowsocks-rust"
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
         fi
-        if [[ -f "$_SSRUST_CONFIG_FILE" ]]; then
-            local p m
-            p=$(_ssrust_conf_get_value "server_port" 2>/dev/null || true)
-            m=$(_ssrust_conf_get_value "method" 2>/dev/null || true)
-            _info "配置文件: ${_SSRUST_CONFIG_FILE}"
-            [[ -n "$p" ]] && _info "监听端口: ${p}"
-            [[ -n "$m" ]] && _info "加密方式: ${m}"
-        fi
+    else
+        _info "当前未安装 shadowsocks-rust"
+    fi
+    if [[ -f "$_SSRUST_CONFIG_FILE" ]]; then
+        local p m
+        p=$(_ssrust_conf_get_value "server_port" 2>/dev/null || true)
+        m=$(_ssrust_conf_get_value "method" 2>/dev/null || true)
+        _info "配置文件: ${_SSRUST_CONFIG_FILE}"
+        [[ -n "$p" ]] && _info "监听端口: ${p}"
+        [[ -n "$m" ]] && _info "加密方式: ${m}"
+    fi
 
-        _separator
-        _menu_pair "1" "安装/更新 Shadowsocks-Rust" "安装服务端" "green" "2" "配置并启动 Shadowsocks-Rust" "检查端口" "green"
-        _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Shadowsocks-Rust" "" "green"
-        _menu_pair "5" "导出节点配置文件" "输出 SS/Mihomo/Sing-Box 文件" "green" "6" "查看日志" "" "green"
-        _menu_pair "7" "卸载 Shadowsocks-Rust" "停止并清理" "yellow" "0" "返回上级菜单" "" "red"
-        _separator
+    _separator
+    _menu_pair "1" "安装/更新 Shadowsocks-Rust" "安装服务端" "green" "2" "配置并启动 Shadowsocks-Rust" "检查端口" "green"
+    _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Shadowsocks-Rust" "" "green"
+    _menu_pair "5" "导出节点配置文件" "输出 SS/Mihomo/Sing-Box 文件" "green" "6" "查看日志" "" "green"
+    _menu_pair "7" "卸载 Shadowsocks-Rust" "停止并清理" "yellow" "0" "返回上级菜单" "" "red"
+    _separator
+}
+
+_ssrust_manage() {
+    while true; do
+        _ui_print_screen _ssrust_manage_screen
 
         local ch
         read -rp "  选择 [0-7]: " ch
@@ -17455,33 +17498,37 @@ _wireguard_uninstall() {
     _press_any_key
 }
 
+_wireguard_manage_screen() {
+    _header "WireGuard 原生节点"
+    local iface conf_file listen_port
+    iface=$(_wireguard_detect_iface)
+    conf_file="${_WIREGUARD_DIR}/${iface}.conf"
+
+    if command -v wg >/dev/null 2>&1; then
+        _info "工具版本: $(wg --version 2>/dev/null | head -1)"
+    else
+        _info "当前未安装 wireguard-tools"
+    fi
+    _info "接口: ${iface}"
+    if [[ -f "$conf_file" ]]; then
+        listen_port=$(_wireguard_conf_get_value "$iface" "ListenPort" 2>/dev/null || true)
+        _info "配置文件: ${conf_file}"
+        [[ -n "$listen_port" ]] && _info "监听端口: ${listen_port}"
+    else
+        _info "配置文件: ${conf_file} (不存在，可通过选项 2 部署)"
+    fi
+
+    _separator
+    _menu_pair "1" "安装/更新 WireGuard" "原生内核方案" "green" "2" "部署/重建节点" "含 Mihomo 端口冲突检查" "green"
+    _menu_pair "3" "重启 WireGuard" "" "green" "4" "查看状态" "" "green"
+    _menu_pair "5" "查看客户端配置" "可显示二维码" "green" "6" "新增客户端" "不重建服务端" "green"
+    _menu_pair "7" "卸载 WireGuard 节点" "停止并清理" "yellow" "0" "返回上级菜单" "" "red"
+    _separator
+}
+
 _wireguard_manage() {
     while true; do
-        _header "WireGuard 原生节点"
-        local iface conf_file listen_port
-        iface=$(_wireguard_detect_iface)
-        conf_file="${_WIREGUARD_DIR}/${iface}.conf"
-
-        if command -v wg >/dev/null 2>&1; then
-            _info "工具版本: $(wg --version 2>/dev/null | head -1)"
-        else
-            _info "当前未安装 wireguard-tools"
-        fi
-        _info "接口: ${iface}"
-        if [[ -f "$conf_file" ]]; then
-            listen_port=$(_wireguard_conf_get_value "$iface" "ListenPort" 2>/dev/null || true)
-            _info "配置文件: ${conf_file}"
-            [[ -n "$listen_port" ]] && _info "监听端口: ${listen_port}"
-        else
-            _info "配置文件: ${conf_file} (不存在，可通过选项 2 部署)"
-        fi
-
-        _separator
-        _menu_pair "1" "安装/更新 WireGuard" "原生内核方案" "green" "2" "部署/重建节点" "含 Mihomo 端口冲突检查" "green"
-        _menu_pair "3" "重启 WireGuard" "" "green" "4" "查看状态" "" "green"
-        _menu_pair "5" "查看客户端配置" "可显示二维码" "green" "6" "新增客户端" "不重建服务端" "green"
-        _menu_pair "7" "卸载 WireGuard 节点" "停止并清理" "yellow" "0" "返回上级菜单" "" "red"
-        _separator
+        _ui_print_screen _wireguard_manage_screen
 
         local ch
         read -rp "  选择 [0-7]: " ch
@@ -17892,21 +17939,25 @@ _acme_issue_cert() {
     _press_any_key
 }
 
+_acme_manage_screen() {
+    _header "ACME 证书管理"
+    if _acme_is_installed; then
+        _info "acme.sh: $(_acme_cmd --version 2>/dev/null || echo unknown)"
+    else
+        _warn "acme.sh 未安装"
+    fi
+
+    _separator
+    _menu_pair "1" "安装 acme.sh" "安装/更新工具" "green" "2" "申请证书" "80/DNS 验证" "green"
+    _menu_pair "3" "手动更新 acme.sh" "" "green" "4" "自动更新设置" "开启/关闭" "green"
+    _menu_item "5" "手动更新证书" "立即续期并覆盖安装" "green"
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _acme_manage() {
     while true; do
-        _header "ACME 证书管理"
-        if _acme_is_installed; then
-            _info "acme.sh: $(_acme_cmd --version 2>/dev/null || echo unknown)"
-        else
-            _warn "acme.sh 未安装"
-        fi
-
-        _separator
-        _menu_pair "1" "安装 acme.sh" "安装/更新工具" "green" "2" "申请证书" "80/DNS 验证" "green"
-        _menu_pair "3" "手动更新 acme.sh" "" "green" "4" "自动更新设置" "开启/关闭" "green"
-        _menu_item "5" "手动更新证书" "立即续期并覆盖安装" "green"
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _acme_manage_screen
 
         local choice
         read -rp "  选择 [0-5]: " choice
@@ -18916,17 +18967,21 @@ _dns_change_flow() {
     _press_any_key
 }
 
+_dns_manage_screen() {
+    _header "Linux DNS 管理"
+    _dns_show_current_config
+
+    printf "  ${BOLD}选择操作${PLAIN}\n"
+    _separator
+    _menu_pair "1" "临时修改 DNS" "重启后可能失效" "green" "2" "永久修改 DNS" "持久化并重启组件" "green"
+    _menu_pair "3" "仅验证当前 DNS" "A/AAAA 解析测试" "green" "4" "主流 DNS 测速" "国内/国外/ECS/IPv6" "green"
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _dns_manage() {
     while true; do
-        _header "Linux DNS 管理"
-        _dns_show_current_config
-
-        printf "  ${BOLD}选择操作${PLAIN}\n"
-        _separator
-        _menu_pair "1" "临时修改 DNS" "重启后可能失效" "green" "2" "永久修改 DNS" "持久化并重启组件" "green"
-        _menu_pair "3" "仅验证当前 DNS" "A/AAAA 解析测试" "green" "4" "主流 DNS 测速" "国内/国外/ECS/IPv6" "green"
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _dns_manage_screen
 
         local choice
         read -rp "  选择 [0-4]: " choice
@@ -19779,15 +19834,24 @@ _show_main_menu() {
     _separator
 }
 
+_show_home_screen() {
+    _show_banner
+    _show_main_menu
+}
+
+_network_opt_menu_screen() {
+    _header "网络优化"
+    _menu_pair "1" "BBR" "启用拥塞控制" "green" "2" "队列调度" "切换 qdisc" "green"
+    _menu_pair "3" "IPv4/IPv6 优先" "切换出口偏好" "green" "4" "TCP 缓冲区" "调整内核参数" "green"
+    _menu_item "5" "WARP 管理" "安装/刷新/定时" "green"
+    _separator
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _network_opt_menu() {
     while true; do
-        _header "网络优化"
-        _menu_pair "1" "BBR" "启用拥塞控制" "green" "2" "队列调度" "切换 qdisc" "green"
-        _menu_pair "3" "IPv4/IPv6 优先" "切换出口偏好" "green" "4" "TCP 缓冲区" "调整内核参数" "green"
-        _menu_item "5" "WARP 管理" "安装/刷新/定时" "green"
-        _separator
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _network_opt_menu_screen
         local ch
         read -rp "  选择 [0-5]: " ch
         case "$ch" in
@@ -19802,15 +19866,19 @@ _network_opt_menu() {
     done
 }
 
+_script_tools_menu_screen() {
+    _header "脚本工具"
+    _menu_pair "1" "iPerf3 服务端" "启动测速服务" "green" "2" "NodeQuality" "线路质量测试" "green"
+    _menu_pair "3" "Speedtest" "安装测速 CLI" "green" "4" "Akile DNS" "检测 DNS 解锁" "green"
+    _menu_item "5" "DNS 管理" "修改/验证 DNS" "green"
+    _separator
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _script_tools_menu() {
     while true; do
-        _header "脚本工具"
-        _menu_pair "1" "iPerf3 服务端" "启动测速服务" "green" "2" "NodeQuality" "线路质量测试" "green"
-        _menu_pair "3" "Speedtest" "安装测速 CLI" "green" "4" "Akile DNS" "检测 DNS 解锁" "green"
-        _menu_item "5" "DNS 管理" "修改/验证 DNS" "green"
-        _separator
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _script_tools_menu_screen
         local ch
         read -rp "  选择 [0-5]: " ch
         case "$ch" in
@@ -19825,15 +19893,19 @@ _script_tools_menu() {
     done
 }
 
+_system_opt_menu_screen() {
+    _header "系统优化"
+    _menu_pair "1" "日志轮转" "限制 Docker 日志" "green" "2" "Swap 管理" "创建/删除 Swap" "green"
+    _menu_pair "3" "Root SSH" "允许 root 登录" "green" "4" "SSH 密钥登录" "禁用密码登录" "green"
+    _menu_item "5" "1Panel NAT 链" "挂载转发链" "green"
+    _separator
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _system_opt_menu() {
     while true; do
-        _header "系统优化"
-        _menu_pair "1" "日志轮转" "限制 Docker 日志" "green" "2" "Swap 管理" "创建/删除 Swap" "green"
-        _menu_pair "3" "Root SSH" "允许 root 登录" "green" "4" "SSH 密钥登录" "禁用密码登录" "green"
-        _menu_item "5" "1Panel NAT 链" "挂载转发链" "green"
-        _separator
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _system_opt_menu_screen
         local ch
         read -rp "  选择 [0-5]: " ch
         case "$ch" in
@@ -19848,15 +19920,19 @@ _system_opt_menu() {
     done
 }
 
+_proxy_tools_menu_screen() {
+    _header "代理工具"
+    _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
+    _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
+    _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "Realm 转发" "端口转发管理" "green"
+    _menu_item "7" "ACME 证书" "申请/续期证书" "green"
+    _menu_item "0" "返回主菜单" "" "red"
+    _separator
+}
+
 _proxy_tools_menu() {
     while true; do
-        _header "代理工具"
-        _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
-        _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
-        _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "Realm 转发" "端口转发管理" "green"
-        _menu_item "7" "ACME 证书" "申请/续期证书" "green"
-        _menu_item "0" "返回主菜单" "" "red"
-        _separator
+        _ui_print_screen _proxy_tools_menu_screen
         local ch
         read -rp "  选择 [0-7]: " ch
         case "$ch" in
@@ -19880,8 +19956,7 @@ main() {
     _self_install
 
     while true; do
-        _show_banner
-        _show_main_menu
+        _ui_print_screen _show_home_screen
 
         local choice
         read -rp "  选择: " choice
