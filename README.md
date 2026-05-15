@@ -95,6 +95,7 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 |---|------|------|
 | 16 | Swap 管理 | 智能推荐大小，创建/删除 Swap 文件 |
 | 17 | 1Panel iptables 代理链 | 快速挂载 1PANEL_PREROUTING / 1PANEL_POSTROUTING 到 NAT 主链，并可尝试保存规则 |
+| - | SSH 端口 | 快速修改 sshd 监听端口，自动备份、校验并重启 SSH 服务 |
 
 ### 其他
 

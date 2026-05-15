@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.67"
+VERSION="2.68"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -19284,6 +19284,200 @@ EOF
     chmod 644 "$f"
 }
 
+_ssh_list_config_files() {
+    local f
+    printf '%s\n' "/etc/ssh/sshd_config"
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done
+}
+
+_ssh_current_ports() {
+    local sshd_cfg="/etc/ssh/sshd_config" ports
+    if command -v sshd >/dev/null 2>&1 && [ -f "$sshd_cfg" ]; then
+        ports=$(sshd -T -f "$sshd_cfg" 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -nu)
+        if [ -n "$ports" ]; then
+            printf '%s' "$(printf '%s\n' "$ports" | paste -sd ',' -)"
+            return
+        fi
+    fi
+
+    ports=$(
+        while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sed -nE 's/^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]]+([0-9]+).*/\1/p' "$f" 2>/dev/null
+        done < <(_ssh_list_config_files) | sort -nu
+    )
+    printf '%s' "${ports:-22}" | paste -sd ',' -
+}
+
+_ssh_port_in_current_list() {
+    local port="$1" current="${2:-}" item
+    local -a ports_arr
+    IFS=',' read -r -a ports_arr <<< "$current"
+    for item in "${ports_arr[@]}"; do
+        [ "$item" = "$port" ] && return 0
+    done
+    return 1
+}
+
+_ssh_port_is_listening() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnH "sport = :${port}" 2>/dev/null | grep -q .
+        return $?
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
+        return $?
+    fi
+    return 1
+}
+
+_ssh_backup_file_once() {
+    local file="$1" backup
+    [ -f "$file" ] || return 0
+    backup="${file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$file" "$backup" || return 1
+    _info "已备份 SSH 配置: ${backup}"
+}
+
+_ssh_comment_active_port_lines() {
+    local file="$1" tmp_file
+    [ -f "$file" ] || return 0
+    grep -Eiq '^[[:space:]]*Port[[:space:]]+[0-9]+' "$file" || return 0
+    tmp_file=$(mktemp /tmp/vpsgo-sshd-port.XXXXXX) || return 1
+    awk '
+        /^[[:space:]]*[Pp][Oo][Rr][Tt][[:space:]]+[0-9]+/ {
+            match($0, /^[[:space:]]*/)
+            indent=substr($0, 1, RLENGTH)
+            rest=substr($0, RLENGTH + 1)
+            sub(/^[Pp][Oo][Rr][Tt][[:space:]]+/, "", rest)
+            print indent "# Port " rest "  # disabled by VPSGo port change"
+            next
+        }
+        { print }
+    ' "$file" > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+    cat "$tmp_file" > "$file"
+    rm -f "$tmp_file"
+}
+
+_ssh_write_managed_port_block() {
+    local file="$1" port="$2" tmp_file
+    tmp_file=$(mktemp /tmp/vpsgo-sshd.XXXXXX) || return 1
+    awk -v port="$port" '
+        function print_block() {
+            print ""
+            print "# VPSGO SSH PORT BEGIN"
+            print "Port " port
+            print "# VPSGO SSH PORT END"
+        }
+        /^# VPSGO SSH PORT BEGIN$/ { skip=1; next }
+        /^# VPSGO SSH PORT END$/ { skip=0; next }
+        skip { next }
+        /^[[:space:]]*Match[[:space:]]/ && !inserted {
+            print_block()
+            inserted=1
+        }
+        { print }
+        END {
+            if (!inserted) {
+                print_block()
+            }
+        }
+    ' "$file" > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+    cat "$tmp_file" > "$file"
+    rm -f "$tmp_file"
+}
+
+_ssh_change_port() {
+    _header "快速修改 SSH 端口"
+
+    local sshd_cfg="/etc/ssh/sshd_config"
+    if [ ! -f "$sshd_cfg" ]; then
+        _error_no_exit "未找到 ${sshd_cfg}"
+        _press_any_key
+        return
+    fi
+
+    local current_ports new_port confirm f
+    current_ports=$(_ssh_current_ports)
+    _info "当前 SSH 端口: ${current_ports:-22}"
+    if command -v sshd >/dev/null 2>&1; then
+        mkdir -p /run/sshd 2>/dev/null || true
+        if ! sshd -t -f "$sshd_cfg" >/dev/null 2>&1; then
+            _error_no_exit "当前 sshd 配置校验失败，未修改端口"
+            _press_any_key
+            return
+        fi
+    fi
+
+    read -rp "  新 SSH 端口 [1-65535]: " new_port
+    if ! _is_valid_port "${new_port:-}"; then
+        _error_no_exit "端口无效: ${new_port:-空}"
+        _press_any_key
+        return
+    fi
+
+    if _ssh_port_is_listening "$new_port" && ! _ssh_port_in_current_list "$new_port" "$current_ports"; then
+        _error_no_exit "端口 ${new_port} 已被占用，请换一个端口"
+        _press_any_key
+        return
+    fi
+
+    _warn "将把 SSH 监听端口改为 ${new_port}，请确认防火墙/安全组已放行该端口。"
+    read -rp "  继续? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    while IFS= read -r f; do
+        [ -f "$f" ] || continue
+        if [ "$f" = "$sshd_cfg" ] || grep -Eiq '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f"; then
+            _ssh_backup_file_once "$f" || {
+                _error_no_exit "备份失败: ${f}"
+                _press_any_key
+                return
+            }
+        fi
+        _ssh_comment_active_port_lines "$f"
+    done < <(_ssh_list_config_files)
+
+    if ! _ssh_write_managed_port_block "$sshd_cfg" "$new_port"; then
+        _error_no_exit "写入 SSH 端口配置失败"
+        _press_any_key
+        return
+    fi
+
+    if command -v sshd >/dev/null 2>&1; then
+        mkdir -p /run/sshd 2>/dev/null || true
+        if ! sshd -t -f "$sshd_cfg" >/dev/null 2>&1; then
+            _error_no_exit "sshd 配置校验失败，请根据备份文件恢复后重试"
+            _press_any_key
+            return
+        fi
+    else
+        _warn "未找到 sshd 命令，已跳过配置语法校验"
+    fi
+
+    if ! _restart_first_available_service ssh sshd; then
+        _warn "未检测到可重启的 ssh/sshd 服务，请手动重启 SSH 服务"
+    fi
+
+    echo ""
+    _success "SSH 端口已修改为 ${new_port}"
+    _warn "请先用新终端测试: ssh -p ${new_port} <user>@<server>，确认成功后再关闭当前会话"
+    _press_any_key
+}
+
 _rootssh_enable() {
     _header "启用 Root SSH 登录"
     _warn "将设置 root 密码，允许 root SSH 登录。"
@@ -19861,7 +20055,7 @@ _system_opt_menu_screen() {
     _header "系统优化"
     _menu_pair "1" "日志轮转" "限制 Docker 日志" "green" "2" "Swap 管理" "创建/删除 Swap" "green"
     _menu_pair "3" "Root SSH" "允许 root 登录" "green" "4" "SSH 密钥登录" "禁用密码登录" "green"
-    _menu_item "5" "1Panel NAT 链" "挂载转发链" "green"
+    _menu_pair "5" "SSH 端口" "快速修改 sshd 监听端口" "green" "6" "1Panel NAT 链" "挂载转发链" "green"
     _separator
     _menu_item "0" "返回主菜单" "" "red"
     _separator
@@ -19871,13 +20065,14 @@ _system_opt_menu() {
     while true; do
         _ui_print_screen _system_opt_menu_screen
         local ch
-        read -rp "  选择 [0-5]: " ch
+        read -rp "  选择 [0-6]: " ch
         case "$ch" in
             1) _dockerlog_setup ;;
             2) _swap_setup ;;
             3) _rootssh_enable ;;
             4) _ssh_force_key_login ;;
-            5) _onepanel_apply_iptables_chains ;;
+            5) _ssh_change_port ;;
+            6) _onepanel_apply_iptables_chains ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
