@@ -37,7 +37,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.66"
+VERSION="2.67"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -355,7 +355,15 @@ _status_kv() {
 
 _ui_term_cols() {
     local cols
-    cols=$(tput cols 2>/dev/null || true)
+    if _is_digit "${_UI_TERM_COLS_CACHE:-}"; then
+        printf '%s' "$_UI_TERM_COLS_CACHE"
+        return
+    fi
+
+    cols="${COLUMNS:-}"
+    if ! _is_digit "${cols:-}" && command -v tput >/dev/null 2>&1; then
+        cols=$(tput cols 2>/dev/null || true)
+    fi
     if ! _is_digit "${cols:-}"; then
         cols=80
     fi
@@ -366,6 +374,7 @@ _ui_term_cols() {
 
 _ui_clear_screen() {
     [ -t 1 ] || return 0
+    [ "${_UI_SCREEN_ACTIVE:-0}" = "1" ] && return 0
     if command -v tput >/dev/null 2>&1; then
         tput clear 2>/dev/null || printf '\033[2J\033[H'
     else
@@ -374,18 +383,22 @@ _ui_clear_screen() {
 }
 
 _ui_print_screen() {
-    local out
-    out="$("$@")"
+    local old_cols="${_UI_TERM_COLS_CACHE:-}" old_active="${_UI_SCREEN_ACTIVE:-0}"
+    _UI_TERM_COLS_CACHE="$(_ui_term_cols)"
+    _UI_SCREEN_ACTIVE=1
 
     if [ -t 1 ]; then
         # Synchronized updates are ignored by terminals that do not support them,
         # but prevent visible top-to-bottom redraws in modern terminal emulators.
         printf '\033[?2026h\033[2J\033[H'
     fi
-    printf '%s\n' "$out"
+    "$@"
     if [ -t 1 ]; then
         printf '\033[?2026l'
     fi
+
+    _UI_SCREEN_ACTIVE="$old_active"
+    _UI_TERM_COLS_CACHE="$old_cols"
 }
 
 _ui_repeat_char() {
@@ -398,35 +411,13 @@ _ui_repeat_char() {
 
 _ui_display_width() {
     local s="$1"
-    printf '%s' "$s" | od -An -t u1 2>/dev/null | awk '
-        BEGIN { w=0; pending=0 }
-        {
-            for (i=1; i<=NF; i++) {
-                b=$i + 0
-                if (pending > 0) {
-                    pending--
-                    continue
-                }
-                if (b < 128) {
-                    w += 1
-                } else if (b >= 192 && b < 224) {
-                    w += 2
-                    pending = 1
-                } else if (b >= 224 && b < 240) {
-                    w += 2
-                    pending = 2
-                } else if (b >= 240) {
-                    w += 2
-                    pending = 3
-                }
-            }
-        }
-        END { print w + 0 }
-    '
+    local non_ascii
+    non_ascii="${s//[ -~]/}"
+    printf '%s' "$((${#s} + ${#non_ascii}))"
 }
 
 _ui_truncate_text() {
-    local text="$1" max="$2" width limit bytes
+    local text="$1" max="$2" width limit out ch cw i len
     if ! _is_digit "${max:-}" || [ "$max" -le 0 ]; then
         printf ''
         return
@@ -444,46 +435,19 @@ _ui_truncate_text() {
     fi
 
     limit=$((max - 3))
-    bytes=$(printf '%s' "$text" | od -An -t u1 2>/dev/null | awk -v limit="$limit" '
-        BEGIN { w=0; bytes=0; pending=0 }
-        {
-            for (i=1; i<=NF; i++) {
-                b=$i + 0
-                if (pending > 0) {
-                    bytes++
-                    pending--
-                    continue
-                }
-
-                char_w=1
-                next_pending=0
-                if (b < 128) {
-                    char_w=1
-                } else if (b >= 192 && b < 224) {
-                    char_w=2
-                    next_pending=1
-                } else if (b >= 224 && b < 240) {
-                    char_w=2
-                    next_pending=2
-                } else if (b >= 240) {
-                    char_w=2
-                    next_pending=3
-                }
-                if (w + char_w > limit) {
-                    print bytes
-                    exit
-                }
-                w += char_w
-                bytes++
-                pending=next_pending
-            }
-        }
-        END { print bytes + 0 }
-    ' | tail -n 1)
-    if _is_digit "${bytes:-}" && [ "$bytes" -gt 0 ]; then
-        printf '%s' "$text" | dd bs=1 count="$bytes" 2>/dev/null
-    fi
-    printf '...'
+    out=""
+    width=0
+    len=${#text}
+    for ((i=0; i<len; i++)); do
+        ch="${text:i:1}"
+        cw=$(_ui_display_width "$ch")
+        if [ $((width + cw)) -gt "$limit" ]; then
+            break
+        fi
+        out="${out}${ch}"
+        width=$((width + cw))
+    done
+    printf '%s...' "$out"
 }
 
 _ui_pad_right_text() {
