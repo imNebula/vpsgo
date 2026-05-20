@@ -13168,6 +13168,7 @@ _singbox_service_is_active() {
     _singbox_running_pid >/dev/null 2>&1
 }
 
+
 _singbox_install_apt() {
     _info "使用 APT 官方仓库安装..."
     mkdir -p /etc/apt/keyrings
@@ -13875,21 +13876,34 @@ _snell_gen_uri_link() {
 
 _snell_port_usage_line() {
     local port="$1"
+    # Prefer lsof — it gives clear process info and works everywhere
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+        return
+    fi
     if command -v ss >/dev/null 2>&1; then
-        ss -lnutpH 2>/dev/null | awk -v p="$port" '
+        # BusyBox ss does not support -H (no header) or -p (show process).
+        # Detect BusyBox: if 'ss' links to busybox, use plain flags + skip header.
+        local _ss_flags="-lnutpH"
+        if readlink -f "$(command -v ss)" 2>/dev/null | grep -q busybox \
+            || ss --help 2>&1 | head -1 | grep -qi busybox; then
+            _ss_flags="-lntu"
+        fi
+        ss $_ss_flags 2>/dev/null | awk -v p="$port" '
+            /^Netid/ || /^State/ || /^Proto/ { next }
             {
-                addr=$5
-                sub(/%[[:alnum:]_.-]+$/, "", addr)
-                if (addr ~ "\\]:" p "$" || addr ~ ":" p "$") {
-                    print
-                    exit
+                for (i = 1; i <= NF; i++) {
+                    f = $i
+                    sub(/%[[:alnum:]_.-]+$/, "", f)
+                    n = split(f, arr, ":")
+                    if (n >= 2 && arr[n] == p) {
+                        print
+                        exit
+                    }
                 }
             }
         '
         return
-    fi
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
     fi
 }
 
@@ -14972,21 +14986,33 @@ _realm_write_config_from_lines() {
 
 _realm_port_usage_line() {
     local port="$1"
+    # Prefer lsof — it gives clear process info and works everywhere
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+        return
+    fi
     if command -v ss >/dev/null 2>&1; then
-        ss -lnutpH 2>/dev/null | awk -v p="$port" '
+        # BusyBox ss does not support -H (no header) or -p (show process).
+        local _ss_flags="-lnutpH"
+        if readlink -f "$(command -v ss)" 2>/dev/null | grep -q busybox \
+            || ss --help 2>&1 | head -1 | grep -qi busybox; then
+            _ss_flags="-lntu"
+        fi
+        ss $_ss_flags 2>/dev/null | awk -v p="$port" '
+            /^Netid/ || /^State/ || /^Proto/ { next }
             {
-                addr=$5
-                sub(/%[[:alnum:]_.-]+$/, "", addr)
-                if (addr ~ "\\]:" p "$" || addr ~ ":" p "$") {
-                    print
-                    exit
+                for (i = 1; i <= NF; i++) {
+                    f = $i
+                    sub(/%[[:alnum:]_.-]+$/, "", f)
+                    n = split(f, arr, ":")
+                    if (n >= 2 && arr[n] == p) {
+                        print
+                        exit
+                    }
                 }
             }
         '
         return
-    fi
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
     fi
 }
 
@@ -20033,6 +20059,21 @@ _ssh_port_in_current_list() {
 _ssh_port_is_listening() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
+        # BusyBox ss does not support -H or filter expressions.
+        if readlink -f "$(command -v ss)" 2>/dev/null | grep -q busybox \
+            || ss --help 2>&1 | head -1 | grep -qi busybox; then
+            ss -ltn 2>/dev/null | awk -v p="$port" '
+                /^Netid/ || /^State/ || /^Proto/ { next }
+                {
+                    for (i = 1; i <= NF; i++) {
+                        n = split($i, arr, ":")
+                        if (n >= 2 && arr[n] == p) { found=1; exit }
+                    }
+                }
+                END { exit !found }
+            '
+            return $?
+        fi
         ss -ltnH "sport = :${port}" 2>/dev/null | grep -q .
         return $?
     fi
@@ -20042,6 +20083,7 @@ _ssh_port_is_listening() {
     fi
     return 1
 }
+
 
 _ssh_backup_file_once() {
     local file="$1" backup
