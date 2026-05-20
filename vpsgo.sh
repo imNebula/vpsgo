@@ -20908,7 +20908,7 @@ _proxy_cipher_benchmark() {
             printf "    %-28s %-14s %-14s ${YELLOW}不支持${PLAIN}\n" "${labels[$i]}" "-" "-"
         fi
     done
-    _warn "SS2022 的 2022-blake3-aes-* 不纳入 openssl 短测；实际速度取决于 shadowsocks-rust/mihomo 实现。"
+    _warn "实际速度取决于代理工具实现。"
     _press_any_key
 }
 
