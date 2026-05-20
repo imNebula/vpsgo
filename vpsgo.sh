@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.1"
+VERSION="3.2"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -12116,13 +12116,58 @@ _iperf3_get_local_ip() {
     printf '%s' "${ip:-unknown}"
 }
 
+_iperf3_port_in_use() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        if readlink -f "$(command -v ss)" 2>/dev/null | grep -q busybox \
+            || ss --help 2>&1 | head -1 | grep -qi busybox; then
+            ss -tln 2>/dev/null | awk -v p="$port" '
+                /^Netid/ || /^State/ || /^Proto/ { next }
+                {
+                    for (i = 1; i <= NF; i++) {
+                        n = split($i, arr, ":")
+                        if (n >= 2 && arr[n] == p) { exit 0 }
+                    }
+                }
+                END { exit 1 }
+            '
+            return $?
+        fi
+        ss -tlnH "sport = :${port}" 2>/dev/null | grep -q .
+        return $?
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -ti :"$port" >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
 _iperf3_check_port() {
     local port="$1"
     local pid
-    if command -v lsof >/dev/null 2>&1; then
+    if command -v ss >/dev/null 2>&1; then
+        if readlink -f "$(command -v ss)" 2>/dev/null | grep -q busybox \
+            || ss --help 2>&1 | head -1 | grep -qi busybox; then
+            # BusyBox ss: detect port via simple listing, get PID via fuser
+            if ss -tln 2>/dev/null | awk -v p="$port" '
+                /^Netid/ || /^State/ || /^Proto/ { next }
+                {
+                    for (i = 1; i <= NF; i++) {
+                        n = split($i, arr, ":")
+                        if (n >= 2 && arr[n] == p) { found=1; exit }
+                    }
+                }
+                END { exit !found }
+            '; then
+                pid=$(fuser "$port/tcp" 2>/dev/null | tr -d ' ' || true)
+                pid="${pid%%[[:space:]]*}"
+            fi
+        else
+            pid="$(ss -tlnp "sport = :$port" 2>/dev/null | awk 'NR>1{match($0,/pid=([0-9]+)/,m); if(m[1]) print m[1]}' | head -1)"
+        fi
+    elif command -v lsof >/dev/null 2>&1; then
         pid="$(lsof -ti :"$port" 2>/dev/null || true)"
-    elif command -v ss >/dev/null 2>&1; then
-        pid="$(ss -tlnp "sport = :$port" 2>/dev/null | awk 'NR>1{match($0,/pid=([0-9]+)/,m); if(m[1]) print m[1]}' | head -1)"
     else
         _warn "lsof 和 ss 均不可用，无法检测端口占用"
         return 0
@@ -12142,11 +12187,11 @@ _iperf3_check_port() {
         1)
             kill "$pid" 2>/dev/null || true
             sleep 1
-            if lsof -ti :"$port" >/dev/null 2>&1; then
+            if _iperf3_port_in_use "$port"; then
                 kill -9 "$pid" 2>/dev/null || true
                 sleep 1
             fi
-            if lsof -ti :"$port" >/dev/null 2>&1; then
+            if _iperf3_port_in_use "$port"; then
                 _error_no_exit "无法终止占用端口 $port 的进程"
                 return 1
             fi
@@ -13876,11 +13921,7 @@ _snell_gen_uri_link() {
 
 _snell_port_usage_line() {
     local port="$1"
-    # Prefer lsof — it gives clear process info and works everywhere
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
-        return
-    fi
+    # Prefer ss — BusyBox lsof does not support -i/-s flags and gives false positives
     if command -v ss >/dev/null 2>&1; then
         # BusyBox ss does not support -H (no header) or -p (show process).
         # Detect BusyBox: if 'ss' links to busybox, use plain flags + skip header.
@@ -13904,6 +13945,9 @@ _snell_port_usage_line() {
             }
         '
         return
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
     fi
 }
 
@@ -14986,11 +15030,7 @@ _realm_write_config_from_lines() {
 
 _realm_port_usage_line() {
     local port="$1"
-    # Prefer lsof — it gives clear process info and works everywhere
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
-        return
-    fi
+    # Prefer ss — BusyBox lsof does not support -i/-s flags and gives false positives
     if command -v ss >/dev/null 2>&1; then
         # BusyBox ss does not support -H (no header) or -p (show process).
         local _ss_flags="-lnutpH"
@@ -15013,6 +15053,9 @@ _realm_port_usage_line() {
             }
         '
         return
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
     fi
 }
 
