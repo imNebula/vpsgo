@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.0"
+VERSION="3.1"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -5918,7 +5918,7 @@ _mihomoconf_setup() {
     fi
     _info "配置: ${CONFIG_FILE}"
     _info "状态: ${CONFIG_STATUS}"
-    _info "协议: AnyTLS / VLESS Vision Reality / SS2022 / HY2 / Tuic"
+    _info "协议: Shadowsocks / AnyTLS / VLESS Vision Reality / HY2 / Tuic"
     SAVED_HOST=$(_mihomoconf_get_saved_host "$CONFIG_FILE")
     [[ -n "$SAVED_HOST" ]] && _info "已保存 Host: ${SAVED_HOST}"
     IPV4_GOOGLE_PREF=$(_mihomoconf_ipv4_google_pref_get "$CONFIG_FILE")
@@ -5947,9 +5947,9 @@ _mihomoconf_setup() {
 
     # ---- 选择协议 ----
     printf "  ${BOLD}选择协议，可重复输入${PLAIN}\n"
-    printf "  ${DIM}提示: 每输入一次数字就会创建一个对应协议入站，例如 1 1 3 = 2个SS2022 + 1个HY2${PLAIN}\n"
+    printf "  ${DIM}提示: 每输入一次数字就会创建一个对应协议入站，例如 1 1 3 = 2个Shadowsocks + 1个HY2${PLAIN}\n"
     _separator
-    _menu_pair "1" "SS2022" "" "green" "2" "AnyTLS" "" "green"
+    _menu_pair "1" "Shadowsocks" "" "green" "2" "AnyTLS" "" "green"
     _menu_pair "3" "VLESS Vision Reality" "" "green" "4" "HY2" "" "green"
     _menu_item "5" "Tuic" "" "green"
     _separator
@@ -5971,7 +5971,7 @@ _mihomoconf_setup() {
         _press_any_key
         return
     fi
-    _status_kv "SS2022 数量" "${SS_COUNT}" "cyan" 10
+    _status_kv "SS 数量" "${SS_COUNT}" "cyan" 10
     _status_kv "AnyTLS 数量" "${ANYTLS_COUNT}" "cyan" 10
     _status_kv "VLESS 数量" "${VLESS_COUNT}" "cyan" 10
     _status_kv "HY2 数量" "${HY2_COUNT}" "cyan" 10
@@ -5980,10 +5980,10 @@ _mihomoconf_setup() {
     # ---- 追加模式: 检查已有同协议节点 ----
     if [[ "$WRITE_MODE" == "append" ]]; then
         if [[ "$ENABLE_SS" == "y" ]] && _mihomoconf_has_listener_type "shadowsocks"; then
-            _warn "配置中已存在 SS2022 节点:"
+            _warn "配置中已存在 Shadowsocks 节点:"
             _mihomoconf_list_listeners "shadowsocks"
             _separator
-            _menu_pair "1" "覆盖已有 SS2022 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _menu_pair "1" "覆盖已有 Shadowsocks 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local ss_action
         read -rp "  选择 [1/2]（默认 2）: " ss_action
@@ -6056,14 +6056,14 @@ _mihomoconf_setup() {
         fi
     fi
 
-    # ---- SS2022 配置 ----
+    # ---- Shadowsocks 配置 ----
     if [[ "$ENABLE_SS" == "y" ]]; then
-        printf "  ${BOLD}SS2022 配置${PLAIN}\n"
+        printf "  ${BOLD}Shadowsocks 配置${PLAIN}\n"
         _separator
         local _ss_idx ss_port_input
         for ((_ss_idx=1; _ss_idx<=SS_COUNT; _ss_idx++)); do
             while true; do
-                read -rp "    SS2022 #${_ss_idx} 监听端口 [默认 12353]: " ss_port_input
+                read -rp "    Shadowsocks #${_ss_idx} 监听端口 [默认 12353]: " ss_port_input
                 ss_port_input=$(_mihomoconf_trim "${ss_port_input:-12353}")
                 if _is_valid_port "$ss_port_input"; then
                     if _mihomoconf_port_in_list "$ss_port_input" "${NEW_PORTS[@]}"; then
@@ -6083,19 +6083,25 @@ _mihomoconf_setup() {
         done
 
         echo "    选择加密方式:"
-        printf "      ${GREEN}1${PLAIN}) 2022-blake3-aes-128-gcm ${DIM}(推荐)${PLAIN}\n"
-        printf "      ${GREEN}2${PLAIN}) 2022-blake3-aes-256-gcm\n"
+        printf "      ${GREEN}1${PLAIN}) chacha20-ietf-poly1305 ${DIM}(推荐)${PLAIN}\n"
+        printf "      ${GREEN}2${PLAIN}) aes-256-gcm\n"
+        printf "      ${GREEN}3${PLAIN}) aes-128-gcm\n"
+        printf "      ${GREEN}4${PLAIN}) 2022-blake3-aes-128-gcm\n"
+        printf "      ${GREEN}5${PLAIN}) 2022-blake3-aes-256-gcm\n"
         local cipher_choice
-        read -rp "    选择 [1/2]（默认 1）: " cipher_choice
+        read -rp "    选择 [1-5]（默认 1）: " cipher_choice
         case "${cipher_choice:-1}" in
-            1) SS_CIPHER="2022-blake3-aes-128-gcm" ;;
-            2) SS_CIPHER="2022-blake3-aes-256-gcm" ;;
+            1) SS_CIPHER="chacha20-ietf-poly1305" ;;
+            2) SS_CIPHER="aes-256-gcm" ;;
+            3) SS_CIPHER="aes-128-gcm" ;;
+            4) SS_CIPHER="2022-blake3-aes-128-gcm" ;;
+            5) SS_CIPHER="2022-blake3-aes-256-gcm" ;;
             *) _error_no_exit "无效选项"; _press_any_key; return ;;
         esac
         local i _u_name _u_pass
         for i in "${!SS_PORTS[@]}"; do
             SS_TAGS+=("$(_mihomoconf_gen_listener_tag "ss_relay")")
-            read -rp "    SS2022 #$((i + 1)) 用户名 [留空自动生成]: " _u_name < /dev/tty
+            read -rp "    Shadowsocks #$((i + 1)) 用户名 [留空自动生成]: " _u_name < /dev/tty
             _u_name=$(_mihomoconf_trim "${_u_name:-}")
             if [[ -z "$_u_name" ]]; then
                 _u_name="user-$(_mihomoconf_gen_uuid | cut -d'-' -f1)"
@@ -6108,7 +6114,7 @@ _mihomoconf_setup() {
             _u_pass=$(_mihomoconf_gen_ss_password_for_cipher "$SS_CIPHER")
             SS_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_pass}")
         done
-        _info "SS2022 已生成 ${#SS_PORTS[@]} 个入站节点"
+        _info "Shadowsocks 已生成 ${#SS_PORTS[@]} 个入站节点"
     fi
 
     # ---- AnyTLS 配置 ----
@@ -6466,7 +6472,7 @@ _mihomoconf_setup() {
                     _u_name="direct"
                 fi
                 cat >> "$_target_file" <<MIHOMOCONF_SS_EOF
-  - name: ss2022-${_u_name}-${_ss_port}
+  - name: ss-${_u_name}-${_ss_port}
     tag: "${_ss_tag}"
     type: shadowsocks
     port: ${_ss_port}
@@ -6643,7 +6649,7 @@ listeners:
 MIHOMOCONF_HEADER
         _mihomoconf_append_listeners_to "$CONFIG_FILE"
     else
-        [[ "$SS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "shadowsocks" && _info "已移除旧的 SS2022 节点"
+        [[ "$SS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "shadowsocks" && _info "已移除旧的 Shadowsocks 节点"
         [[ "$ANYTLS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "anytls" && _info "已移除旧的 AnyTLS 节点"
         [[ "$VLESS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless" && _info "已移除旧的 VLESS 节点"
         [[ "$HY2_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "hysteria2" && _info "已移除旧的 HY2 节点"
@@ -6678,7 +6684,7 @@ MIHOMOCONF_HEADER
     _info "配置文件: ${CONFIG_FILE}"
     _info "写入模式: $( [[ "$WRITE_MODE" == "new" ]] && echo "全新生成" || echo "追加到现有配置" )"
 
-    # SS2022 输出
+    # Shadowsocks 输出
     if [[ "$ENABLE_SS" == "y" ]]; then
         local ss_export_udp_answer ss_export_uot_answer _ss_udp_bool _ss_uot_bool
         read -rp "  SS 导出: 开启 UDP? [Y/n]: " ss_export_udp_answer
@@ -6697,7 +6703,7 @@ MIHOMOCONF_HEADER
         [[ "$SS_EXPORT_UDP" == "1" ]] && _ss_udp_bool="true" || _ss_udp_bool="false"
         [[ "$SS_EXPORT_UOT" == "1" ]] && _ss_uot_bool="true" || _ss_uot_bool="false"
 
-        printf "  ${BOLD}SS2022 连接信息 (%s 个)${PLAIN}\n" "${#SS_PORTS[@]}"
+        printf "  ${BOLD}Shadowsocks 连接信息 (%s 个)${PLAIN}\n" "${#SS_PORTS[@]}"
         local i SS_LINK _ss_port _ss_tag _ss_name _ss_client_name _row _li _u_name _u_pass
         for i in "${!SS_PORTS[@]}"; do
             _ss_port="${SS_PORTS[$i]}"
@@ -6709,7 +6715,7 @@ MIHOMOCONF_HEADER
                 [[ "$_li" == "$i" ]] && break
             done
             if [[ -z "$_u_pass" ]]; then
-                _warn "  SS2022 入站 ${_ss_tag} 未配置用户，已跳过导出"
+                _warn "  Shadowsocks 入站 ${_ss_tag} 未配置用户，已跳过导出"
                 continue
             fi
             _ss_client_name="${_ss_name}-${_u_name}"
@@ -6722,7 +6728,7 @@ MIHOMOCONF_HEADER
             printf "      加密   : ${GREEN}%s${PLAIN}\n" "$SS_CIPHER"
             printf "      用户   : ${GREEN}%s${PLAIN}\n" "$_u_name"
             printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
-            printf "  ${BOLD}SS2022 分享链接:${PLAIN}\n"
+            printf "  ${BOLD}Shadowsocks 分享链接:${PLAIN}\n"
             printf "  ${GREEN}%s${PLAIN}\n" "$SS_LINK"
             printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
             cat <<MIHOMOCONF_SS_YAML
@@ -7613,7 +7619,7 @@ _mihomo_read_config() {
 
     if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
         _info "配置文件: ${config_file}"
-        _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2 / Tuic) 与 proxies(SS / WireGuard Beta)"
+        _info "支持导出 listeners(Shadowsocks / AnyTLS / VLESS Reality / HY2 / Tuic) 与 proxies(SS / WireGuard Beta)"
     fi
     saved_host=$(_mihomoconf_get_saved_host "$config_file")
     if [[ -n "$saved_host" ]]; then
@@ -7647,12 +7653,8 @@ _mihomo_read_config() {
 
         case "$type" in
             shadowsocks)
-                if [[ "$cipher" != 2022-* ]]; then
-                    _warn "跳过 ${name}: 非 SS2022 节点 (cipher=${cipher})"
-                    continue
-                fi
-                if [[ -z "$port" ]]; then
-                    _warn "跳过 ${name}: 节点字段不完整"
+                if [[ -z "$port" || -z "$cipher" ]]; then
+                    _warn "跳过 ${name}: 节点字段不完整(port/cipher)"
                     continue
                 fi
                 if [[ "$SS_EXPORT_ASKED" != "1" ]]; then
@@ -7679,10 +7681,14 @@ _mihomo_read_config() {
                     _warn "跳过 ${name}: 未配置密码"
                     continue
                 fi
-                # 从 listener name 解析用户名 (ss2022-<user>-<port>)
-                ss_user_name="${name#ss2022-}"
+                # 兼容新旧 listener name: ss-<user>-<port> / ss2022-<user>-<port>
+                case "$name" in
+                    ss2022-*) ss_user_name="${name#ss2022-}" ;;
+                    ss-*) ss_user_name="${name#ss-}" ;;
+                    *) ss_user_name="$name" ;;
+                esac
                 ss_user_name="${ss_user_name%-*}"
-                [[ -z "$ss_user_name" || "$ss_user_name" == "$name" ]] && ss_user_name="$name"
+                [[ -z "$ss_user_name" ]] && ss_user_name="$name"
                 export_count=$((export_count + 1))
                 listener_export=$((listener_export + 1))
                 ss_name="$(_mihomoconf_make_node_name "SS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${ss_user_name}"
@@ -7691,12 +7697,12 @@ _mihomo_read_config() {
                     printf "%s\n" "$ss_link"
                 else
                     _separator
-                    printf "  ${BOLD}[SS2022] %s${PLAIN}\n" "$ss_name"
+                    printf "  ${BOLD}[Shadowsocks] %s${PLAIN}\n" "$ss_name"
                     printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
                     printf "    用户: ${GREEN}%s${PLAIN}\n" "$ss_user_name"
                     printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_link"
                     printf "    JSON:\n"
-                    cat <<MIHOMO_SS2022_JSON
+                    cat <<MIHOMO_SS_JSON
     {
       "type": "shadowsocks",
       "tag": "${ss_name}",
@@ -7707,7 +7713,7 @@ _mihomo_read_config() {
       "udp": ${SS_EXPORT_UDP_BOOL},
       "udp_over_tcp": { "enabled": ${SS_EXPORT_UOT_BOOL}, "version": 2 }
     }
-MIHOMO_SS2022_JSON
+MIHOMO_SS_JSON
                 fi
                 ;;
             anytls)
@@ -8020,7 +8026,7 @@ MIHOMO_WG_YAML2
         if [[ "$total_count" -eq 0 ]]; then
             _warn "未在配置中检测到可读节点 (listeners/proxies)"
         elif [[ "$export_count" -eq 0 ]]; then
-            _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/VLESS/SS2022/HY2/SS出站/WireGuard(Beta) 节点"
+            _warn "共读取 ${total_count} 个节点，但没有可导出的 Shadowsocks/AnyTLS/VLESS/HY2/SS出站/WireGuard(Beta) 节点"
         else
             _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
             _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta)"
@@ -12019,7 +12025,7 @@ _mihomo_manage_screen() {
     fi
 
     _separator
-    _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "SS2022 / AnyTLS / HY2" "green"
+    _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "Shadowsocks / AnyTLS / HY2" "green"
     _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
     _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
     _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "检索规则/优先级" "green"
@@ -16101,6 +16107,7 @@ _ssrust_port_conflict_with_mihomo() {
 
 _ssrust_pick_listen_port() {
     local default_port="${1:-8388}"
+    local _out_var="${2:-}"
     local port_input usage_line
     while true; do
         read -rp "  Shadowsocks-Rust 监听端口 [默认 ${default_port}]: " port_input
@@ -16118,6 +16125,10 @@ _ssrust_pick_listen_port() {
             _warn "端口 ${port_input} 已被占用: ${usage_line}"
             continue
         fi
+        if [[ -n "$_out_var" ]]; then
+            printf -v "$_out_var" '%s' "$port_input"
+            return 0
+        fi
         printf '%s' "$port_input"
         return 0
     done
@@ -16125,11 +16136,26 @@ _ssrust_pick_listen_port() {
 
 _ssrust_gen_ss_uri_link() {
     local server="$1" port="$2" method="$3" password="$4" name="$5"
-    local userinfo encoded_name server_uri
+    local enable_udp="${6:-1}" enable_uot="${7:-1}"
+    local userinfo encoded_name server_uri query
+    local -a params=()
+
     userinfo=$(_mihomoconf_url_base64 "${method}:${password}")
     encoded_name=$(_mihomoconf_urlencode "${name}")
     server_uri=$(_snell_uri_host "$server")
-    printf 'ss://%s@%s:%s#%s' "$userinfo" "$server_uri" "$port" "$encoded_name"
+    params+=("tfo=1")
+    if [[ "$enable_udp" == "1" ]]; then
+        params+=("udp=1")
+    else
+        params+=("udp=0")
+        enable_uot="0"
+    fi
+    if [[ "$enable_uot" == "1" ]]; then
+        params+=("uot=2")
+    fi
+    local IFS='&'
+    query="${params[*]}"
+    printf 'ss://%s@%s:%s?%s#%s' "$userinfo" "$server_uri" "$port" "$query" "$encoded_name"
 }
 
 _ssrust_write_config() {
@@ -16371,7 +16397,7 @@ _ssrust_configure() {
     local password_input password_value current_password_compatible
     local mode_pick mode_default mode_value
     local listen_input listen_addr host_default host_input client_host
-    local uri_link udp_bool
+    local uri_link udp_bool ss_export_uot_answer ss_export_udp="1" ss_export_uot="1" ss_export_uot_bool="true"
 
     current_port=$(_ssrust_conf_get_value "server_port" 2>/dev/null || true)
     _is_valid_port "${current_port:-}" || current_port="8388"
@@ -16380,7 +16406,7 @@ _ssrust_configure() {
     current_mode=$(_ssrust_conf_get_value "mode" 2>/dev/null || true)
     current_server=$(_ssrust_conf_get_value "server" 2>/dev/null || true)
 
-    listen_port=$(_ssrust_pick_listen_port "$current_port")
+    _ssrust_pick_listen_port "$current_port" listen_port
 
     case "$current_method" in
         aes-256-gcm) method_default="2" ;;
@@ -16489,9 +16515,20 @@ _ssrust_configure() {
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     [[ -z "$client_host" ]] && client_host="$host_default"
 
-    uri_link=$(_ssrust_gen_ss_uri_link "$client_host" "$listen_port" "$method_value" "$password_value" "SS-Rust")
     udp_bool="true"
-    [[ "$mode_value" == "tcp_only" ]] && udp_bool="false"
+    if [[ "$mode_value" == "tcp_only" ]]; then
+        udp_bool="false"
+        ss_export_udp="0"
+        ss_export_uot="0"
+        ss_export_uot_bool="false"
+    else
+        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer
+        if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
+            ss_export_uot="0"
+            ss_export_uot_bool="false"
+        fi
+    fi
+    uri_link=$(_ssrust_gen_ss_uri_link "$client_host" "$listen_port" "$method_value" "$password_value" "SS-Rust" "$ss_export_udp" "$ss_export_uot")
 
     echo ""
     _separator
@@ -16519,6 +16556,13 @@ _ssrust_configure() {
       password: "${password_value}"
       udp: ${udp_bool}
 EOF
+    if [[ "$ss_export_udp" == "1" ]]; then
+        printf "      tfo: true\n"
+        printf "      udp-over-tcp: %s\n" "$ss_export_uot_bool"
+        if [[ "$ss_export_uot" == "1" ]]; then
+            printf "      udp-over-tcp-version: 2\n"
+        fi
+    fi
     _press_any_key
 }
 
@@ -16597,7 +16641,7 @@ _ssrust_export_node_config() {
 
     local listen_port method password mode server
     local host_default host_input client_host node_name node_name_input
-    local uri_link udp_bool network_json_line
+    local uri_link udp_bool network_json_line ss_export_uot_answer ss_export_udp="1" ss_export_uot="1" ss_export_uot_bool="true"
     local q_name q_server q_method q_password
     local safe_host export_dir base_name
     local txt_file mihomo_file singbox_file
@@ -16636,9 +16680,20 @@ _ssrust_export_node_config() {
     node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
     [[ -z "$node_name" ]] && node_name="SS-Rust-${listen_port}"
 
-    uri_link=$(_ssrust_gen_ss_uri_link "$client_host" "$listen_port" "$method" "$password" "$node_name")
     udp_bool="true"
-    [[ "$mode" == "tcp_only" ]] && udp_bool="false"
+    if [[ "$mode" == "tcp_only" ]]; then
+        udp_bool="false"
+        ss_export_udp="0"
+        ss_export_uot="0"
+        ss_export_uot_bool="false"
+    else
+        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer
+        if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
+            ss_export_uot="0"
+            ss_export_uot_bool="false"
+        fi
+    fi
+    uri_link=$(_ssrust_gen_ss_uri_link "$client_host" "$listen_port" "$method" "$password" "$node_name" "$ss_export_udp" "$ss_export_uot")
     network_json_line=""
     case "$mode" in
         tcp_only) network_json_line='  "network": "tcp",' ;;
@@ -16675,6 +16730,8 @@ port=${listen_port}
 method=${method}
 password=${password}
 mode=${mode}
+udp=${ss_export_udp}
+udp_over_tcp=${ss_export_uot}
 uri=${uri_link}
 EOF
 
@@ -16688,6 +16745,15 @@ proxies:
     password: "${q_password}"
     udp: ${udp_bool}
 EOF
+    if [[ "$ss_export_udp" == "1" ]]; then
+        cat >> "$mihomo_file" <<EOF
+    tfo: true
+    udp-over-tcp: ${ss_export_uot_bool}
+EOF
+        if [[ "$ss_export_uot" == "1" ]]; then
+            printf "    udp-over-tcp-version: 2\n" >> "$mihomo_file"
+        fi
+    fi
 
     cat > "$singbox_file" <<EOF
 {
@@ -16697,7 +16763,11 @@ EOF
   "server_port": ${listen_port},
   "method": "${q_method}",
 ${network_json_line}
-  "password": "${q_password}"
+  "password": "${q_password}",
+  "udp_over_tcp": {
+    "enabled": ${ss_export_uot_bool},
+    "version": 2
+  }
 }
 EOF
 
@@ -20719,12 +20789,136 @@ _system_opt_menu() {
     done
 }
 
+_proxy_cipher_speed_supports_quick() {
+    local help
+    command -v openssl >/dev/null 2>&1 || return 1
+    help=$(openssl speed -help 2>&1 || true)
+    [[ "$help" == *"-seconds"* && "$help" == *"-bytes"* && "$help" == *"-evp"* ]]
+}
+
+_proxy_cipher_speed_mbps() {
+    local evp="$1" mode="${2:-enc}" out mbps
+    local -a cmd=(openssl speed -elapsed -seconds 1 -bytes 16384 -evp "$evp" -mr)
+
+    [[ "$mode" == "dec" ]] && cmd+=( -decrypt )
+    out=$("${cmd[@]}" 2>&1) || return 1
+    mbps=$(printf '%s\n' "$out" | awk -F: '
+        /^\+F:/ {
+            v=$NF
+            if (v ~ /^[0-9.]+$/) {
+                printf "%.1f", v / 1024 / 1024
+                found=1
+            }
+        }
+        END { if (!found) exit 1 }
+    ') || return 1
+    printf '%s' "$mbps"
+}
+
+_proxy_cipher_list_algorithms() {
+    local out
+    out=$(openssl list -cipher-algorithms 2>/dev/null || true)
+    [[ -n "$out" ]] || out=$(openssl list-cipher-algorithms 2>/dev/null || true)
+    [[ -n "$out" ]] || out=$(openssl enc -ciphers 2>/dev/null || true)
+    printf '%s\n' "$out"
+}
+
+_proxy_cipher_available() {
+    local evp="$1" list pattern
+    list=$(_proxy_cipher_list_algorithms | tr '[:upper:]' '[:lower:]' 2>/dev/null || true)
+    case "$evp" in
+        chacha20-poly1305) pattern='chacha20-poly1305|chacha' ;;
+        aes-128-gcm) pattern='aes-128-gcm|id-aes128-gcm' ;;
+        aes-256-gcm) pattern='aes-256-gcm|id-aes256-gcm' ;;
+        aes-128-ctr) pattern='aes-128-ctr|aes128' ;;
+        aes-256-ctr) pattern='aes-256-ctr|aes256' ;;
+        *) pattern="$evp" ;;
+    esac
+    printf '%s\n' "$list" | grep -Eiq "$pattern"
+}
+
+_proxy_cipher_benchmark() {
+    _header "常用代理加密测试"
+
+    if ! command -v openssl >/dev/null 2>&1; then
+        _error_no_exit "未检测到 openssl，无法测试加密算法"
+        _press_any_key
+        return
+    fi
+
+    _info "OpenSSL: $(openssl version 2>/dev/null || echo unknown)"
+    _info "短测说明: 默认每个算法加密 1 秒 + 解密 1 秒，结果仅作本机 CPU/库参考。"
+    _separator
+    _menu_pair "1" "快速测试" "3项，约6秒" "green" "2" "完整测试" "5项，约10秒" "green"
+    _menu_item "0" "返回" "" "red"
+    _separator
+
+    local choice
+    read -rp "  选择 [0-2，默认 1]: " choice
+    choice="${choice:-1}"
+    case "$choice" in
+        0) return ;;
+        1|2) ;;
+        *) _error_no_exit "无效选项"; _press_any_key; return ;;
+    esac
+
+    local -a labels=(
+        "chacha20-ietf-poly1305"
+        "aes-128-gcm"
+        "aes-256-gcm"
+    )
+    local -a evps=(
+        "chacha20-poly1305"
+        "aes-128-gcm"
+        "aes-256-gcm"
+    )
+    if [[ "$choice" == "2" ]]; then
+        labels+=("aes-128-ctr" "aes-256-ctr")
+        evps+=("aes-128-ctr" "aes-256-ctr")
+    fi
+
+    echo ""
+    if ! _proxy_cipher_speed_supports_quick; then
+        _warn "当前 openssl speed 不支持 -seconds/-bytes 短测参数，为避免耗时，仅做可用性检测。"
+        printf "    %-28s %-10s\n" "算法" "状态"
+        _separator
+        local i
+        for i in "${!labels[@]}"; do
+            if _proxy_cipher_available "${evps[$i]}"; then
+                printf "    %-28s ${GREEN}可用${PLAIN}\n" "${labels[$i]}"
+            else
+                printf "    %-28s ${YELLOW}未检测到${PLAIN}\n" "${labels[$i]}"
+            fi
+        done
+        _warn "SS2022 的 2022-blake3-aes-* 依赖 BLAKE3/实现库，openssl 短测无法准确代表。"
+        _press_any_key
+        return
+    fi
+
+    printf "    %-28s %-14s %-14s %-8s\n" "算法" "加密MB/s" "解密MB/s" "状态"
+    _separator
+    local i enc_mbps dec_mbps
+    for i in "${!labels[@]}"; do
+        enc_mbps=""
+        dec_mbps=""
+        if enc_mbps=$(_proxy_cipher_speed_mbps "${evps[$i]}" enc) \
+            && dec_mbps=$(_proxy_cipher_speed_mbps "${evps[$i]}" dec); then
+            printf "    %-28s %-14s %-14s ${GREEN}OK${PLAIN}\n" "${labels[$i]}" "$enc_mbps" "$dec_mbps"
+        else
+            printf "    %-28s %-14s %-14s ${YELLOW}不支持${PLAIN}\n" "${labels[$i]}" "-" "-"
+        fi
+    done
+    _warn "SS2022 的 2022-blake3-aes-* 不纳入 openssl 短测；实际速度取决于 shadowsocks-rust/mihomo 实现。"
+    _press_any_key
+}
+
 _proxy_tools_menu_screen() {
     _header "代理工具"
     _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
     _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
     _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "Realm 转发" "端口转发管理" "green"
     _menu_item "7" "ACME 证书" "申请/续期证书" "green"
+    _menu_item "8" "加密测试" "SS常用cipher短测" "green"
     _menu_item "0" "返回主菜单" "" "red"
     _separator
 }
@@ -20733,7 +20927,7 @@ _proxy_tools_menu() {
     while true; do
         _ui_print_screen _proxy_tools_menu_screen
         local ch
-        read -rp "  选择 [0-7]: " ch
+        read -rp "  选择 [0-8]: " ch
         case "$ch" in
             1) _mihomo_manage ;;
             2) _singbox_manage ;;
@@ -20742,6 +20936,7 @@ _proxy_tools_menu() {
             5) _ssrust_manage ;;
             6) _realm_manage ;;
             7) _acme_manage ;;
+            8) _proxy_cipher_benchmark ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac

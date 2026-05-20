@@ -11,13 +11,13 @@ dns:
     - system
 
 listeners:
-  - name: ss2022-direct-443
+  - name: ss-direct-443
     tag: "ss_relay_9e60db34"
     type: shadowsocks
     port: 443
     listen: "::"
-    cipher: 2022-blake3-aes-128-gcm
-    password: "+WMkhygar2hXzlr7kr36jw=="
+    cipher: chacha20-ietf-poly1305
+    password: "change-me"
     udp: true
 
 rules:
