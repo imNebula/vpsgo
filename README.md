@@ -81,13 +81,14 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 | 5 | iPerf3 测速服务端 | 启动服务端并显示客户端命令 |
 | 6 | NodeQuality 测试 | 运行 NodeQuality 线路质量评分脚本 |
 | 7 | Ookla Speedtest CLI | 安装/更新 Speedtest CLI |
-| 8 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
-| 9 | Docker 日志轮转 | 限制容器日志大小 |
-| 10 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志；支持出口管理（含链式代理）、iOS rule 模糊搜索分流、Google/Netflix/端口出站分流、规则优先级、自定义远程规则集 (yaml/text/mrs)、socks5 链接导入 |
-| 11 | sing-box 安装 | 安装、启动、查看状态和日志 |
-| 12 | Snell V5 管理 | 安装、配置、导出、查看日志和状态 |
-| 13 | WireGuard 原生节点 | 部署节点、管理客户端、查看状态 |
-| 14 | Shadowsocks-Rust 管理 | 安装、配置、导出、查看日志和状态 |
+| 8 | NTrace-core / NextTrace | 安装/更新 nexttrace、nexttrace-tiny、ntr，并支持常用参数向导、快速回程、自定义列表、MTR、MTU、CDN Speed |
+| 9 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
+| 10 | Docker 日志轮转 | 限制容器日志大小 |
+| 11 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志；支持出口管理（含链式代理）、iOS rule 模糊搜索分流、Google/Netflix/端口出站分流、规则优先级、自定义远程规则集 (yaml/text/mrs)、socks5 链接导入 |
+| 12 | sing-box 安装 | 安装、启动、查看状态和日志 |
+| 13 | Snell V5 管理 | 安装、配置、导出、查看日志和状态 |
+| 14 | WireGuard 原生节点 | 部署节点、管理客户端、查看状态 |
+| 15 | Shadowsocks-Rust 管理 | 安装、配置、导出、查看日志和状态 |
 
 ### 系统
 
@@ -112,7 +113,7 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 - **权限**: 需要 root 权限；非 root 用户可通过 `sudo vpsgo` 运行
 - **依赖**: `bash`，以及 `curl` 或 `wget`
 
-Ookla Speedtest CLI 安装项额外适配 macOS(Homebrew) 与 FreeBSD 12/13 x86_64；Windows 版官方 CLI 仍需按 Ookla 页面手动下载 zip。
+Ookla Speedtest CLI 安装项额外适配 macOS(Homebrew) 与 FreeBSD 12/13 x86_64；Windows 版官方 CLI 仍需按 Ookla 页面手动下载 zip。NTrace-core 安装优先使用 GitHub Release 二进制，失败时回退到官方安装脚本。
 
 ## 更新
 

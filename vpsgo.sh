@@ -10,17 +10,18 @@
 #   5. iPerf3 测速服务端
 #   6. NodeQuality 测试
 #   7. Ookla Speedtest CLI 安装
-#   8. Docker 日志轮转配置
-#   9. Mihomo 管理 (安装/配置/重启/卸载)
-#  10. Sing-Box 管理 (安装/自启/重启/日志/卸载)
-#  11. Snell V5 管理 (官方安装/配置/重启/日志/卸载)
-#  12. WireGuard 原生节点 (安装/部署/重启/状态/卸载)
-#  13. Shadowsocks-Rust 管理 (安装/配置/重启/日志/卸载)
-#  14. Akile DNS 解锁检测与配置
-#  15. Linux DNS 管理 (临时/永久修改)
-#  16. Swap 管理
-#  17. 1Panel iptables 代理链快速应用
-#  18. WARP 管理
+#   8. NTrace-core 安装与快速路由检测
+#   9. Docker 日志轮转配置
+#  10. Mihomo 管理 (安装/配置/重启/卸载)
+#  11. Sing-Box 管理 (安装/自启/重启/日志/卸载)
+#  12. Snell V5 管理 (官方安装/配置/重启/日志/卸载)
+#  13. WireGuard 原生节点 (安装/部署/重启/状态/卸载)
+#  14. Shadowsocks-Rust 管理 (安装/配置/重启/日志/卸载)
+#  15. Akile DNS 解锁检测与配置
+#  16. Linux DNS 管理 (临时/永久修改)
+#  17. Swap 管理
+#  18. 1Panel iptables 代理链快速应用
+#  19. WARP 管理
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -37,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="2.68"
+VERSION="3.0"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -45,6 +46,9 @@ UPDATE_URL="${VPSGO_UPDATE_URL:-${VPSGO_URL:-https://raw.githubusercontent.com/i
 VPSGO_CONFIG_FILE="${VPSGO_CONFIG_FILE:-/etc/vpsgo/config}"
 _SPEEDTEST_VERSION="1.2.0"
 _SPEEDTEST_DOWNLOAD_BASE="https://install.speedtest.net/app/cli"
+_NTRACE_REPO_URL="https://github.com/nxtrace/NTrace-core"
+_NTRACE_INSTALL_URL="https://nxtrace.org/nt"
+_NTRACE_INSTALL_DIR="/usr/local/bin"
 _WARP_SH_URL="https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh"
 _WARP_REFRESH_SCRIPT="/usr/local/bin/vpsgo-warp-refresh.sh"
 _WARP_REFRESH_CRON="/etc/cron.d/vpsgo-warp-refresh"
@@ -5891,7 +5895,7 @@ _mihomoconf_setup() {
 
     local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
     local SS_CIPHER=""
-    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0"
+    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="1"
     local -a ANYTLS_PORTS=() ANYTLS_TAGS=() ANYTLS_USER_ROWS=()
     local ANYTLS_SNI=""
     local -a VLESS_PORTS=() VLESS_TAGS=() VLESS_USER_ROWS=() VLESS_PRIVATE_KEYS=() VLESS_PUBLIC_KEYS=() VLESS_SHORT_IDS=()
@@ -6683,11 +6687,11 @@ MIHOMOCONF_HEADER
             SS_EXPORT_UOT="0"
             _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
         else
-            read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
-            if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
-                SS_EXPORT_UOT="1"
-            else
+            read -rp "  SS 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer
+            if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
                 SS_EXPORT_UOT="0"
+            else
+                SS_EXPORT_UOT="1"
             fi
         fi
         [[ "$SS_EXPORT_UDP" == "1" ]] && _ss_udp_bool="true" || _ss_udp_bool="false"
@@ -7577,8 +7581,8 @@ _mihomo_read_config() {
     local p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport
     local p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive
     local p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding
-    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0" SS_EXPORT_ASKED="0"
-    local SS_EXPORT_UDP_BOOL="true" SS_EXPORT_UOT_BOOL="false"
+    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="1" SS_EXPORT_ASKED="0"
+    local SS_EXPORT_UDP_BOOL="true" SS_EXPORT_UOT_BOOL="true"
     local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
     local GEO_LOOKUP_IP=""
     local OUTPUT_LINK_ONLY="0" output_mode_answer
@@ -7609,7 +7613,7 @@ _mihomo_read_config() {
 
     if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
         _info "配置文件: ${config_file}"
-        _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2 / Tuic) 与 proxies(WireGuard Beta)"
+        _info "支持导出 listeners(AnyTLS / VLESS Reality / SS2022 / HY2 / Tuic) 与 proxies(SS / WireGuard Beta)"
     fi
     saved_host=$(_mihomoconf_get_saved_host "$config_file")
     if [[ -n "$saved_host" ]]; then
@@ -7659,11 +7663,11 @@ _mihomo_read_config() {
                         SS_EXPORT_UOT="0"
                         _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
                     else
-                        read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer < /dev/tty
-                        if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
-                            SS_EXPORT_UOT="1"
-                        else
+                        read -rp "  SS 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer < /dev/tty
+                        if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
                             SS_EXPORT_UOT="0"
+                        else
+                            SS_EXPORT_UOT="1"
                         fi
                     fi
                     [[ "$SS_EXPORT_UDP" == "1" ]] && SS_EXPORT_UDP_BOOL="true" || SS_EXPORT_UDP_BOOL="false"
@@ -7918,6 +7922,45 @@ MIHOMO_TUIC_JSON
         proxy_total=$((proxy_total + 1))
         total_count=$((total_count + 1))
         case "$p_type" in
+            ss)
+                if [[ -z "$p_server" || -z "$p_port" || -z "$p_cipher" || -z "$p_pass" ]]; then
+                    _warn "跳过 ${p_name}: ss 出站字段不完整(server/port/cipher/password)"
+                    continue
+                fi
+                local ss_proxy_udp ss_proxy_uot ss_proxy_link ss_proxy_udp_bool ss_proxy_uot_bool
+                IFS=$'\x1f' read -r ss_proxy_udp ss_proxy_uot < <(_mihomochain_ss_proxy_udp_uot_by_name "$config_file" "$p_name")
+                [[ "$ss_proxy_udp" == "1" ]] && ss_proxy_udp_bool="true" || ss_proxy_udp_bool="false"
+                [[ "$ss_proxy_uot" == "1" ]] && ss_proxy_uot_bool="true" || ss_proxy_uot_bool="false"
+                ss_proxy_link=$(_mihomoconf_gen_ss_link "$p_server" "$p_port" "$p_cipher" "$p_pass" "$p_name" "$ss_proxy_udp" "$ss_proxy_uot")
+                proxy_export=$((proxy_export + 1))
+                export_count=$((export_count + 1))
+                if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                    printf "%s\n" "$ss_proxy_link"
+                else
+                    _separator
+                    printf "  ${BOLD}[SS 出站] %s${PLAIN}\n" "$p_name"
+                    printf "    地址: ${GREEN}%s:%s${PLAIN}\n" "$p_server" "$p_port"
+                    printf "    加密: ${GREEN}%s${PLAIN}\n" "$p_cipher"
+                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_proxy_link"
+                    printf "    YAML:\n"
+                    cat <<MIHOMO_SS_PROXY_YAML
+    proxies:
+      - name: "${p_name}"
+        type: ss
+        server: "${p_server}"
+        port: ${p_port}
+        cipher: ${p_cipher}
+        password: "${p_pass}"
+        udp: ${ss_proxy_udp_bool}
+MIHOMO_SS_PROXY_YAML
+                    if [[ "$ss_proxy_uot" == "1" ]]; then
+                        cat <<MIHOMO_SS_PROXY_UOT_YAML
+        udp-over-tcp: ${ss_proxy_uot_bool}
+        udp-over-tcp-version: 2
+MIHOMO_SS_PROXY_UOT_YAML
+                    fi
+                fi
+                ;;
             wireguard|wg)
                 if [[ -z "$p_server" || -z "$p_port" || -z "$p_wg_ip" || -z "$p_wg_private_key" || -z "$p_wg_public_key" ]]; then
                     _warn "跳过 ${p_name}: wireguard(Beta) 字段不完整(server/port/ip/private-key/public-key)"
@@ -7977,10 +8020,10 @@ MIHOMO_WG_YAML2
         if [[ "$total_count" -eq 0 ]]; then
             _warn "未在配置中检测到可读节点 (listeners/proxies)"
         elif [[ "$export_count" -eq 0 ]]; then
-            _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/VLESS/SS2022/HY2/WireGuard(Beta) 节点"
+            _warn "共读取 ${total_count} 个节点，但没有可导出的 AnyTLS/VLESS/SS2022/HY2/SS出站/WireGuard(Beta) 节点"
         else
             _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
-            _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (WireGuard Beta)"
+            _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta)"
             _info "总计: 读取 ${total_count}，导出 ${export_count}"
         fi
     fi
@@ -8591,6 +8634,66 @@ _mihomochain_urldecode() {
     printf '%b' "${s//%/\\x}"
 }
 
+_mihomochain_normalize_query_key() {
+    local key="${1:-}"
+    key=$(_mihomochain_urldecode "$key")
+    key=$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')
+    key="${key//_/-}"
+    case "$key" in
+        udpovertcp|udp-over-tcp-enable|udp-over-tcp-enabled) printf 'udp-over-tcp' ;;
+        udpovertcpversion|udp-over-tcp-ver) printf 'udp-over-tcp-version' ;;
+        uotversion|uot-version) printf 'uot-version' ;;
+        *) printf '%s' "$key" ;;
+    esac
+}
+
+_mihomochain_query_value_enabled() {
+    local val="${1:-}" lower
+    lower=$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        ""|1|2|true|yes|on|enable|enabled) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_mihomochain_query_value_disabled() {
+    local val="${1:-}" lower
+    lower=$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+        0|false|no|off|disable|disabled) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_mihomochain_apply_ss_query_param() {
+    local raw_key="$1" raw_val="$2" _udp_var="$3" _uot_var="$4"
+    local key val
+
+    key=$(_mihomochain_normalize_query_key "$raw_key")
+    val=$(_mihomochain_urldecode "$raw_val")
+    case "$key" in
+        plugin)
+            return 2
+            ;;
+        udp)
+            if _mihomochain_query_value_disabled "$val"; then
+                printf -v "$_udp_var" '%s' "0"
+                printf -v "$_uot_var" '%s' "0"
+            elif _mihomochain_query_value_enabled "$val"; then
+                printf -v "$_udp_var" '%s' "1"
+            fi
+            ;;
+        uot|uot-version|udp-over-tcp|udp-over-tcp-version)
+            if _mihomochain_query_value_disabled "$val"; then
+                printf -v "$_uot_var" '%s' "0"
+            elif _mihomochain_query_value_enabled "$val"; then
+                printf -v "$_uot_var" '%s' "1"
+            fi
+            ;;
+    esac
+    return 0
+}
+
 _mihomochain_extract_link_name() {
     local link="${1:-}" frag
     [[ "$link" == *#* ]] || return 1
@@ -8631,6 +8734,90 @@ _mihomochain_default_outbound_name() {
     printf '%s-%s-%s' "$out_type" "$out_server" "$out_port"
 }
 
+_mihomochain_ss_proxy_udp_uot_by_name() {
+    local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}" target_name="$2"
+    awk -v target="$target_name" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function unquote(s) {
+            gsub(/^"/, "", s)
+            gsub(/"$/, "", s)
+            return s
+        }
+        function enabled(s) {
+            s=tolower(trim(unquote(s)))
+            return (s == "true" || s == "1" || s == "yes" || s == "on")
+        }
+        function version_enabled(s) {
+            s=tolower(trim(unquote(s)))
+            return (s == "1" || s == "2")
+        }
+        function reset_item() {
+            name=type=""
+            udp="true"
+            uot="false"
+            uot_version=""
+        }
+        function emit() {
+            if (name == target && type == "ss") {
+                printf "%s\037%s\n", enabled(udp) ? "1" : "0", (enabled(uot) || version_enabled(uot_version)) ? "1" : "0"
+                found=1
+            }
+        }
+        BEGIN {
+            in_proxies=0
+            found=0
+            reset_item()
+        }
+        /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
+            if (in_proxies) emit()
+            in_proxies = ($0 ~ /^proxies:[[:space:]]*$/)
+            reset_item()
+            next
+        }
+        !in_proxies { next }
+        /^  - name:/ {
+            emit()
+            reset_item()
+            line=$0
+            sub(/^  - name:[[:space:]]*/, "", line)
+            name=unquote(trim(line))
+            next
+        }
+        /^    type:/ {
+            line=$0
+            sub(/^    type:[[:space:]]*/, "", line)
+            type=unquote(trim(line))
+            next
+        }
+        /^    udp:/ {
+            line=$0
+            sub(/^    udp:[[:space:]]*/, "", line)
+            udp=line
+            next
+        }
+        /^    udp-over-tcp:/ {
+            line=$0
+            sub(/^    udp-over-tcp:[[:space:]]*/, "", line)
+            uot=line
+            next
+        }
+        /^    udp-over-tcp-version:/ {
+            line=$0
+            sub(/^    udp-over-tcp-version:[[:space:]]*/, "", line)
+            uot_version=trim(line)
+            next
+        }
+        END {
+            if (in_proxies) emit()
+            if (!found) print "1\0370"
+        }
+    ' "$config_file"
+}
+
 _mihomochain_add_or_update_outbound() {
     local tag="$1" type="$2" server="$3" port="$4" cipher="$5" username="$6" password="$7"
     local sni="${8:-}" insecure="${9:-0}" obfs="${10:-}" obfs_password="${11:-}" mport="${12:-}" out_name="${13:-}"
@@ -8638,7 +8825,7 @@ _mihomochain_add_or_update_outbound() {
     local wg_allowed_ips="${18:-}" wg_preshared_key="${19:-}" wg_reserved="${20:-}" wg_mtu="${21:-}" wg_keepalive="${22:-}"
     local vless_uuid="${23:-}" vless_flow="${24:-xtls-rprx-vision}" vless_public_key="${25:-}"
     local vless_short_id="${26:-}" vless_client_fingerprint="${27:-chrome}" vless_packet_encoding="${28:-xudp}"
-    local hy2_congestion_control="${29:-brutal}"
+    local hy2_congestion_control="${29:-brutal}" ss_udp="${30:-1}" ss_uot="${31:-0}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
     local name q_name q_server q_cipher q_user q_pass q_sni q_obfs q_obfs_password q_mport q_hy2_congestion_control
     local q_wg_ip q_wg_ipv6 q_wg_private_key q_wg_public_key q_wg_allowed_ips q_wg_preshared_key q_wg_reserved
@@ -8673,6 +8860,13 @@ _mihomochain_add_or_update_outbound() {
     tmp_block=$(mktemp)
     case "$type" in
         ss)
+            local ss_udp_bool="true" ss_uot_bool="false"
+            case "$(printf '%s' "$ss_udp" | tr '[:upper:]' '[:lower:]')" in
+                0|false|no|off) ss_udp_bool="false"; ss_uot="0" ;;
+            esac
+            case "$(printf '%s' "$ss_uot" | tr '[:upper:]' '[:lower:]')" in
+                1|true|yes|on|2) ss_uot_bool="true" ;;
+            esac
             cat > "$tmp_block" <<EOF
   - name: "${q_name}"
     type: ss
@@ -8680,8 +8874,14 @@ _mihomochain_add_or_update_outbound() {
     port: ${port}
     cipher: ${q_cipher}
     password: "${q_pass}"
-    udp: true
+    udp: ${ss_udp_bool}
 EOF
+            if [[ "$ss_uot_bool" == "true" ]]; then
+                cat >> "$tmp_block" <<'EOF'
+    udp-over-tcp: true
+    udp-over-tcp-version: 2
+EOF
+            fi
             ;;
         anytls)
             cat > "$tmp_block" <<EOF
@@ -10423,6 +10623,7 @@ _mihomo_chain_proxy_manage() {
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
                 local out_sni out_insecure out_obfs out_obfs_pass out_mport
+                local out_ss_udp out_ss_uot out_hy2_cc
                 local out_wg_ip out_wg_ipv6 out_wg_private_key out_wg_public_key out_wg_allowed_ips
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
                 local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding
@@ -10443,6 +10644,8 @@ _mihomo_chain_proxy_manage() {
                 out_cipher=""
                 out_user=""
                 out_pass=""
+                out_ss_udp="1"
+                out_ss_uot="0"
                 out_sni=""
                 out_insecure="0"
                 out_obfs=""
@@ -10492,8 +10695,8 @@ _mihomo_chain_proxy_manage() {
                                     IFS='&' read -r -a _qarr <<< "$link_query"
                                     for kv in "${_qarr[@]}"; do
                                         k="${kv%%=*}"
-                                        k=$(_mihomochain_urldecode "$k")
-                                        if [[ "$k" == "plugin" ]]; then
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        if ! _mihomochain_apply_ss_query_param "$k" "$v" out_ss_udp out_ss_uot; then
                                             _error_no_exit "暂不支持带 plugin 参数的 ss 链接，请使用手动录入"
                                             _press_any_key
                                             continue 2
@@ -10530,6 +10733,7 @@ _mihomo_chain_proxy_manage() {
                                 out_type="ss"
                                 out_cipher="${ss_decoded%%:*}"
                                 out_pass="${ss_decoded#*:}"
+                                [[ "$out_ss_udp" == "0" ]] && out_ss_uot="0"
                                 ;;
                             anytls://*)
                                 link_body="${in_link#anytls://}"
@@ -10875,6 +11079,7 @@ _mihomo_chain_proxy_manage() {
                         fi
                         case "$out_type" in
                             ss)
+                                local ss_udp_answer ss_uot_answer
                                 read -rp "  cipher [默认 aes-256-gcm]: " out_cipher
                                 out_cipher="${out_cipher:-aes-256-gcm}"
                                 read -rp "  password: " out_pass
@@ -10882,6 +11087,15 @@ _mihomo_chain_proxy_manage() {
                                     _error_no_exit "ss password 不能为空"
                                     _press_any_key
                                     continue
+                                fi
+                                read -rp "  开启 UDP? [Y/n]: " ss_udp_answer
+                                if [[ "$ss_udp_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
+                                    out_ss_udp="0"
+                                    out_ss_uot="0"
+                                else
+                                    out_ss_udp="1"
+                                    read -rp "  开启 UDP over TCP v2? [y/N]: " ss_uot_answer
+                                    [[ "$ss_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] && out_ss_uot="1" || out_ss_uot="0"
                                 fi
                                 ;;
                             anytls)
@@ -11038,7 +11252,7 @@ _mihomo_chain_proxy_manage() {
                     "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}" \
                     "${out_vless_uuid:-}" "${out_vless_flow:-}" "${out_vless_public_key:-}" "${out_vless_short_id:-}" \
                     "${out_vless_client_fingerprint:-}" "${out_vless_packet_encoding:-}" \
-                    "${out_hy2_cc:-brutal}"; then
+                    "${out_hy2_cc:-brutal}" "${out_ss_udp:-1}" "${out_ss_uot:-0}"; then
                     _error_no_exit "保存出口节点失败"
                     _press_any_key
                     continue
@@ -12468,6 +12682,431 @@ _speedtest_setup() {
         _error_no_exit "Ookla Speedtest 安装失败"
     fi
     _press_any_key
+}
+
+# --- 8. NTrace-core 安装与快速路由检测 ---
+
+_ntrace_bin_for_flavor() {
+    case "${1:-full}" in
+        tiny) printf 'nexttrace-tiny' ;;
+        ntr) printf 'ntr' ;;
+        *) printf 'nexttrace' ;;
+    esac
+}
+
+_ntrace_detect_platform() {
+    local os arch goos goarch
+
+    os="$(uname -s 2>/dev/null || echo unknown)"
+    arch="$(uname -m 2>/dev/null || echo unknown)"
+
+    case "$os" in
+        Linux) goos="linux" ;;
+        Darwin) goos="darwin" ;;
+        FreeBSD) goos="freebsd" ;;
+        OpenBSD) goos="openbsd" ;;
+        NetBSD) goos="netbsd" ;;
+        *) return 1 ;;
+    esac
+
+    if [[ "$goos" == "darwin" ]]; then
+        printf '%s_%s' "$goos" "universal"
+        return 0
+    fi
+
+    case "$arch" in
+        x86_64|amd64) goarch="amd64" ;;
+        i386|i486|i586|i686|x86) goarch="386" ;;
+        aarch64|arm64) goarch="arm64" ;;
+        armv7*|armhf) goarch="armv7" ;;
+        armv6*) goarch="armv6" ;;
+        armv5*) goarch="armv5" ;;
+        riscv64) goarch="riscv64" ;;
+        s390x) goarch="s390x" ;;
+        ppc64le) goarch="ppc64le" ;;
+        loongarch64|loong64) goarch="loong64" ;;
+        mips64el|mips64le) goarch="mips64le" ;;
+        mips64) goarch="mips64" ;;
+        mipsel|mipsle) goarch="mipsle" ;;
+        mips) goarch="mips" ;;
+        *) return 1 ;;
+    esac
+
+    printf '%s_%s' "$goos" "$goarch"
+}
+
+_ntrace_version_line() {
+    local bin="$1" version=""
+    version="$("$bin" --version 2>&1 | head -1 || true)"
+    if [[ -z "$version" || "$version" == *"unknown flag"* || "$version" == *"Usage:"* ]]; then
+        version="$("$bin" -V 2>&1 | head -1 || true)"
+    fi
+    printf '%s' "${version:-$bin}"
+}
+
+_ntrace_show_installed_status() {
+    local bin path version found=1
+
+    for bin in nexttrace nexttrace-tiny ntr; do
+        path="$(command -v "$bin" 2>/dev/null || true)"
+        if [[ -n "$path" ]]; then
+            version="$(_ntrace_version_line "$path")"
+            _status_kv "$bin" "${version} (${path})" "green" 16
+            found=0
+        else
+            _status_kv "$bin" "未安装" "dim" 16
+        fi
+    done
+
+    return "$found"
+}
+
+_ntrace_install_with_official_script() {
+    local flavor="$1" bin tmp_script
+
+    bin="$(_ntrace_bin_for_flavor "$flavor")"
+    tmp_script=$(_mktemp_file ntrace-install .sh) || return 1
+
+    _warn "Release 二进制下载失败，改用 NTrace-core 官方安装脚本"
+    _info "下载: ${_NTRACE_INSTALL_URL}"
+    if ! _download_file "$_NTRACE_INSTALL_URL" "$tmp_script"; then
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    chmod 0755 "$tmp_script" 2>/dev/null || true
+    if [[ "$flavor" == "full" ]]; then
+        bash "$tmp_script"
+    else
+        bash "$tmp_script" --flavor "$flavor"
+    fi
+    rm -f "$tmp_script"
+
+    hash -r 2>/dev/null || true
+    command -v "$bin" >/dev/null 2>&1
+}
+
+_ntrace_install_flavor() {
+    local flavor="${1:-full}" bin platform asset url tmp_bin dst
+
+    bin="$(_ntrace_bin_for_flavor "$flavor")"
+    if ! platform="$(_ntrace_detect_platform)" || [[ -z "$platform" ]]; then
+        _error_no_exit "NTrace-core 暂不支持当前平台自动安装: $(uname -s 2>/dev/null || echo unknown)/$(uname -m 2>/dev/null || echo unknown)"
+        return 1
+    fi
+
+    asset="${bin}_${platform}"
+    url="${_NTRACE_REPO_URL}/releases/latest/download/${asset}"
+    tmp_bin=$(_mktemp_file "vpsgo-${bin}") || return 1
+    dst="${_NTRACE_INSTALL_DIR}/${bin}"
+
+    _info "下载 NTrace-core ${bin}: ${asset}"
+    printf "    ${DIM}%s${PLAIN}\n" "$url"
+    if _download_file "$url" "$tmp_bin" && [[ -s "$tmp_bin" ]]; then
+        chmod 0755 "$tmp_bin" 2>/dev/null || true
+        if _install_script_file "$tmp_bin" "$dst"; then
+            rm -f "$tmp_bin"
+            hash -r 2>/dev/null || true
+            if command -v "$bin" >/dev/null 2>&1; then
+                if ! "$bin" --version >/dev/null 2>&1 && ! "$bin" -V >/dev/null 2>&1 && ! "$bin" -h >/dev/null 2>&1; then
+                    _error_no_exit "${bin} 安装后无法运行，当前系统可能不兼容该 Release 二进制"
+                    rm -f "$dst" 2>/dev/null || true
+                    hash -r 2>/dev/null || true
+                else
+                    _success "已安装 ${bin}: $(command -v "$bin")"
+                    _info "版本信息: $(_ntrace_version_line "$bin")"
+                    return 0
+                fi
+            else
+                _error_no_exit "已写入 ${dst}，但 PATH 中未检测到 ${bin}"
+            fi
+        fi
+    fi
+
+    rm -f "$tmp_bin"
+    if _ntrace_install_with_official_script "$flavor"; then
+        _success "已安装 ${bin}: $(command -v "$bin")"
+        _info "版本信息: $(_ntrace_version_line "$bin")"
+        return 0
+    fi
+
+    _error_no_exit "NTrace-core ${bin} 安装失败"
+    return 1
+}
+
+_ntrace_require_nexttrace() {
+    if command -v nexttrace >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _warn "未检测到 nexttrace 完整版"
+    if _speedtest_prompt_yes_default "现在安装/更新 nexttrace"; then
+        _ntrace_install_flavor full
+        return $?
+    fi
+    return 1
+}
+
+_ntrace_prompt_target() {
+    local prompt="${1:-目标 IP/域名}" default_target="${2:-1.1.1.1}" target
+    read -rp "  ${prompt} [${default_target}]: " target
+    printf '%s' "${target:-$default_target}"
+}
+
+_ntrace_prompt_ip_family_arg() {
+    local choice
+
+    read -rp "  IP 版本 [0 自动 / 1 IPv4 / 2 IPv6，默认 0]: " choice
+    case "${choice:-0}" in
+        1) printf '%s' "--ipv4" ;;
+        2) printf '%s' "--ipv6" ;;
+        0|"") ;;
+        *) ;;
+    esac
+}
+
+_ntrace_print_command() {
+    local -a cmd=("$@")
+    printf "  ${DIM}执行:${PLAIN} ${GREEN}"
+    printf '%q ' "${cmd[@]}"
+    printf "${PLAIN}\n\n"
+}
+
+_ntrace_run_nexttrace() {
+    local -a cmd=("nexttrace" "$@")
+
+    echo ""
+    _ntrace_print_command "${cmd[@]}"
+    "${cmd[@]}"
+    local rc=$?
+    echo ""
+    if [[ "$rc" -eq 0 ]]; then
+        _success "NTrace-core 检测完成"
+    else
+        _error_no_exit "NTrace-core 返回非零状态: ${rc}"
+        _warn "TCP/UDP、MTR 或部分系统下可能需要 root 权限、CAP_NET_RAW 或防火墙放行"
+    fi
+    _press_any_key
+}
+
+_ntrace_quick_trace() {
+    local target protocol port output provider rdns
+    local family_arg
+    local -a args=()
+
+    _header "NTrace-core 快速 Trace"
+    _ntrace_require_nexttrace || { _press_any_key; return; }
+
+    target="$(_ntrace_prompt_target "目标 IP/域名/URL" "1.1.1.1")"
+    family_arg="$(_ntrace_prompt_ip_family_arg)"
+    [[ -n "$family_arg" ]] && args+=("$family_arg")
+
+    echo ""
+    printf "  ${BOLD}探测协议${PLAIN}\n"
+    _menu_pair "1" "ICMP" "默认" "green" "2" "TCP SYN" "可指定端口" "green"
+    _menu_item "3" "UDP" "可指定端口" "green"
+    read -rp "  选择 [1-3，默认 1]: " protocol
+    case "${protocol:-1}" in
+        2)
+            args+=("--tcp")
+            read -rp "  TCP 目标端口 [80]: " port
+            port="${port:-80}"
+            if _is_valid_port "$port"; then
+                args+=("--port" "$port")
+            else
+                _warn "端口无效，使用 nexttrace 默认端口"
+            fi
+            ;;
+        3)
+            args+=("--udp")
+            read -rp "  UDP 目标端口 [33494]: " port
+            port="${port:-33494}"
+            if _is_valid_port "$port"; then
+                args+=("--port" "$port")
+            else
+                _warn "端口无效，使用 nexttrace 默认端口"
+            fi
+            ;;
+        1|"") ;;
+        *) _warn "协议选择无效，使用 ICMP" ;;
+    esac
+
+    echo ""
+    printf "  ${BOLD}输出模式${PLAIN}\n"
+    _menu_pair "1" "实时输出" "默认" "green" "2" "表格汇总" "--table" "green"
+    _menu_pair "3" "JSON" "--json" "green" "4" "Raw" "--raw" "green"
+    _menu_item "5" "Classic" "--classic" "green"
+    read -rp "  选择 [1-5，默认 1]: " output
+    case "${output:-1}" in
+        2) args+=("--table") ;;
+        3) args+=("--json") ;;
+        4) args+=("--raw") ;;
+        5) args+=("--classic") ;;
+        1|"") ;;
+        *) _warn "输出模式无效，使用实时输出" ;;
+    esac
+
+    echo ""
+    printf "  ${BOLD}IP 数据源${PLAIN}\n"
+    _menu_pair "0" "默认" "" "green" "1" "IP.SB" "" "green"
+    _menu_pair "2" "IPInfo" "" "green" "3" "ip-api.com" "" "green"
+    _menu_item "4" "禁用 GeoIP" "disable-geoip" "green"
+    read -rp "  选择 [0-4，默认 0]: " provider
+    case "${provider:-0}" in
+        1) args+=("--data-provider" "IP.SB") ;;
+        2) args+=("--data-provider" "IPInfo") ;;
+        3) args+=("--data-provider" "ip-api.com") ;;
+        4) args+=("--data-provider" "disable-geoip") ;;
+        0|"") ;;
+        *) _warn "数据源选择无效，使用默认数据源" ;;
+    esac
+
+    echo ""
+    printf "  ${BOLD}RDNS${PLAIN}\n"
+    _menu_pair "0" "默认" "" "green" "1" "不查询" "--no-rdns" "green"
+    _menu_item "2" "总是查询" "--always-rdns" "green"
+    read -rp "  选择 [0-2，默认 0]: " rdns
+    case "${rdns:-0}" in
+        1) args+=("--no-rdns") ;;
+        2) args+=("--always-rdns") ;;
+        0|"") ;;
+        *) _warn "RDNS 选择无效，使用默认策略" ;;
+    esac
+
+    _ntrace_run_nexttrace "${args[@]}" "$target"
+}
+
+_ntrace_fast_trace() {
+    local transport="${1:-icmp}"
+    local family_arg
+    local -a args=("--fast-trace")
+
+    _header "NTrace-core 快速回程检测"
+    _ntrace_require_nexttrace || { _press_any_key; return; }
+    family_arg="$(_ntrace_prompt_ip_family_arg)"
+    [[ -n "$family_arg" ]] && args+=("$family_arg")
+    [[ "$transport" == "tcp" ]] && args+=("--tcp")
+    _ntrace_run_nexttrace "${args[@]}"
+}
+
+_ntrace_custom_file() {
+    local file use_tcp
+    local family_arg
+    local -a args=()
+
+    _header "NTrace-core 自定义列表检测"
+    _ntrace_require_nexttrace || { _press_any_key; return; }
+
+    read -rp "  列表文件路径: " file
+    if [[ -z "${file:-}" || ! -f "$file" ]]; then
+        _error_no_exit "列表文件不存在"
+        _press_any_key
+        return
+    fi
+
+    family_arg="$(_ntrace_prompt_ip_family_arg)"
+    [[ -n "$family_arg" ]] && args+=("$family_arg")
+    read -rp "  使用 TCP SYN 检测? [y/N]: " use_tcp
+    [[ "$use_tcp" =~ ^[Yy] ]] && args+=("--tcp")
+    args+=("--file" "$file")
+    _ntrace_run_nexttrace "${args[@]}"
+}
+
+_ntrace_mtr() {
+    local target mode show_ips
+    local family_arg
+    local -a args=("--mtr")
+
+    _header "NTrace-core MTR 检测"
+    _ntrace_require_nexttrace || { _press_any_key; return; }
+
+    target="$(_ntrace_prompt_target "目标 IP/域名" "1.1.1.1")"
+    family_arg="$(_ntrace_prompt_ip_family_arg)"
+    [[ -n "$family_arg" ]] && args+=("$family_arg")
+
+    echo ""
+    printf "  ${BOLD}MTR 模式${PLAIN}\n"
+    _menu_pair "1" "实时 TUI" "" "green" "2" "报告" "--report" "green"
+    _menu_pair "3" "宽报告" "--wide" "green" "4" "Raw" "--raw" "green"
+    read -rp "  选择 [1-4，默认 1]: " mode
+    case "${mode:-1}" in
+        2) args+=("--report") ;;
+        3) args+=("--wide") ;;
+        4) args+=("--raw") ;;
+        1|"") ;;
+        *) _warn "MTR 模式无效，使用实时 TUI" ;;
+    esac
+
+    read -rp "  显示每跳 IP? [Y/n]: " show_ips
+    [[ ! "$show_ips" =~ ^[Nn] ]] && args+=("--show-ips")
+    _ntrace_run_nexttrace "${args[@]}" "$target"
+}
+
+_ntrace_mtu() {
+    local target
+    local family_arg
+    local -a args=("--mtu")
+
+    _header "NTrace-core MTU 探测"
+    _ntrace_require_nexttrace || { _press_any_key; return; }
+
+    target="$(_ntrace_prompt_target "目标 IP/域名" "1.1.1.1")"
+    family_arg="$(_ntrace_prompt_ip_family_arg)"
+    [[ -n "$family_arg" ]] && args+=("$family_arg")
+    _ntrace_run_nexttrace "${args[@]}" "$target"
+}
+
+_ntrace_speed() {
+    local provider json_mode
+    local -a args=("--speed")
+
+    _header "NTrace-core CDN Speed"
+    _ntrace_require_nexttrace || { _press_any_key; return; }
+
+    echo ""
+    printf "  ${BOLD}测速后端${PLAIN}\n"
+    _menu_pair "1" "Apple CDN" "默认" "green" "2" "Cloudflare" "" "green"
+    read -rp "  选择 [1-2，默认 1]: " provider
+    [[ "${provider:-1}" == "2" ]] && args+=("--speed-provider" "cloudflare")
+
+    read -rp "  输出 JSON 非交互结果? [y/N]: " json_mode
+    [[ "$json_mode" =~ ^[Yy] ]] && args+=("--json" "--non-interactive" "--no-metadata")
+    _ntrace_run_nexttrace "${args[@]}"
+}
+
+_ntrace_setup() {
+    while true; do
+        _header "NTrace-core / NextTrace"
+        _info "项目地址: ${_NTRACE_REPO_URL}"
+        _ntrace_show_installed_status || true
+        echo ""
+        printf "  ${BOLD}选择操作${PLAIN}\n"
+        _separator
+        _menu_pair "1" "安装/更新 nexttrace" "完整版" "green" "2" "安装/更新 tiny" "精简版" "green"
+        _menu_pair "3" "安装/更新 ntr" "MTR 专用" "green" "4" "快速 Trace" "常用参数向导" "green"
+        _menu_pair "5" "快速回程" "--fast-trace" "green" "6" "TCP 回程" "--fast-trace --tcp" "green"
+        _menu_pair "7" "自定义列表" "--file" "green" "8" "MTR 检测" "--mtr" "green"
+        _menu_pair "9" "MTU 探测" "--mtu" "green" "10" "CDN Speed" "--speed" "green"
+        _menu_item "0" "返回上级菜单" "" "red"
+        _separator
+
+        local choice
+        read -rp "  选择 [0-10]: " choice
+        case "$choice" in
+            1) _ntrace_install_flavor full; _press_any_key ;;
+            2) _ntrace_install_flavor tiny; _press_any_key ;;
+            3) _ntrace_install_flavor ntr; _press_any_key ;;
+            4) _ntrace_quick_trace ;;
+            5) _ntrace_fast_trace icmp ;;
+            6) _ntrace_fast_trace tcp ;;
+            7) _ntrace_custom_file ;;
+            8) _ntrace_mtr ;;
+            9) _ntrace_mtu ;;
+            10) _ntrace_speed ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; sleep 1 ;;
+        esac
+    done
 }
 
 # --- 10. Sing-Box 管理 ---
@@ -19981,7 +20620,7 @@ _show_main_menu() {
     printf "  ${BOLD}分类菜单${PLAIN}\n"
     _separator
     _menu_item "1" "网络优化" "内核/路由/WARP" "green"
-    _menu_item "2" "脚本工具" "测速/DNS" "green"
+    _menu_item "2" "脚本工具" "测速/DNS/路由" "green"
     _menu_item "3" "系统优化" "日志/Swap/SSH/NAT" "green"
     _menu_item "4" "代理工具" "服务端/证书" "green"
     _separator
@@ -20028,7 +20667,7 @@ _script_tools_menu_screen() {
     _header "脚本工具"
     _menu_pair "1" "iPerf3 服务端" "启动测速服务" "green" "2" "NodeQuality" "线路质量测试" "green"
     _menu_pair "3" "Speedtest" "安装测速 CLI" "green" "4" "Akile DNS" "检测 DNS 解锁" "green"
-    _menu_item "5" "DNS 管理" "修改/验证 DNS" "green"
+    _menu_pair "5" "DNS 管理" "修改/验证 DNS" "green" "6" "NTrace-core" "安装/路由检测" "green"
     _separator
     _menu_item "0" "返回主菜单" "" "red"
     _separator
@@ -20038,13 +20677,14 @@ _script_tools_menu() {
     while true; do
         _ui_print_screen _script_tools_menu_screen
         local ch
-        read -rp "  选择 [0-5]: " ch
+        read -rp "  选择 [0-6]: " ch
         case "$ch" in
             1) _iperf3_setup ;;
             2) _nodequality_setup ;;
             3) _speedtest_setup ;;
             4) _akdns_setup ;;
             5) _dns_manage ;;
+            6) _ntrace_setup ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
