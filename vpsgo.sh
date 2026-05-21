@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.3"
+VERSION="3.4"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -21009,9 +21009,23 @@ _proxy_cipher_benchmark() {
     _header "常用代理加密测试"
 
     if ! command -v openssl >/dev/null 2>&1; then
-        _error_no_exit "未检测到 openssl，无法测试加密算法"
-        _press_any_key
-        return
+        _warn "未检测到 openssl，尝试自动安装..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq >/dev/null 2>&1 || true
+            apt-get install -y -qq openssl >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y openssl >/dev/null 2>&1 || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y openssl >/dev/null 2>&1 || true
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache openssl >/dev/null 2>&1 || true
+        fi
+        if ! command -v openssl >/dev/null 2>&1; then
+            _error_no_exit "未检测到 openssl，且自动安装失败，无法测试加密算法"
+            _press_any_key
+            return
+        fi
+        _success "openssl 安装成功"
     fi
 
     _info "OpenSSL: $(openssl version 2>/dev/null || echo unknown)"
