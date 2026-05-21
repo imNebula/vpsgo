@@ -19212,6 +19212,37 @@ _dns_restart_related_services() {
     return 0
 }
 
+_dns_apply_lxc_alpine_overrides() {
+    local virt
+    virt="$(_detect_virt)"
+    if [ "$virt" = "lxc" ]; then
+        if [ ! -f /etc/.pve-ignore.resolv.conf ]; then
+            touch /etc/.pve-ignore.resolv.conf >/dev/null 2>&1 || true
+            _info "已创建 /etc/.pve-ignore.resolv.conf 以防止 Proxmox 覆盖 DNS"
+        fi
+    fi
+
+    if _is_alpine; then
+        mkdir -p /etc/udhcpc
+        local udhcpc_conf="/etc/udhcpc/udhcpc.conf"
+        local udhcpc_backup="${udhcpc_conf}.vpsgo.bak"
+        if [ ! -f "$udhcpc_conf" ]; then
+            echo 'RESOLV_CONF="no"' > "$udhcpc_conf"
+            _info "已配置 udhcpc (RESOLV_CONF=\"no\")"
+        else
+            if ! grep -q '^[[:space:]]*RESOLV_CONF=' "$udhcpc_conf"; then
+                [ -f "$udhcpc_backup" ] || cp -a "$udhcpc_conf" "$udhcpc_backup" >/dev/null 2>&1 || true
+                echo 'RESOLV_CONF="no"' >> "$udhcpc_conf"
+                _info "已配置 udhcpc (RESOLV_CONF=\"no\")"
+            elif grep -q '^[[:space:]]*RESOLV_CONF=[^"]*yes' "$udhcpc_conf" || grep -q '^[[:space:]]*RESOLV_CONF="yes"' "$udhcpc_conf"; then
+                [ -f "$udhcpc_backup" ] || cp -a "$udhcpc_conf" "$udhcpc_backup" >/dev/null 2>&1 || true
+                sed -i 's/^[[:space:]]*RESOLV_CONF=.*/RESOLV_CONF="no"/' "$udhcpc_conf"
+                _info "已更新 udhcpc 为 RESOLV_CONF=\"no\""
+            fi
+        fi
+    fi
+}
+
 _dns_clear_resolv_immutable() {
     if command -v lsattr >/dev/null 2>&1 && command -v chattr >/dev/null 2>&1 && [ -e /etc/resolv.conf ]; then
         if lsattr /etc/resolv.conf 2>/dev/null | awk '{print $1}' | grep -q 'i'; then
@@ -19416,6 +19447,8 @@ _dns_apply_temporary() {
     _DNS_RESTART_SERVICES=()
     _info "正在临时修改 DNS..."
 
+    _dns_apply_lxc_alpine_overrides
+
     if _dns_apply_runtime_resolved; then
         [ "$_DNS_CLEAR_EXISTING" -eq 1 ] && _dns_force_runtime_servers
         _dns_mark_service_for_restart "nscd"
@@ -19443,6 +19476,8 @@ _dns_apply_permanent() {
     _DNS_RESTART_SERVICES=()
 
     _info "正在写入永久 DNS 配置..."
+
+    _dns_apply_lxc_alpine_overrides
 
     if _dns_apply_permanent_resolved; then
         methods+=("systemd-resolved")
