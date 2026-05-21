@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.2"
+VERSION="3.3"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -12136,16 +12136,30 @@ _iperf3_port_in_use() {
         ss -tlnH "sport = :${port}" 2>/dev/null | grep -q .
         return $?
     fi
-    if command -v lsof >/dev/null 2>&1; then
-        lsof -ti :"$port" >/dev/null 2>&1
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -ltun 2>/dev/null | awk -v p="$port" '
+            {
+                addr = $4
+                sub(/%[[:alnum:]_.-]+$/, "", addr)
+                split(addr, arr, ":")
+                if (arr[length(arr)] == p) { found=1; exit }
+            }
+            END { exit !found }
+        '
         return $?
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        if ! (lsof -h 2>&1 | grep -q -i busybox || lsof --help 2>&1 | grep -q -i busybox); then
+            lsof -ti :"$port" >/dev/null 2>&1
+            return $?
+        fi
     fi
     return 1
 }
 
 _iperf3_check_port() {
     local port="$1"
-    local pid
+    local pid=""
     if command -v ss >/dev/null 2>&1; then
         if readlink -f "$(command -v ss)" 2>/dev/null | grep -q busybox \
             || ss --help 2>&1 | head -1 | grep -qi busybox; then
@@ -12166,13 +12180,39 @@ _iperf3_check_port() {
         else
             pid="$(ss -tlnp "sport = :$port" 2>/dev/null | awk 'NR>1{match($0,/pid=([0-9]+)/,m); if(m[1]) print m[1]}' | head -1)"
         fi
+    elif command -v netstat >/dev/null 2>&1; then
+        local ns_line
+        ns_line=$(netstat -ltunp 2>/dev/null | awk -v p="$port" '
+            {
+                addr = $4
+                sub(/%[[:alnum:]_.-]+$/, "", addr)
+                split(addr, arr, ":")
+                if (arr[length(arr)] == p) { print; exit }
+            }
+        ')
+        if [[ -n "$ns_line" ]]; then
+            local last_col
+            last_col=$(echo "$ns_line" | awk '{print $NF}')
+            if [[ "$last_col" =~ ^[0-9]+/ ]]; then
+                pid="${last_col%%/*}"
+            fi
+        fi
+        if [[ -z "$pid" ]] && command -v fuser >/dev/null 2>&1; then
+            pid=$(fuser "$port/tcp" 2>/dev/null | tr -d ' ' || true)
+            pid="${pid%%[[:space:]]*}"
+        fi
     elif command -v lsof >/dev/null 2>&1; then
-        pid="$(lsof -ti :"$port" 2>/dev/null || true)"
-    else
-        _warn "lsof 和 ss 均不可用，无法检测端口占用"
+        if ! (lsof -h 2>&1 | grep -q -i busybox || lsof --help 2>&1 | grep -q -i busybox); then
+            pid="$(lsof -ti :"$port" 2>/dev/null || true)"
+        fi
+    fi
+
+    if [[ -z "$pid" ]]; then
+        if ! command -v ss >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1 && { ! command -v lsof >/dev/null 2>&1 || lsof -h 2>&1 | grep -q -i busybox || lsof --help 2>&1 | grep -q -i busybox; }; then
+            _warn "lsof、ss 和 netstat 均不可用，无法检测端口占用"
+        fi
         return 0
     fi
-    [ -z "$pid" ] && return 0
 
     local proc_info
     proc_info="$(ps -p "$pid" -o pid=,comm= 2>/dev/null || echo "$pid unknown")"
@@ -13946,8 +13986,29 @@ _snell_port_usage_line() {
         '
         return
     fi
+    if command -v netstat >/dev/null 2>&1; then
+        local ns_out
+        ns_out=$(netstat -lntup 2>/dev/null || netstat -lntu 2>/dev/null)
+        if [[ -n "$ns_out" ]]; then
+            echo "$ns_out" | awk -v p="$port" '
+                NR <= 2 { next }
+                {
+                    addr = $4
+                    sub(/%[[:alnum:]_.-]+$/, "", addr)
+                    split(addr, arr, ":")
+                    if (arr[length(arr)] == p) {
+                        print
+                        exit
+                    }
+                }
+            '
+            return
+        fi
+    fi
     if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+        if ! (lsof -h 2>&1 | grep -q -i busybox || lsof --help 2>&1 | grep -q -i busybox); then
+            lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+        fi
     fi
 }
 
@@ -15033,6 +15094,7 @@ _realm_port_usage_line() {
     # Prefer ss — BusyBox lsof does not support -i/-s flags and gives false positives
     if command -v ss >/dev/null 2>&1; then
         # BusyBox ss does not support -H (no header) or -p (show process).
+        # Detect BusyBox: if 'ss' links to busybox, use plain flags + skip header.
         local _ss_flags="-lnutpH"
         if readlink -f "$(command -v ss)" 2>/dev/null | grep -q busybox \
             || ss --help 2>&1 | head -1 | grep -qi busybox; then
@@ -15054,8 +15116,29 @@ _realm_port_usage_line() {
         '
         return
     fi
+    if command -v netstat >/dev/null 2>&1; then
+        local ns_out
+        ns_out=$(netstat -lntup 2>/dev/null || netstat -lntu 2>/dev/null)
+        if [[ -n "$ns_out" ]]; then
+            echo "$ns_out" | awk -v p="$port" '
+                NR <= 2 { next }
+                {
+                    addr = $4
+                    sub(/%[[:alnum:]_.-]+$/, "", addr)
+                    split(addr, arr, ":")
+                    if (arr[length(arr)] == p) {
+                        print
+                        exit
+                    }
+                }
+            '
+            return
+        fi
+    fi
     if command -v lsof >/dev/null 2>&1; then
-        lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+        if ! (lsof -h 2>&1 | grep -q -i busybox || lsof --help 2>&1 | grep -q -i busybox); then
+            lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sed -n '2p'
+        fi
     fi
 }
 
