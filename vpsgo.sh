@@ -24598,6 +24598,12 @@ _he_ipv6_lxc_install() {
         if ! ip link show lxcbr0 >/dev/null 2>&1; then
             _info "检测到 lxcbr0 网桥未创建，正在重启 lxc-net 服务..."
             systemctl restart lxc-net || true
+            for i in $(seq 1 15); do
+                if ip link show lxcbr0 >/dev/null 2>&1; then
+                    break
+                fi
+                sleep 1
+            done
         fi
     fi
     
@@ -25064,8 +25070,14 @@ EOF
         
         _info "正在重启 lxc-net 服务以应用网桥 IPv6 配置..."
         systemctl restart lxc-net || true
+        for i in $(seq 1 15); do
+            if ip link show lxcbr0 >/dev/null 2>&1; then
+                break
+            fi
+            sleep 1
+        done
     fi
-    
+
     _info "正在启动 LXC 容器 $container_name..."
     if [[ "$configure_he" == "y" ]]; then
         if ! ip link show he-ipv6 >/dev/null 2>&1; then
