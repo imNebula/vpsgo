@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.29"
+VERSION="3.30"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -25106,6 +25106,19 @@ EOF
         _info "正在直接配置 lxcbr0 IPv6 地址 (避免 restart 导致网桥中断)..."
         ip -6 addr add ${host_bridge_ipv6}/64 dev lxcbr0 2>/dev/null || true
         ip link set lxcbr0 up 2>/dev/null || true
+    fi
+
+    local auto_start="y"
+    read -rp "  是否设置容器开机自启? [Y/n]: " auto_start
+    auto_start="${auto_start:-y}"
+    if [[ "$auto_start" =~ ^[Yy] ]]; then
+        sed -i '/lxc.start.auto/d' "$lxc_config"
+        sed -i '/lxc.start.delay/d' "$lxc_config"
+        cat >> "$lxc_config" <<EOF
+lxc.start.auto = 1
+lxc.start.delay = 5
+EOF
+        _success "已配置容器开机自启"
     fi
 
     _info "正在启动 LXC 容器 $container_name..."
