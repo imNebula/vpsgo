@@ -25068,14 +25068,9 @@ EOF
         sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
         echo "net.ipv6.conf.all.forwarding=1" > /etc/sysctl.d/99-ipv6-forwarding.conf 2>/dev/null || true
         
-        _info "正在重启 lxc-net 服务以应用网桥 IPv6 配置..."
-        systemctl restart lxc-net || true
-        for i in $(seq 1 15); do
-            if ip link show lxcbr0 >/dev/null 2>&1; then
-                break
-            fi
-            sleep 1
-        done
+        _info "正在直接配置 lxcbr0 IPv6 地址 (避免 restart 导致网桥中断)..."
+        ip -6 addr add ${host_bridge_ipv6}/64 dev lxcbr0 2>/dev/null || true
+        ip link set lxcbr0 up 2>/dev/null || true
     fi
 
     _info "正在启动 LXC 容器 $container_name..."
