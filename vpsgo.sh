@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.30"
+VERSION="3.31"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -24727,6 +24727,16 @@ _he_ipv6_lxc_install() {
         # Routed Prefix: 规范化——保留网络部分（去掉末尾 /xx 之前的多余空格，但保留 /64）
         # 提取前缀 base 时用 ${routed_ipv6%%/*} 或 ${routed_ipv6%%::*}；这里只做轻量规范
         routed_ipv6=$(echo "$routed_ipv6" | sed 's/[[:space:]]//g')
+
+        local random_suffix
+        random_suffix=$(printf '%04x' $((RANDOM % 65536)))
+        read -rp "  请输入 Routed Prefix 的子网后缀 (随机生成可避免冲突) [默认: ${random_suffix}]: " routed_suffix
+        routed_suffix="${routed_suffix:-$random_suffix}"
+        routed_suffix=$(echo "$routed_suffix" | sed 's/[^a-fA-F0-9]//g' | tr '[:upper:]' '[:lower:]')
+        if [[ -z "$routed_suffix" ]]; then
+            routed_suffix="$random_suffix"
+        fi
+        _info "容器 IPv6 地址后缀: ${routed_suffix} (Host: ::1, Container: ::2)"
     fi
     
     if [[ "$configure_he" == "y" ]]; then
@@ -24935,8 +24945,8 @@ EOF
         else
             prefix_base="${_routed_addr%:*}"    # 展开格式：去掉最后一个主机段
         fi
-        container_routed_ip="${prefix_base}::2"
-        host_bridge_ipv6="${prefix_base}::1"
+        container_routed_ip="${prefix_base}:${routed_suffix}::2"
+        host_bridge_ipv6="${prefix_base}:${routed_suffix}::1"
         
         if [[ "$ipv4_mode" == "3" ]]; then
             # 完全禁用 IPv4
