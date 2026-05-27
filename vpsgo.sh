@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.32"
+VERSION="4.0"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -22311,6 +22311,13 @@ _DNS_V6_SERVERS=()
 _DNS_RESTART_SERVICES=()
 _DNS_CLEAR_EXISTING=1
 
+_DNS64_PRESETS=(
+    "Google DNS64|2001:4860:4860::6464"
+    "Google DNS64 2|2001:4860:4860::64"
+    "Quad9|2620:fe::fe"
+    "Quad9 2|2620:fe::9"
+)
+
 _dns_validate_ipv4() {
     local ip="$1"
     [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -22441,7 +22448,7 @@ _dns_is_ipv6_only_host() {
 
 _dns_recommended_servers() {
     if _dns_is_ipv6_only_host; then
-        printf '%s' "2001:4860:4860::8888,2606:4700:4700::1111"
+        printf '%s' "2001:4860:4860::6464,2001:4860:4860::64"
     elif _dns_has_ipv6_default_route; then
         printf '%s' "8.8.8.8,1.1.1.1,2001:4860:4860::8888,2606:4700:4700::1111"
     else
@@ -23075,9 +23082,16 @@ _dns_benchmark_mainstream() {
         "DNSPod-v6-ECS|2402:4e00::|yes"
     )
 
+    local dns64_dns=(
+        "Google-DNS64|2001:4860:4860::6464|no"
+        "Google-DNS64-2|2001:4860:4860::64|no"
+        "Quad9|2620:fe::fe|no"
+        "Quad9-2|2620:fe::9|no"
+    )
+
     echo ""
     _info "DNS 测速基于 dig 请求延迟（单位 ms）"
-    _dns_is_ipv6_only_host && _info "检测到 IPv6-only 网络，建议优先测试 IPv6 DNS 组。"
+    _dns_is_ipv6_only_host && _info "检测到 IPv6-only 网络，建议优先测试 DNS64 或 IPv6 DNS 组。"
     _warn "结果受线路、运营商缓存、网络波动影响，建议多测几次取平均。"
 
     _dns_ensure_lookup_tool || true
@@ -23092,12 +23106,13 @@ _dns_benchmark_mainstream() {
         _separator
         _menu_pair "1" "国内 DNS 组" "测试域名: qq.com" "green" "2" "国外 DNS 组" "测试域名: google.com" "green"
         _menu_pair "3" "ECS DNS 组" "常见支持 ECS 的 DNS" "green" "4" "IPv6 DNS 组" "适合 IPv6-only VPS" "green"
+        _menu_item "5" "DNS64 测速组" "Google/Quad9 DNS64" "green"
         _menu_item "0" "返回上一层" "" "red"
         _separator
 
         local group_choice
 
-        read -rp "  选择 [0-4]: " group_choice
+        read -rp "  选择 [0-5]: " group_choice
         case "$group_choice" in
             1)
                 _dns_benchmark_print_group_table "国内 DNS 组测速（ECS 标记）" "qq.com" "A" "${cn_dns[@]}"
@@ -23120,10 +23135,106 @@ _dns_benchmark_mainstream() {
                 _press_any_key
                 return
                 ;;
+            5)
+                _dns_benchmark_print_group_table "DNS64 组测速（合成 AAAA，测 cloudflare.com）" "cloudflare.com" "AAAA" "${dns64_dns[@]}"
+                _press_any_key
+                return
+                ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${group_choice}"; sleep 1 ;;
         esac
     done
+}
+
+_dns64_quick_setup_flow() {
+    echo ""
+
+    if ! _dns_is_ipv6_only_host; then
+        _warn "当前主机不是 IPv6-only 网络环境，DNS64 主要用于纯 IPv6 服务器。"
+        read -rp "  是否继续设置 DNS64? [y/N]: " confirm
+        echo ""
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            return
+        fi
+    else
+        _info "已检测到 IPv6-only 网络 — DNS64 可合成 AAAA 记录以访问 IPv4 资源。"
+    fi
+
+    echo ""
+    printf "  ${BOLD}选择 DNS64 服务器${PLAIN}\n"
+    _separator
+    local i=1 entry name addr
+    for entry in "${_DNS64_PRESETS[@]}"; do
+        name="${entry%%|*}"
+        addr="${entry#*|}"
+        _menu_item "$i" "${name}" "${addr}" "green"
+        i=$((i + 1))
+    done
+    _menu_item "0" "返回上一层" "" "red"
+    _separator
+
+    local choice selected_servers=""
+    read -rp "  选择 DNS64 服务器 (编号，空格分隔多选): " choice
+
+    i=1
+    for entry in "${_DNS64_PRESETS[@]}"; do
+        if echo " $choice " | grep -qE "[[:space:]]$i[[:space:]]"; then
+            addr="${entry#*|}"
+            selected_servers="${selected_servers}${selected_servers:+, }${addr}"
+        fi
+        i=$((i + 1))
+    done
+
+    if echo " $choice " | grep -qE "[[:space:]]0[[:space:]]"; then
+        return
+    fi
+
+    if [ -z "$selected_servers" ]; then
+        _error_no_exit "未选择任何 DNS64 服务器。"
+        _press_any_key
+        return
+    fi
+
+    echo ""
+    _info "已选择: ${selected_servers}"
+
+    local mode
+    echo ""
+    printf "  ${BOLD}选择应用模式${PLAIN}\n"
+    _separator
+    _menu_item "1" "临时修改" "重启后可能失效" "green"
+    _menu_item "2" "永久修改" "持久化并重启组件" "green"
+    _separator
+
+    read -rp "  选择 [1-2, 默认2]: " mode
+    echo ""
+    mode="${mode:-2}"
+
+    if ! _dns_parse_servers "$selected_servers"; then
+        _press_any_key
+        return
+    fi
+
+    _DNS_CLEAR_EXISTING=1
+    printf "  ${BOLD}应用计划${PLAIN}\n"
+    _status_kv "模式" "$([ "$mode" = "1" ] && echo "临时修改" || echo "永久修改")" "cyan" 10
+    _status_kv "DNS64" "${_DNS_SERVERS[*]}" "cyan" 10
+    printf "\n  ${BOLD}执行过程${PLAIN}\n"
+
+    if [ "$mode" = "1" ]; then
+        _dns_apply_temporary || true
+    else
+        _dns_apply_permanent || true
+    fi
+
+    _dns_show_current_config
+    printf "\n"
+    _dns_verify_resolution || true
+
+    echo ""
+    _info "DNS64 已设置。在 IPv6-only 环境下，DNS64 会为纯 IPv4 域名合成 AAAA 记录。"
+    _info "使用 NAT64 网关 (如 64:ff9b::/96) 即可访问 IPv4 资源。"
+    _press_any_key
 }
 
 _dns_change_flow() {
@@ -23135,7 +23246,7 @@ _dns_change_flow() {
     echo ""
     dns_default="$(_dns_recommended_servers)"
     if _dns_is_ipv6_only_host; then
-        _info "检测到 IPv6-only 网络，默认使用 IPv6 公共 DNS。"
+        _info "检测到 IPv6-only 网络，推荐使用 DNS64 服务器以访问 IPv4 资源。"
     fi
     read -rp "  请输入 DNS（空格/逗号分隔）[默认 ${dns_default}]: " dns_input
     dns_input="${dns_input:-$dns_default}"
@@ -23174,6 +23285,7 @@ _dns_manage_screen() {
     _separator
     _menu_pair "1" "临时修改 DNS" "重启后可能失效" "green" "2" "永久修改 DNS" "持久化并重启组件" "green"
     _menu_pair "3" "仅验证当前 DNS" "A/AAAA 解析测试" "green" "4" "主流 DNS 测速" "国内/国外/ECS/IPv6" "green"
+    _menu_item "5" "DNS64 快速设置" "IPv6-only 合成 AAAA 记录" "green"
     _menu_item "0" "返回主菜单" "" "red"
     _separator
 }
@@ -23183,7 +23295,7 @@ _dns_manage() {
         _ui_print_screen _dns_manage_screen
 
         local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-4]: " choice
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-5]: " choice
         case "$choice" in
             1) _dns_change_flow "temporary" ;;
             2) _dns_change_flow "permanent" ;;
@@ -23193,6 +23305,7 @@ _dns_manage() {
                 _press_any_key
                 ;;
             4) _dns_benchmark_mainstream ;;
+            5) _dns64_quick_setup_flow ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${choice}"; sleep 1 ;;
         esac
@@ -25099,8 +25212,14 @@ nameserver 2001:4860:4860::8844
 EOF
         # 防止 Proxmox VE 覆盖容器 DNS
         touch "${container_rootfs}/etc/.pve-ignore.resolv.conf" 2>/dev/null || true
+
+        # 锁定 APT 仅走 IPv6
+        _info "正在配置容器 APT 强制 IPv6..."
+        mkdir -p "${container_rootfs}/etc/apt/apt.conf.d" 2>/dev/null || true
+        echo 'Acquire::ForceIPv6 "true";' > "${container_rootfs}/etc/apt/apt.conf.d/99force-ipv6"
+        _success "已写入 Acquire::ForceIPv6 true (容器内 /etc/apt/apt.conf.d/99force-ipv6)"
     fi
-    
+
     if [[ "$configure_he" == "y" ]]; then
         _info "正在配置宿主机 LXC 网桥 IPv6 参数..."
         _update_lxc_net_config "USE_LXC_BRIDGE" "true"
