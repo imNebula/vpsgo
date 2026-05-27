@@ -1,0 +1,128 @@
+# VPSGo
+(⚠️脚本为自用设计，基本只覆盖我个人需求，项目的组成较为混乱，包括安装其他开源项目，至此先向每一位开源工作者和相关工作人员表达感激，项目基本为自己使用 AI 整理而成，如有错误请谅解）
+
+一站式 VPS 管理脚本，集成网络优化、系统工具、代理部署等常用功能。
+
+（项目永久保持开源，不会添加任何后门及广告）
+
+## 快速开始
+脚本覆盖常见 Linux 发行版，建议使用 root 运行；非 root 用户需要系统已安装 `sudo`。
+
+```bash
+# 一键安装并运行
+sh -c 'set -eu
+URL="${VPSGO_URL:-https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh}"
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else echo "请使用 root 运行，或先安装 sudo"; exit 1; fi
+fi
+if ! command -v bash >/dev/null 2>&1 || { ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; }; then
+  if command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache bash curl
+  elif command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update && $SUDO apt-get install -y bash curl
+  elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y bash curl
+  elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y bash curl
+  elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -Sy --noconfirm bash curl
+  else echo "请先安装 bash，并确保 curl 或 wget 至少可用一个"; exit 1; fi
+fi
+tmp="$(mktemp)"
+trap "rm -f \"$tmp\"" EXIT
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$URL" -o "$tmp"
+else
+  wget -qO "$tmp" "$URL"
+fi
+$SUDO bash "$tmp"'
+```
+
+```bash
+# 后续直接使用
+vpsgo
+```
+
+```bash
+# 国内网络可在上面的命令前加这一段
+export VPSGO_URL="https://gh-proxy.org/https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
+```
+
+安装命令会自动补齐 `bash` 和下载工具（优先 `curl`，已有 `wget` 也可运行），脚本首次启动会自安装到 `/usr/local/bin/vpsgo`。Alpine 默认没有 `sudo`，直接用 root 执行即可。
+
+首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.org/`，会自动作用到脚本自更新、GitHub API、Mihomo、Realm、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载。
+
+如果出现 `-ash: vpsgo: Permission denied`，可执行：
+
+```bash
+command -v vpsgo
+ls -l "$(command -v vpsgo)"
+chmod 0755 "$(command -v vpsgo)"
+```
+
+若挂载参数包含 `noexec`，请改用其他路径（示例）：
+
+```bash
+VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
+```
+
+## 功能列表
+
+### 网络优化
+
+| # | 功能 | 说明 |
+|---|------|------|
+| 1 | 开启内核自带 BBR | 安装/启用 TCP BBR 拥塞控制 |
+| 2 | 设置队列调度算法 | 切换 fq / cake / fq_pie |
+| 3 | 设置 IPv4/IPv6 优先级 | 修改出口协议栈偏好 |
+| 4 | TCP 缓冲区调优 | 基于 BDP 自适应优化连接参数；CAKE 持久化支持 systemd/OpenRC |
+| 18 | WARP 管理 | 运行 warp-sh/warp-go、刷新网络、刷 Netflix IP、配置北京时间定时刷新 |
+
+### 工具
+
+| # | 功能 | 说明 |
+|---|------|------|
+| 5 | iPerf3 测速服务端 | 启动服务端并显示客户端命令 |
+| 6 | NodeQuality 测试 | 运行 NodeQuality 线路质量评分脚本 |
+| 7 | Ookla Speedtest CLI | 安装/更新 Speedtest CLI |
+| 8 | NextTrace | 安装/更新 nexttrace、nexttrace-tiny、ntr，并支持常用参数向导、快速回程、自定义列表、MTR、MTU、CDN Speed |
+| 9 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
+| 10 | Docker 日志轮转 | 限制容器日志大小 |
+| 11 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志；支持出口管理（含链式代理）、iOS rule 模糊搜索分流、Google/Netflix/端口出站分流、规则优先级、自定义远程规则集 (yaml/text/mrs)、socks5 链接导入 |
+| 12 | sing-box 安装 | 安装、启动、查看状态和日志 |
+| 13 | Snell V5 管理 | 安装、配置、导出、查看日志和状态 |
+| 14 | WireGuard 原生节点 | 部署节点、管理客户端、查看状态 |
+| 15 | Shadowsocks-Rust 管理 | 安装、配置、导出、查看日志和状态 |
+
+### 系统
+
+| # | 功能 | 说明 |
+|---|------|------|
+| 16 | Swap 管理 | 智能推荐大小，创建/删除 Swap 文件 |
+| 17 | 1Panel iptables 代理链 | 快速挂载 1PANEL_PREROUTING / 1PANEL_POSTROUTING 到 NAT 主链，并可尝试保存规则 |
+| - | SSH 端口 | 快速修改 sshd 监听端口，自动备份、校验并重启 SSH 服务 |
+
+### 其他
+
+| 快捷键 | 功能 |
+|--------|------|
+| g | GitHub 代理开关（gh-proxy.org） |
+| u | 从 GitHub 更新到最新版 |
+| x | 卸载 VPSGo |
+| 0 | 退出脚本 |
+
+## 系统要求
+
+- **操作系统**: Linux (Debian / Ubuntu / Alpine / CentOS / RHEL / Arch 等)
+- **权限**: 需要 root 权限；非 root 用户可通过 `sudo vpsgo` 运行
+- **依赖**: `bash`，以及 `curl` 或 `wget`
+
+Ookla Speedtest CLI 安装项额外适配 macOS(Homebrew) 与 FreeBSD 12/13 x86_64；Windows 版官方 CLI 仍需按 Ookla 页面手动下载 zip。NextTrace 安装优先使用 GitHub Release 二进制，失败时回退到官方安装脚本。
+
+## 更新
+
+在脚本菜单中输入 `u` 即可自动从 GitHub 拉取最新版本并重启。
+
+如果在国内网络下访问较慢，可先在首页按 `g` 开启 GitHub 代理后再更新或安装相关组件。
+
+如需固定自更新来源，可设置 `VPSGO_UPDATE_URL`；临时安装来源仍可使用 `VPSGO_URL`。
+
+## License
+
+MIT
