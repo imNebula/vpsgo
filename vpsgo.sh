@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.26"
+VERSION="3.27"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -25026,7 +25026,7 @@ EOF
     fi
 
     if [[ "$ipv4_mode" == "2" || "$ipv4_mode" == "3" ]]; then
-        _info "正在配置容器 IPv6 DNS (写入 /etc/resolv.conf)..."
+        _info "正在配置容器 IPv6 DNS (写入容器内的 /etc/resolv.conf)..."
         local container_resolv="${container_rootfs}/etc/resolv.conf"
         if [ -f "$container_resolv" ] || [ -L "$container_resolv" ]; then
             rm -f "$container_resolv" 2>/dev/null || true
