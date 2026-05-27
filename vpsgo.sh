@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.31"
+VERSION="3.32"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -25649,11 +25649,42 @@ _lxc_attach() {
 
 _he_ipv6_lxc_uninstall() {
     _header "卸载与清理"
-    
+
+    local lxc_list=()
+    if command -v lxc-ls >/dev/null 2>&1; then
+        while IFS= read -r cname; do
+            cname=$(echo "$cname" | xargs)
+            [[ -z "$cname" ]] && continue
+            lxc_list+=("$cname")
+        done < <(lxc-ls -1 2>/dev/null || lxc-ls 2>/dev/null | tr ' ' '\n' || true)
+    fi
+
+    if [ "${#lxc_list[@]}" -eq 0 ]; then
+        _info "当前没有任何 LXC 容器，无需卸载。"
+        _press_any_key
+        return
+    fi
+
+    _info "当前存在的 LXC 容器："
+    local i=1
+    for cname in "${lxc_list[@]}"; do
+        local c_status="停止"
+        lxc-info -n "$cname" -s 2>/dev/null | grep -q "RUNNING" && c_status="运行中"
+        echo -e "      ${GREEN}${i}.${PLAIN} ${cname} (${c_status})"
+        i=$((i + 1))
+    done
+    echo ""
+
     local container_name
-    read -rp "  请输入要删除的 LXC 容器名称 [默认: warp-container]: " container_name
-    container_name="${container_name:-warp-container}"
+    read -rp "  请输入要删除的容器名称 [默认: ${lxc_list[0]}]: " container_name
+    container_name="${container_name:-${lxc_list[0]}}"
     container_name=$(echo "$container_name" | xargs)
+
+    if ! lxc-info -n "$container_name" >/dev/null 2>&1; then
+        _error_no_exit "LXC 容器 $container_name 不存在。"
+        _press_any_key
+        return
+    fi
     
     _warn "警告：此操作将永久删除容器 $container_name 并清除关联的隧道和端口转发配置！"
     local confirm
