@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.25"
+VERSION="3.26"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -24933,6 +24933,95 @@ iface eth0 inet6 static
     address ${container_routed_ip}/64
     gateway ${host_bridge_ipv6}
 EOF
+        fi
+    fi
+
+    # 额外兼容 systemd-networkd (部分 Debian/Ubuntu 官方模板默认使用 systemd-networkd)
+    local container_networkd_dir="${container_rootfs}/etc/systemd/network"
+    if [ -d "$container_networkd_dir" ]; then
+        local container_networkd_conf="${container_networkd_dir}/eth0.network"
+        _info "检测到 systemd-networkd 配置目录，正在配置 eth0.network..."
+        
+        # 备份原配置（如果存在且不是我们写入的备份）
+        if [ -f "$container_networkd_conf" ] && [ ! -f "${container_networkd_conf}.bak" ]; then
+            cp "$container_networkd_conf" "${container_networkd_conf}.bak" 2>/dev/null || true
+        fi
+        
+        if [[ "$configure_he" == "n" ]]; then
+            if [[ "$ipv4_mode" == "3" ]]; then
+                cat > "$container_networkd_conf" <<EOF
+[Match]
+Name=eth0
+
+[Network]
+DHCP=no
+LinkLocalAddressing=no
+EOF
+            elif [[ "$ipv4_mode" == "2" ]]; then
+                cat > "$container_networkd_conf" <<EOF
+[Match]
+Name=eth0
+
+[Network]
+DHCP=no
+Address=${container_local_ipv4}/${bridge_mask}
+LinkLocalAddressing=no
+EOF
+            else
+                cat > "$container_networkd_conf" <<EOF
+[Match]
+Name=eth0
+
+[Network]
+DHCP=ipv4
+EOF
+            fi
+        else
+            if [[ "$ipv4_mode" == "3" ]]; then
+                cat > "$container_networkd_conf" <<EOF
+[Match]
+Name=eth0
+
+[Network]
+DHCP=no
+LinkLocalAddressing=no
+Address=${container_routed_ip}/64
+Gateway=${host_bridge_ipv6}
+DNS=2606:4700:4700::1111
+DNS=2001:4860:4860::8888
+DNS=2606:4700:4700::1001
+DNS=2001:4860:4860::8844
+EOF
+            elif [[ "$ipv4_mode" == "2" ]]; then
+                cat > "$container_networkd_conf" <<EOF
+[Match]
+Name=eth0
+
+[Network]
+DHCP=no
+Address=${container_local_ipv4}/${bridge_mask}
+Address=${container_routed_ip}/64
+Gateway=${host_bridge_ipv6}
+DNS=2606:4700:4700::1111
+DNS=2001:4860:4860::8888
+DNS=2606:4700:4700::1001
+DNS=2001:4860:4860::8844
+EOF
+            else
+                cat > "$container_networkd_conf" <<EOF
+[Match]
+Name=eth0
+
+[Network]
+DHCP=ipv4
+Address=${container_routed_ip}/64
+Gateway=${host_bridge_ipv6}
+DNS=2606:4700:4700::1111
+DNS=2001:4860:4860::8888
+DNS=2606:4700:4700::1001
+DNS=2001:4860:4860::8844
+EOF
+            fi
         fi
     fi
 
