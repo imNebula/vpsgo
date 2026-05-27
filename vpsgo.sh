@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.27"
+VERSION="3.28"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -24591,6 +24591,15 @@ _he_ipv6_lxc_install() {
     else
         _success "LXC 依赖检查通过"
     fi
+
+    # 确保 LXC 私有网桥配置已启用并创建
+    if [ -f "/etc/default/lxc-net" ]; then
+        _update_lxc_net_config "USE_LXC_BRIDGE" "true"
+        if ! ip link show lxcbr0 >/dev/null 2>&1; then
+            _info "检测到 lxcbr0 网桥未创建，正在重启 lxc-net 服务..."
+            systemctl restart lxc-net || true
+        fi
+    fi
     
     local container_name
     read -rp "  请输入 LXC 容器名称 [默认: warp-container]: " container_name
@@ -25043,6 +25052,7 @@ EOF
     
     if [[ "$configure_he" == "y" ]]; then
         _info "正在配置宿主机 LXC 网桥 IPv6 参数..."
+        _update_lxc_net_config "USE_LXC_BRIDGE" "true"
         _update_lxc_net_config "LXC_IPV6_ADDR" "$host_bridge_ipv6"
         _update_lxc_net_config "LXC_IPV6_MASK" "64"
         _update_lxc_net_config "LXC_IPV6_NETWORK" "${routed_ipv6}"
