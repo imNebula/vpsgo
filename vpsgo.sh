@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="3.28"
+VERSION="3.29"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -24296,6 +24296,47 @@ _show_home_screen() {
 
 # --- LXC Container & HE Tunnel Module ---
 
+_ensure_lxcbr0() {
+    # 确保 lxcbr0 网桥存在且 UP
+    if ip link show lxcbr0 >/dev/null 2>&1; then
+        ip link set lxcbr0 up 2>/dev/null || true
+        return 0
+    fi
+
+    _info "检测到 lxcbr0 网桥不存在，正在尝试通过 lxc-net 服务创建..."
+    systemctl unmask lxc-net 2>/dev/null || true
+    systemctl enable --now lxc-net 2>/dev/null || true
+    systemctl restart lxc-net 2>/dev/null || true
+    for i in $(seq 1 10); do
+        if ip link show lxcbr0 >/dev/null 2>&1; then
+            ip link set lxcbr0 up 2>/dev/null || true
+            return 0
+        fi
+        sleep 1
+    done
+
+    # lxc-net 可能不可用，手动创建网桥作为兜底
+    _warn "lxc-net 服务未能创建 lxcbr0，尝试手动创建网桥..."
+    ip link add name lxcbr0 type bridge 2>/dev/null || true
+    ip addr add 10.0.3.1/24 dev lxcbr0 2>/dev/null || true
+    ip link set lxcbr0 up 2>/dev/null || true
+
+    if ip link show lxcbr0 >/dev/null 2>&1; then
+        _success "已手动创建 lxcbr0 网桥 (10.0.3.1/24)"
+        # 确保 NAT 规则存在以便容器访问外网
+        iptables -t nat -C POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || \
+            iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || true
+        iptables -C FORWARD -i lxcbr0 -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -i lxcbr0 -j ACCEPT 2>/dev/null || true
+        iptables -C FORWARD -o lxcbr0 -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -o lxcbr0 -j ACCEPT 2>/dev/null || true
+        return 0
+    fi
+
+    _error_no_exit "lxcbr0 网桥无法创建，请手动排查网络配置。"
+    return 1
+}
+
 _update_lxc_net_config() {
     local key="$1"
     local val="$2"
@@ -24595,15 +24636,9 @@ _he_ipv6_lxc_install() {
     # 确保 LXC 私有网桥配置已启用并创建
     if [ -f "/etc/default/lxc-net" ]; then
         _update_lxc_net_config "USE_LXC_BRIDGE" "true"
-        if ! ip link show lxcbr0 >/dev/null 2>&1; then
-            _info "检测到 lxcbr0 网桥未创建，正在重启 lxc-net 服务..."
-            systemctl restart lxc-net || true
-            for i in $(seq 1 15); do
-                if ip link show lxcbr0 >/dev/null 2>&1; then
-                    break
-                fi
-                sleep 1
-            done
+        if ! _ensure_lxcbr0; then
+            _press_any_key
+            return 1
         fi
     fi
     
@@ -25471,6 +25506,10 @@ _he_ipv6_lxc_power_control() {
                     ifup he-ipv6 >/dev/null 2>&1 || true
                 fi
             fi
+            if ! _ensure_lxcbr0; then
+                _press_any_key
+                return 1
+            fi
             _info "正在启动容器..."
             lxc-start -n "$container_name" -l DEBUG -o "/tmp/lxc_${container_name}.log"
             local wait_i=0
@@ -25552,6 +25591,10 @@ _lxc_attach() {
         read -rp "  是否尝试启动该容器? [Y/n]: " start_choice
         start_choice="${start_choice:-y}"
         if [[ "$start_choice" =~ ^[Yy] ]]; then
+            if ! _ensure_lxcbr0; then
+                _press_any_key
+                return 1
+            fi
             _info "正在启动容器 $target_name..."
             lxc-start -n "$target_name" -l DEBUG -o "/tmp/lxc_${target_name}.log"
             local wait_i=0
