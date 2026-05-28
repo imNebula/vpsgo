@@ -13674,8 +13674,13 @@ _mihomo_chain_proxy_manage() {
                                 out_wg_preshared_key=$(_mihomoconf_trim "${out_wg_preshared_key:-}")
                                 read -rp "  reserved [可留空，如 209,98,59]: " out_wg_reserved
                                 out_wg_reserved=$(_mihomoconf_trim "${out_wg_reserved:-}")
-                                read -rp "  mtu [可留空，如 1408]: " out_wg_mtu
+                                read -rp "  mtu [可留空，如 1408，输入 auto 自动探测]: " out_wg_mtu
                                 out_wg_mtu=$(_mihomoconf_trim "${out_wg_mtu:-}")
+                                if [[ "$out_wg_mtu" == "auto" ]]; then
+                                    _info "正在向 ${out_server} 探测最佳 MTU..."
+                                    out_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
+                                    _success "探测完成，推荐 WireGuard MTU 为: ${out_wg_mtu}"
+                                fi
                                 read -rp "  persistent-keepalive [可留空]: " out_wg_keepalive
                                 out_wg_keepalive=$(_mihomoconf_trim "${out_wg_keepalive:-}")
                                 if [[ -z "$out_wg_ip" || -z "$out_wg_private_key" || -z "$out_wg_public_key" ]]; then
@@ -13738,14 +13743,59 @@ _mihomo_chain_proxy_manage() {
                         _info "这需要向 Cloudflare API 发送注册请求，请确保您的网络能够正常发起请求。"
 
                         local warp_json rc
-                        warp_json=$(sing-box generate warp-profile 2>/dev/null)
-                        rc=$?
-                        if [ $rc -ne 0 ] || [ -z "$warp_json" ]; then
-                            _warn "生成 WARP 节点失败，以下是错误输出："
-                            sing-box generate warp-profile
+                        local wg_keys wg_private_key wg_public_key
+                        wg_keys=$(sing-box generate wg-keypair 2>/dev/null)
+                        wg_private_key=$(echo "$wg_keys" | grep -i 'private key' | awk '{print $NF}' || true)
+                        wg_public_key=$(echo "$wg_keys" | grep -i 'public key' | awk '{print $NF}' || true)
+
+                        if [[ -z "$wg_private_key" || -z "$wg_public_key" ]]; then
+                            _warn "使用 sing-box 生成 WireGuard 密钥对失败。"
                             _press_any_key
                             continue
                         fi
+
+                        local response api_url wg_server wg_port wg_ip wg_ipv6 client_id reserved_dec reserved_parsed
+                        api_url="https://api.cloudflareclient.com/v0a2158/reg"
+                        response=$(curl -s -X POST "$api_url" \
+                            -H "User-Agent: CF-Client-Version/a-7.21-0721" \
+                            -H "Content-Type: application/json" \
+                            -d "{\"key\":\"$wg_public_key\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>/dev/null)
+
+                        wg_server=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f1 || true)
+                        wg_port=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f2 || true)
+                        wg_ip=$(echo "$response" | grep -oE '"v4":"[0-9.]+"' | cut -d'"' -f4 || true)
+                        wg_ipv6=$(echo "$response" | grep -oE '"v6":"[0-9a-fA-F:]+"' | cut -d'"' -f4 || true)
+                        client_id=$(echo "$response" | grep -oE '"client_id":"[^"]+"' | cut -d'"' -f4 || true)
+
+                        if [[ -n "$client_id" ]]; then
+                            reserved_dec=$(echo -n "$client_id" | base64 -d 2>/dev/null | od -An -v -t u1 | tr -s ' ' ',' | tr -d '\n' | sed 's/^,//;s/,$//' || true)
+                            if [[ -n "$reserved_dec" ]]; then
+                                reserved_parsed="[$reserved_dec]"
+                            fi
+                        fi
+                        if [[ -z "$reserved_parsed" ]]; then
+                            reserved_parsed="[0,0,0]"
+                        fi
+
+                        if [[ -z "$wg_ip" ]]; then
+                            _warn "通过 Cloudflare API 注册 WARP 失败，以下是 API 返回内容："
+                            echo "$response"
+                            _press_any_key
+                            continue
+                        fi
+
+                        warp_json=$(cat <<EOF
+{
+  "private_key": "$wg_private_key",
+  "server": "${wg_server:-engage.cloudflareclient.com}",
+  "server_port": ${wg_port:-2408},
+  "addresses": [
+    "${wg_ip}/32"$( [[ -n "$wg_ipv6" ]] && echo ", \"${wg_ipv6}/128\"" )
+  ],
+  "reserved": $reserved_parsed
+}
+EOF
+)
 
                         local wg_private_key wg_ip wg_ipv6 wg_reserved wg_server wg_port
                         wg_private_key=$(echo "$warp_json" | grep -oE '"private_key":\s*"[^"]+"' | awk -F'"' '{print $4}' || true)
@@ -13798,6 +13848,14 @@ _mihomo_chain_proxy_manage() {
                             out_port="${wg_port:-2408}"
                         fi
 
+                        local detect_mtu_choice optimal_wg_mtu="1420"
+                        read -rp "  是否探测最佳 MTU? (选择 N 将使用默认值 1420) [y/N] (默认 N): " detect_mtu_choice
+                        if [[ "$detect_mtu_choice" =~ ^[Yy] ]]; then
+                            _info "正在向 ${out_server} 探测最佳 MTU..."
+                            optimal_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
+                            _success "探测完成，推荐 WireGuard MTU 为: ${optimal_wg_mtu}"
+                        fi
+
                         out_type="wireguard"
                         out_wg_ip="$wg_ip"
                         out_wg_ipv6="$wg_ipv6"
@@ -13806,7 +13864,7 @@ _mihomo_chain_proxy_manage() {
                         out_wg_allowed_ips="0.0.0.0/0,::/0"
                         out_wg_preshared_key=""
                         out_wg_reserved="${reserved_parsed:-[0,0,0]}"
-                        out_wg_mtu="1420"
+                        out_wg_mtu="$optimal_wg_mtu"
                         out_wg_keepalive="25"
                         ;;
                 esac
@@ -26911,11 +26969,230 @@ _he_host_tunnel_uninstall() {
     _press_any_key
 }
 
+_PING_DF_MODE=""
+
+_ping_df_probe() {
+    local target="$1"
+    local size="$2"
+    local is_ipv6="$3"
+    local retries=2
+    local i
+
+    if [[ -z "${_PING_DF_MODE:-}" ]]; then
+        if [[ "$is_ipv6" -eq 1 ]]; then
+            if ping -6 -c 1 -W 1 -M do -s 1000 ::1 >/dev/null 2>&1; then
+                _PING_DF_MODE="linux_v6"
+            elif ping6 -c 1 -W 1 -M do -s 1000 ::1 >/dev/null 2>&1; then
+                _PING_DF_MODE="linux_v6_ping6"
+            elif ping -6 -c 1 -t 1 -D -s 1000 ::1 >/dev/null 2>&1; then
+                _PING_DF_MODE="macos_v6"
+            elif ping6 -c 1 -t 1 -D -s 1000 ::1 >/dev/null 2>&1; then
+                _PING_DF_MODE="macos_v6_ping6"
+            else
+                _PING_DF_MODE="unsupported"
+            fi
+        else
+            if ping -c 1 -W 1 -M do -s 1000 127.0.0.1 >/dev/null 2>&1; then
+                _PING_DF_MODE="linux_v4"
+            elif ping -c 1 -t 1 -D -s 1000 127.0.0.1 >/dev/null 2>&1; then
+                _PING_DF_MODE="macos_v4"
+            else
+                _PING_DF_MODE="unsupported"
+            fi
+        fi
+    fi
+
+    for ((i=0; i<retries; i++)); do
+        case "$_PING_DF_MODE" in
+            linux_v4)
+                if ping -c 1 -W 1 -M do -s "$size" "$target" >/dev/null 2>&1; then return 0; fi
+                ;;
+            linux_v6)
+                if ping -6 -c 1 -W 1 -M do -s "$size" "$target" >/dev/null 2>&1; then return 0; fi
+                ;;
+            linux_v6_ping6)
+                if ping6 -c 1 -W 1 -M do -s "$size" "$target" >/dev/null 2>&1; then return 0; fi
+                ;;
+            macos_v4)
+                if ping -c 1 -t 1 -D -s "$size" "$target" >/dev/null 2>&1; then return 0; fi
+                ;;
+            macos_v6)
+                if ping -6 -c 1 -t 1 -D -s "$size" "$target" >/dev/null 2>&1; then return 0; fi
+                ;;
+            macos_v6_ping6)
+                if ping6 -c 1 -t 1 -D -s "$size" "$target" >/dev/null 2>&1; then return 0; fi
+                ;;
+            *)
+                return 99
+                ;;
+        esac
+    done
+    return 1
+}
+
+_detect_optimal_mtu_val() {
+    local target="$1"
+    local is_ipv6=0
+    if [[ "$target" =~ : ]]; then
+        is_ipv6=1
+    fi
+
+    _PING_DF_MODE=""
+    _ping_df_probe "127.0.0.1" 1000 "$is_ipv6"
+    if [[ "${_PING_DF_MODE:-}" == "unsupported" ]]; then
+        echo "1420"
+        return
+    fi
+
+    local min_mtu=1200
+    local overhead=28
+    if [[ "$is_ipv6" -eq 1 ]]; then
+        min_mtu=1280
+        overhead=48
+    fi
+
+    # Check min
+    if ! _ping_df_probe "$target" "$((min_mtu - overhead))" "$is_ipv6"; then
+        echo "1420"
+        return
+    fi
+
+    # Check max
+    local max_mtu=1500
+    if _ping_df_probe "$target" "$((max_mtu - overhead))" "$is_ipv6"; then
+        echo "1420"
+        return
+    fi
+
+    local low="$min_mtu"
+    local high="$max_mtu"
+    local opt_mtu="$min_mtu"
+
+    while [[ "$low" -le "$high" ]]; do
+        local mid=$(( (low + high) / 2 ))
+        if _ping_df_probe "$target" "$((mid - overhead))" "$is_ipv6"; then
+            opt_mtu="$mid"
+            low=$((mid + 1))
+        else
+            high=$((mid - 1))
+        fi
+    done
+
+    local wg_mtu=$((opt_mtu - 80))
+    if [[ "$wg_mtu" -lt 1280 ]]; then
+        wg_mtu=1280
+    fi
+    echo "$wg_mtu"
+}
+
+_network_mtu_detect() {
+    local target
+    local is_ipv6=0
+    local opt_mtu
+
+    _header "MTU 探测与诊断"
+
+    echo ""
+    printf "  请输入需要测试的检测目标 (IP 或域名)。\n"
+    printf "  - 对于 WARP/WireGuard: 推荐使用 Cloudflare Endpoint IP: ${CYAN}162.159.193.10${PLAIN}\n"
+    printf "  - 对于国内普通网络: 推荐使用 ${CYAN}223.5.5.5${PLAIN} (阿里 DNS) 或 ${CYAN}119.29.29.29${PLAIN} (腾讯 DNS)\n"
+    printf "  - 对于国际普通网络: 推荐使用 ${CYAN}1.1.1.1${PLAIN} (Cloudflare) 或 ${CYAN}8.8.8.8${PLAIN} (Google)\n"
+    read -rp "  目标 [默认 1.1.1.1]: " target
+    target="${target:-1.1.1.1}"
+
+    if [[ "$target" =~ : ]]; then
+        is_ipv6=1
+    fi
+
+    _info "正在对 $target 进行 MTU 探测..."
+
+    _PING_DF_MODE=""
+    _ping_df_probe "127.0.0.1" 1000 "$is_ipv6"
+    if [[ "${_PING_DF_MODE:-}" == "unsupported" ]]; then
+        _error_no_exit "当前系统不支持设置 Ping DF (Don't Fragment) 标志，无法进行 MTU 探测。"
+        if command -v apk >/dev/null 2>&1; then
+            _info "提示: 您似乎正在使用 Alpine Linux, 可以通过安装 iputils-ping 支持此功能:"
+            _info "  apk add iputils"
+        elif command -v apt-get >/dev/null 2>&1; then
+            _info "提示: 可以通过安装 iputils-ping 支持此功能:"
+            _info "  apt-get install -y iputils-ping"
+        fi
+        _press_any_key
+        return 1
+    fi
+
+    local min_mtu=1200
+    local overhead=28
+    if [[ "$is_ipv6" -eq 1 ]]; then
+        min_mtu=1280
+        overhead=48
+    fi
+
+    local min_payload=$((min_mtu - overhead))
+    if ! _ping_df_probe "$target" "$min_payload" "$is_ipv6"; then
+        _error_no_exit "无法 ping 通目标 $target (最小 MTU $min_mtu 探测失败)。"
+        _info "这可能是因为:"
+        _info "  1. 目标 IP 不可达或网络断开。"
+        _info "  2. 目标 IP 或您的网络禁用了 ICMP 协议 (Ping)。"
+        _info "  3. 本地网络限制了最小 MTU 包的发送。"
+        _press_any_key
+        return 1
+    fi
+
+    # Test max MTU (1500)
+    local max_mtu=1500
+    local max_payload=$((max_mtu - overhead))
+    if _ping_df_probe "$target" "$max_payload" "$is_ipv6"; then
+        _success "探测完成！到 $target 的最大 MTU 至少为 1500。"
+        _info "您的网络在标准 MTU 1500 下运行良好，无需额外调优。"
+        _press_any_key
+        return 0
+    fi
+
+    # Perform binary search
+    local low="$min_mtu"
+    local high="$max_mtu"
+    opt_mtu="$min_mtu"
+
+    _info "开始二分法探测最大 MTU 边界 (范围: $min_mtu - $max_mtu)..."
+
+    while [[ "$low" -le "$high" ]]; do
+        local mid=$(( (low + high) / 2 ))
+        local payload=$((mid - overhead))
+
+        printf "  测试 MTU %d (Data Size: %d) ... " "$mid" "$payload"
+        if _ping_df_probe "$target" "$payload" "$is_ipv6"; then
+            printf "${GREEN}[成功]${PLAIN}\n"
+            opt_mtu="$mid"
+            low=$((mid + 1))
+        else
+            printf "${RED}[失败/分片]${PLAIN}\n"
+            high=$((mid - 1))
+        fi
+    done
+
+    _separator
+    _success "探测成功！"
+    printf "  ➜  最佳路径 MTU: ${GREEN}%d${PLAIN}\n" "$opt_mtu"
+
+    _info "诊断建议:"
+    printf "  - 检测到路径 MTU 限制为 %d。这可能是由于 ISP、VPN 或隧道封装导致的。\n" "$opt_mtu"
+    local wg_suggest=$((opt_mtu - 80))
+    if [[ "$wg_suggest" -lt 1280 ]]; then
+        wg_suggest=1280
+    fi
+    printf "  - 对于 WireGuard/WARP 隧道，建议设置 MTU 为: ${CYAN}%d${PLAIN} (Path MTU %d - 80 字节 overhead)。\n" "$wg_suggest" "$opt_mtu"
+    printf "  - 如果您在使用 SSH/网络访问时遇到大包卡顿/连接断开，可以通过以下命令临时启用 MTU 探测自动调节:\n"
+    printf "    ${YELLOW}sysctl -w net.ipv4.tcp_mtu_probing=1${PLAIN}\n"
+
+    _press_any_key
+}
+
 _network_opt_menu_screen() {
     _header "网络优化"
     _menu_pair "1" "BBR" "启用拥塞控制" "green" "2" "队列调度" "切换 qdisc" "green"
     _menu_pair "3" "IPv4/IPv6 优先" "切换出口偏好" "green" "4" "TCP 缓冲区" "调整内核参数" "green"
-    _menu_item "5" "WARP 管理" "安装/刷新/定时" "green"
+    _menu_pair "5" "MTU 检测" "探测最佳 MTU" "green" "6" "WARP 管理" "安装/刷新/定时" "green"
     _separator
     _menu_item "0" "返回主菜单" "" "red"
     _separator
@@ -26925,13 +27202,14 @@ _network_opt_menu() {
     while true; do
         _ui_print_screen _network_opt_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-5]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-6]: " ch
         case "$ch" in
             1) _bbr_install ;;
             2) _qdisc_setup ;;
             3) _v4v6_setup ;;
             4) _tcptune_setup ;;
-            5) _warp_manage ;;
+            5) _network_mtu_detect ;;
+            6) _warp_manage ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
