@@ -1968,6 +1968,26 @@ _warp_install_cli_packages() {
     return 0
 }
 
+_warp_set_protocol() {
+    local proto="$1"
+    if [[ "$proto" == "masque" ]]; then
+        if ! warp-cli --accept-tos tunnel protocol set MASQUE >/dev/null 2>&1; then
+            if ! warp-cli --accept-tos set-protocol MASQUE >/dev/null 2>&1; then
+                _warn "设置 MASQUE 协议失败，可能当前版本不支持。"
+                return 1
+            fi
+        fi
+    else
+        if ! warp-cli --accept-tos tunnel protocol set WireGuard >/dev/null 2>&1; then
+            if ! warp-cli --accept-tos set-protocol wireguard >/dev/null 2>&1; then
+                _warn "设置 WireGuard 协议失败。"
+                return 1
+            fi
+        fi
+    fi
+    return 0
+}
+
 _warp_configure_cli_interactive() {
     _info "正在配置 warp-cli..."
 
@@ -1978,8 +1998,10 @@ _warp_configure_cli_interactive() {
 
     # 2. Mode proxy
     _info "设置 WARP 运行模式为 Proxy 代理模式..."
-    if ! warp-cli --accept-tos set-mode proxy; then
-        _error_no_exit "设置 Proxy 模式失败"
+    if ! warp-cli --accept-tos set-mode proxy >/dev/null 2>&1; then
+        if ! warp-cli --accept-tos mode proxy >/dev/null 2>&1; then
+            _warn "设置 Proxy 模式失败，请手动确认。"
+        fi
     fi
 
     # 3. Port settings
@@ -1994,8 +2016,10 @@ _warp_configure_cli_interactive() {
     done
 
     _info "设置 Socks5 代理端口为 ${proxy_port}..."
-    if ! warp-cli --accept-tos proxy port "$proxy_port"; then
-        _error_no_exit "设置代理端口失败"
+    if ! warp-cli --accept-tos proxy port "$proxy_port" >/dev/null 2>&1; then
+        if ! warp-cli --accept-tos set-proxy-port "$proxy_port" >/dev/null 2>&1; then
+            _error_no_exit "设置代理端口失败"
+        fi
     fi
 
     # 4. MASQUE protocol choice
@@ -2004,10 +2028,10 @@ _warp_configure_cli_interactive() {
     use_masque="${use_masque:-y}"
     if [[ "$use_masque" =~ ^[Yy] ]]; then
         _info "设置 WARP 传输协议为 MASQUE..."
-        warp-cli --accept-tos tunnel protocol set MASQUE || _warn "设置 MASQUE 协议失败，可能当前版本不支持或配置错误。"
+        _warp_set_protocol masque
     else
         _info "设置 WARP 传输协议为 WireGuard..."
-        warp-cli --accept-tos tunnel protocol set WireGuard || true
+        _warp_set_protocol wireguard
     fi
 
     # 5. Connect WARP
@@ -2153,8 +2177,10 @@ _warp_cli_manage() {
                     _warn "端口无效，请输入 1024 到 65535 之间的数字。"
                 done
                 _info "设置 Socks5 代理端口为 ${proxy_port}..."
-                if ! warp-cli --accept-tos proxy port "$proxy_port"; then
-                    _warn "设置代理端口失败"
+                if ! warp-cli --accept-tos proxy port "$proxy_port" >/dev/null 2>&1; then
+                    if ! warp-cli --accept-tos set-proxy-port "$proxy_port" >/dev/null 2>&1; then
+                        _warn "设置代理端口失败"
+                    fi
                 fi
                 _info "重连以应用端口设置..."
                 warp-cli --accept-tos disconnect >/dev/null 2>&1
@@ -2167,10 +2193,10 @@ _warp_cli_manage() {
                 current_proto=$(warp-cli settings 2>/dev/null | grep -Ei 'protocol' | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
                 if [[ "$current_proto" == *"masque"* ]]; then
                     _info "切换协议至 WireGuard..."
-                    warp-cli --accept-tos tunnel protocol set WireGuard
+                    _warp_set_protocol wireguard
                 else
                     _info "切换协议至 MASQUE..."
-                    warp-cli --accept-tos tunnel protocol set MASQUE || _warn "设置 MASQUE 协议失败，可能当前版本不支持。"
+                    _warp_set_protocol masque
                 fi
                 _info "重连以应用协议设置..."
                 warp-cli --accept-tos disconnect >/dev/null 2>&1
