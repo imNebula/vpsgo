@@ -1765,7 +1765,7 @@ _warp_command_available() {
 _warp_get_cli_proxy_port() {
     local port=""
     if command -v warp-cli >/dev/null 2>&1; then
-        port=$(warp-cli settings 2>/dev/null | grep -Ei 'proxy.*port|port' | grep -oE '[0-9]+' | head -n1)
+        port=$(warp-cli --accept-tos settings 2>/dev/null | grep -Ei 'proxy.*port|listening' | awk -F':' '{print $NF}' | grep -oE '[0-9]+' | head -n1)
     fi
     printf '%s' "${port:-30000}"
 }
@@ -2109,10 +2109,10 @@ _warp_cli_manage_screen() {
         status="运行中"
     fi
     local port
-    port=$(warp-cli settings 2>/dev/null | grep -Ei 'proxy.*port|port' | grep -oE '[0-9]+' | head -n1)
+    port=$(warp-cli --accept-tos settings 2>/dev/null | grep -Ei 'proxy.*port|listening' | awk -F':' '{print $NF}' | grep -oE '[0-9]+' | head -n1)
     port="${port:-30000}"
     local protocol
-    protocol=$(warp-cli settings 2>/dev/null | grep -Ei 'protocol' | awk '{print $NF}')
+    protocol=$(warp-cli --accept-tos settings 2>/dev/null | grep -Ei 'protocol' | awk '{print $NF}')
     protocol="${protocol:-Wireguard}"
 
     _status_kv "服务状态" "$status" "$([ "$status" = "运行中" ] && printf "green" || printf "red")" 12
@@ -2124,6 +2124,7 @@ _warp_cli_manage_screen() {
     _menu_pair "3" "重启守护进程" "warp-svc" "green" "4" "重新配置端口" "修改 Socks5 端口" "cyan"
     _menu_pair "5" "切换传输协议" "MASQUE / Wireguard" "cyan" "6" "重新注册账号" "registration new" "yellow"
     _menu_pair "7" "完整覆盖安装" "更新/重装软件包" "cyan" "8" "卸载 warp-cli" "清理配置" "red"
+    _menu_item "9" "查看运行日志" "warp-svc 日志" "cyan"
     _separator
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
@@ -2145,7 +2146,7 @@ _warp_cli_manage() {
     while true; do
         _ui_print_screen _warp_cli_manage_screen
         local ch
-        read -rp "  选择 [0-8]: " ch
+        read -rp "  选择 [0-9]: " ch
         case "$ch" in
             1)
                 _info "正在连接 WARP..."
@@ -2190,7 +2191,7 @@ _warp_cli_manage() {
                 ;;
             5)
                 local current_proto
-                current_proto=$(warp-cli settings 2>/dev/null | grep -Ei 'protocol' | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+                current_proto=$(warp-cli --accept-tos settings 2>/dev/null | grep -Ei 'protocol' | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
                 if [[ "$current_proto" == *"masque"* ]]; then
                     _info "切换协议至 WireGuard..."
                     _warp_set_protocol wireguard
@@ -2222,10 +2223,54 @@ _warp_cli_manage() {
                 fi
                 _press_any_key
                 ;;
+            9)
+                _warp_cli_log
+                ;;
             0) return ;;
             * ) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
     done
+}
+
+_warp_cli_log() {
+    _header "warp-cli/warp-svc 日志"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
+        _separator
+        echo ""
+        journalctl -u warp-svc --no-pager -n 50
+        echo ""
+        _separator
+        local follow
+        read -rp "  实时跟踪日志? [y/N]: " follow
+        if [[ "$follow" =~ ^[Yy] ]]; then
+            journalctl -u warp-svc -f
+        fi
+    else
+        local log_found=0
+        for log_file in "/var/log/warp-svc.log" "/var/log/syslog" "/var/log/messages"; do
+            if [ -f "$log_file" ]; then
+                _info "尝试从 $log_file 读取 warp-svc 日志..."
+                _separator
+                echo ""
+                grep -i "warp-svc" "$log_file" | tail -n 50
+                echo ""
+                _separator
+                local follow
+                read -rp "  实时跟踪日志? [y/N]: " follow
+                if [[ "$follow" =~ ^[Yy] ]]; then
+                    tail -f "$log_file" | grep -i "warp-svc"
+                fi
+                log_found=1
+                break
+            fi
+        done
+        if [ "$log_found" -eq 0 ]; then
+            _warn "当前系统未使用 systemd，且未找到相关日志文件"
+        fi
+    fi
+    _press_any_key
 }
 
 _warp_install_cli() {
@@ -2653,7 +2698,7 @@ run_warp() {
                 ip_ver="6"
             fi
             local port=""
-            port=\$(warp-cli settings 2>/dev/null | grep -Ei 'proxy.*port|port' | grep -oE '[0-9]+' | head -n1)
+            port=\$(warp-cli --accept-tos settings 2>/dev/null | grep -Ei 'proxy.*port|listening' | awk -F':' '{print \$NF}' | grep -oE '[0-9]+' | head -n1)
             port="\${port:-30000}"
             _refresh_netflix_local_loop "\$port" "\$region" "\$ip_ver" "\$MAX_MINUTES"
             return \$?
