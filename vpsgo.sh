@@ -13745,8 +13745,8 @@ _mihomo_chain_proxy_manage() {
                         local warp_json rc
                         local wg_keys wg_private_key wg_public_key
                         wg_keys=$(sing-box generate wg-keypair 2>/dev/null)
-                        wg_private_key=$(echo "$wg_keys" | grep -i 'private key' | awk '{print $NF}' || true)
-                        wg_public_key=$(echo "$wg_keys" | grep -i 'public key' | awk '{print $NF}' || true)
+                        wg_private_key=$(echo "$wg_keys" | grep -Ei 'private[-_ ]?key' | awk '{print $NF}' || true)
+                        wg_public_key=$(echo "$wg_keys" | grep -Ei 'public[-_ ]?key' | awk '{print $NF}' || true)
 
                         if [[ -z "$wg_private_key" || -z "$wg_public_key" ]]; then
                             _warn "使用 sing-box 生成 WireGuard 密钥对失败。"
