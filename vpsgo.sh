@@ -1874,14 +1874,11 @@ _warp_refresh_netflix_local_loop() {
     done
 }
 
-_warp_install_cli() {
-    _header "安装 warp-cli"
-
+_warp_install_cli_packages() {
     local os
     os="$(_os)"
     if [[ "$os" != "debian" && "$os" != "ubuntu" && "$os" != "centos" && "$os" != "rhel" && "$os" != "rocky" && "$os" != "almalinux" ]]; then
         _error_no_exit "错误：此功能目前仅支持 Debian, Ubuntu, CentOS, RHEL, Rocky Linux 或 AlmaLinux 系统。"
-        _press_any_key
         return 1
     fi
 
@@ -1897,7 +1894,6 @@ _warp_install_cli() {
         mkdir -p /usr/share/keyrings
         if ! curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg; then
             _error_no_exit "导入 Cloudflare GPG 密钥失败"
-            _press_any_key
             return 1
         fi
 
@@ -1924,7 +1920,6 @@ _warp_install_cli() {
         apt-get update -y
         if ! apt-get install -y cloudflare-warp; then
             _error_no_exit "安装 cloudflare-warp 失败，请检查网络或系统版本。"
-            _press_any_key
             return 1
         fi
 
@@ -1932,7 +1927,6 @@ _warp_install_cli() {
         _info "配置 Cloudflare YUM/DNF 源..."
         if ! curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo | tee /etc/yum.repos.d/cloudflare-warp.repo >/dev/null; then
             _error_no_exit "配置 Cloudflare YUM/DNF 源失败"
-            _press_any_key
             return 1
         fi
 
@@ -1941,14 +1935,12 @@ _warp_install_cli() {
             dnf makecache || true
             if ! dnf install -y cloudflare-warp; then
                 _error_no_exit "安装 cloudflare-warp 失败，请检查网络或系统版本。"
-                _press_any_key
                 return 1
             fi
         else
             yum makecache || true
             if ! yum install -y cloudflare-warp; then
                 _error_no_exit "安装 cloudflare-warp 失败，请检查网络或系统版本。"
-                _press_any_key
                 return 1
             fi
         fi
@@ -1970,15 +1962,16 @@ _warp_install_cli() {
     # Verify command availability
     if ! command -v warp-cli >/dev/null 2>&1; then
         _error_no_exit "未检测到 warp-cli 命令，可能安装未成功。"
-        _press_any_key
         return 1
     fi
 
-    # Config client
+    return 0
+}
+
+_warp_configure_cli_interactive() {
     _info "正在配置 warp-cli..."
 
     # 1. Registration
-    # Agree to terms of service and register
     if ! warp-cli --accept-tos registration new; then
         _warn "WARP 账户注册失败或已注册过，继续进行其他配置。"
     fi
@@ -2007,10 +2000,14 @@ _warp_install_cli() {
 
     # 4. MASQUE protocol choice
     local use_masque
-    read -rp "  是否使用 MASQUE 协议连接? [y/N] (默认 N, 使用 Wireguard 协议): " use_masque
+    read -rp "  是否使用 MASQUE 协议连接? [Y/n] (默认 Y): " use_masque
+    use_masque="${use_masque:-y}"
     if [[ "$use_masque" =~ ^[Yy] ]]; then
         _info "设置 WARP 传输协议为 MASQUE..."
         warp-cli --accept-tos tunnel protocol set MASQUE || _warn "设置 MASQUE 协议失败，可能当前版本不支持或配置错误。"
+    else
+        _info "设置 WARP 传输协议为 Wireguard..."
+        warp-cli --accept-tos tunnel protocol set wireguard || true
     fi
 
     # 5. Connect WARP
@@ -2044,6 +2041,159 @@ _warp_install_cli() {
     fi
 
     _press_any_key
+}
+
+_warp_uninstall_cli_packages() {
+    _info "正在卸载 cloudflare-warp..."
+    
+    # 1. Stop and disable the service
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now warp-svc >/dev/null 2>&1 || true
+    fi
+    if [ -x "$(type -p rc-service)" ]; then
+        rc-service warp-svc stop >/dev/null 2>&1 || true
+        rc-update del warp-svc default >/dev/null 2>&1 || true
+    fi
+
+    # 2. Package removal
+    local os
+    os="$(_os)"
+    if [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
+        apt-get purge -y cloudflare-warp || apt-get remove -y cloudflare-warp
+        rm -f /etc/apt/sources.list.d/cloudflare-client.list
+        apt-get update -qq || true
+    elif [[ "$os" == "centos" || "$os" == "rhel" || "$os" == "rocky" || "$os" == "almalinux" ]]; then
+        if command -v dnf >/dev/null 2>&1; then
+            dnf remove -y cloudflare-warp
+        else
+            yum remove -y cloudflare-warp
+        fi
+        rm -f /etc/yum.repos.d/cloudflare-warp.repo
+    fi
+
+    # 3. Clean files
+    rm -rf /var/lib/cloudflare-warp /etc/cloudflare-warp
+    hash -r 2>/dev/null || true
+    _success "cloudflare-warp 卸载完成。"
+}
+
+_warp_cli_manage_screen() {
+    _header "warp-cli 管理"
+    
+    local status="未运行"
+    if pgrep -x warp-svc >/dev/null 2>&1; then
+        status="运行中"
+    fi
+    local port
+    port=$(warp-cli settings 2>/dev/null | grep -Ei 'proxy.*port|port' | grep -oE '[0-9]+' | head -n1)
+    port="${port:-30000}"
+    local protocol
+    protocol=$(warp-cli settings 2>/dev/null | grep -Ei 'protocol' | awk '{print $NF}')
+    protocol="${protocol:-Wireguard}"
+
+    _status_kv "服务状态" "$status" "$([ "$status" = "运行中" ] && printf "green" || printf "red")" 12
+    _status_kv "代理端口" "Socks5 127.0.0.1:${port}" "cyan" 12
+    _status_kv "传输协议" "$protocol" "cyan" 12
+    _separator
+
+    _menu_pair "1" "连接 WARP" "connect" "green" "2" "断开 WARP" "disconnect" "yellow"
+    _menu_pair "3" "重启守护进程" "warp-svc" "green" "4" "重新配置端口" "修改 Socks5 端口" "cyan"
+    _menu_pair "5" "切换传输协议" "MASQUE / Wireguard" "cyan" "6" "重新注册账号" "registration new" "yellow"
+    _menu_pair "7" "完整覆盖安装" "更新/重装软件包" "cyan" "8" "卸载 warp-cli" "清理配置" "red"
+    _separator
+    _menu_item "0" "返回上级菜单" "" "red"
+    _separator
+}
+
+_warp_cli_manage() {
+    if ! command -v warp-cli >/dev/null 2>&1; then
+        local confirm_install
+        read -rp "  未检测到 warp-cli，是否开始安装? [Y/n]: " confirm_install
+        confirm_install="${confirm_install:-y}"
+        if [[ "$confirm_install" =~ ^[Yy] ]]; then
+            if _warp_install_cli_packages; then
+                _warp_configure_cli_interactive
+            fi
+        fi
+        return
+    fi
+
+    while true; do
+        _ui_print_screen _warp_cli_manage_screen
+        local ch
+        read -rp "  选择 [0-8]: " ch
+        case "$ch" in
+            1)
+                _info "正在连接 WARP..."
+                warp-cli --accept-tos connect
+                _press_any_key
+                ;;
+            2)
+                _info "正在断开 WARP..."
+                warp-cli --accept-tos disconnect
+                _press_any_key
+                ;;
+            3)
+                _info "正在重启 warp-svc 服务..."
+                if command -v systemctl >/dev/null 2>&1; then
+                    systemctl restart warp-svc
+                elif [ -x "$(type -p rc-service)" ]; then
+                    rc-service warp-svc restart
+                fi
+                _press_any_key
+                ;;
+            4)
+                local proxy_port
+                while true; do
+                    read -rp "  请输入新的 Socks5 代理端口 (1024-65535, 默认 30000): " proxy_port
+                    proxy_port="${proxy_port:-30000}"
+                    if _is_digit "$proxy_port" && [ "$proxy_port" -ge 1024 ] && [ "$proxy_port" -le 65535 ]; then
+                        break
+                    fi
+                    _warn "端口无效，请输入 1024 到 65535 之间的数字。"
+                done
+                _info "设置 Socks5 代理端口为 ${proxy_port}..."
+                warp-cli --accept-tos proxy port "$proxy_port"
+                _press_any_key
+                ;;
+            5)
+                local current_proto
+                current_proto=$(warp-cli settings 2>/dev/null | grep -Ei 'protocol' | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+                if [ "$current_proto" = "masque" ]; then
+                    _info "切换协议至 Wireguard..."
+                    warp-cli --accept-tos tunnel protocol set wireguard
+                else
+                    _info "切换协议至 MASQUE..."
+                    warp-cli --accept-tos tunnel protocol set MASQUE || _warn "设置 MASQUE 协议失败，可能当前版本不支持。"
+                fi
+                _press_any_key
+                ;;
+            6)
+                _info "重新注册 WARP 账号..."
+                warp-cli --accept-tos registration new
+                _press_any_key
+                ;;
+            7)
+                if _warp_install_cli_packages; then
+                    _warp_configure_cli_interactive
+                fi
+                ;;
+            8)
+                local confirm_uninstall
+                read -rp "  确定要卸载 warp-cli 吗? [y/N]: " confirm_uninstall
+                if [[ "$confirm_uninstall" =~ ^[Yy] ]]; then
+                    _warp_uninstall_cli_packages
+                fi
+                _press_any_key
+                ;;
+            0) return ;;
+            * ) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+        esac
+    done
+}
+
+_warp_install_cli() {
+    _warp_cli_manage
 }
 
 _warp_run_upstream_script() {
@@ -11395,7 +11545,7 @@ _mihomorule_provider_remove() {
 
 _mihomorule_upsert_remote_provider() {
     local config_file="$1" provider_name="$2" url="$3" behavior="$4" format="$5" interval="${6:-86400}" path="${7:-}"
-    local q_url q_path tmp_block suffix
+    local q_url q_path tmp_block suffix proxied_url
    
     [[ "$behavior" == "domain" || "$behavior" == "ipcidr" || "$behavior" == "classical" ]] || return 1
     [[ "$format" == "yaml" || "$format" == "text" || "$format" == "mrs" ]] || return 1
@@ -11409,7 +11559,8 @@ _mihomorule_upsert_remote_provider() {
         path="./ruleset/${provider_name}.${suffix}"
     fi
 
-    q_url=$(_mihomochain_yaml_quote "$url")
+    proxied_url=$(_github_proxy_url "$url")
+    q_url=$(_mihomochain_yaml_quote "$proxied_url")
     q_path=$(_mihomochain_yaml_quote "$path")
     tmp_block=$(mktemp)
     cat > "$tmp_block" <<EOF
