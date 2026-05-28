@@ -1759,7 +1759,291 @@ _v4v6_setup() {
 # --- WARP 管理 ---
 
 _warp_command_available() {
-    command -v warp >/dev/null 2>&1 || command -v warp-go >/dev/null 2>&1
+    command -v warp >/dev/null 2>&1 || command -v warp-go >/dev/null 2>&1 || command -v warp-cli >/dev/null 2>&1
+}
+
+_warp_get_cli_proxy_port() {
+    local port=""
+    if command -v warp-cli >/dev/null 2>&1; then
+        port=$(warp-cli settings 2>/dev/null | grep -Ei 'proxy.*port|port' | grep -oE '[0-9]+' | head -n1)
+    fi
+    printf '%s' "${port:-30000}"
+}
+
+_warp_check_netflix_local() {
+    local proxy_port="$1"
+    local target_region="${2:-}"
+    local ip_version="${3:-}"
+    local ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    local proxy_opt=""
+    if [ -n "$proxy_port" ] && [ "$proxy_port" -gt 0 ]; then
+        proxy_opt="-x socks5://127.0.0.1:$proxy_port"
+    fi
+    local dns_opt=""
+    if [ "$ip_version" = "4" ]; then
+        dns_opt="-4"
+    elif [ "$ip_version" = "6" ]; then
+        dns_opt="-6"
+    fi
+
+    local code
+    code=$(curl -sL -o /dev/null -A "$ua" -w "%{http_code}" --max-time 10 ${proxy_opt} ${dns_opt} "https://www.netflix.com/title/80018499")
+    if [ "$code" -ne 200 ]; then
+        printf "blocked"
+        return 1
+    fi
+
+    local code2
+    code2=$(curl -sL -o /dev/null -A "$ua" -w "%{http_code}" --max-time 10 ${proxy_opt} ${dns_opt} "https://www.netflix.com/title/70143836")
+    if [ "$code2" -ne 200 ]; then
+        printf "originals"
+        return 2
+    fi
+
+    if [ -n "$target_region" ]; then
+        local current_region=""
+        current_region=$(curl -s --max-time 5 ${proxy_opt} ${dns_opt} "https://ipinfo.io/country" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        if [ "$current_region" != "$(echo "$target_region" | tr '[:upper:]' '[:lower:]')" ]; then
+            printf "region_mismatch:%s" "$current_region"
+            return 3
+        fi
+    fi
+
+    printf "unlocked"
+    return 0
+}
+
+_warp_refresh_netflix_local_loop() {
+    local proxy_port="$1"
+    local target_region="${2:-}"
+    local ip_version="${3:-}"
+    local max_minutes="${4:-120}"
+    local start_time
+    start_time=$(date +%s)
+    local max_seconds=$((max_minutes * 60))
+    local attempt=0
+
+    _info "开始本地 Netflix IP 轮换 (Socks5 端口: ${proxy_port}, 目标地区: ${target_region:-任意}, IP类型: IPv${ip_version:-自动})..."
+    
+    while true; do
+        if [ "$max_seconds" -gt 0 ]; then
+            local current_time
+            current_time=$(date +%s)
+            local elapsed=$((current_time - start_time))
+            if [ "$elapsed" -ge "$max_seconds" ]; then
+                _error_no_exit "达到最大运行时间限制 (${max_minutes} 分钟)，停止刷新。"
+                return 1
+            fi
+        fi
+
+        local status
+        status=$(_warp_check_netflix_local "$proxy_port" "$target_region" "$ip_version")
+        
+        case "$status" in
+            unlocked)
+                _success "成功解锁 Netflix! 目标地区: ${target_region:-任意}"
+                return 0
+                ;;
+            blocked)
+                _info "Netflix 状态: 被封锁 (Blocked)。正在更换 IP..."
+                ;;
+            originals)
+                _info "Netflix 状态: 仅支持自制剧 (Originals Only)。正在更换 IP..."
+                ;;
+            region_mismatch:*)
+                local actual_region="${status##*:}"
+                _info "Netflix 状态: 已解锁但地区不匹配 (当前: ${actual_region}, 目标: ${target_region})。正在更换 IP..."
+                ;;
+            *)
+                _warn "Netflix 检测异常 (${status})。正在更换 IP..."
+                ;;
+        esac
+
+        ((attempt++))
+        if [ "$attempt" -ge 5 ]; then
+            _warn "官方 warp-cli 已重试 ${attempt} 次仍无法解锁 Netflix。"
+            _warn "提示：Cloudflare 官方 IP 库已被 Netflix 广泛屏蔽，且官方客户端不支持自定义 Endpoint (优选 IP)。"
+            _warn "在此 VPS 上，官方 warp-cli 无法成功刷出解锁 Netflix 的 IP。"
+            return 1
+        fi
+
+        warp-cli --accept-tos disconnect >/dev/null 2>&1
+        sleep 2
+        warp-cli --accept-tos connect >/dev/null 2>&1
+        sleep 5
+    done
+}
+
+_warp_install_cli() {
+    _header "安装 warp-cli"
+
+    local os
+    os="$(_os)"
+    if [[ "$os" != "debian" && "$os" != "ubuntu" && "$os" != "centos" && "$os" != "rhel" && "$os" != "rocky" && "$os" != "almalinux" ]]; then
+        _error_no_exit "错误：此功能目前仅支持 Debian, Ubuntu, CentOS, RHEL, Rocky Linux 或 AlmaLinux 系统。"
+        _press_any_key
+        return 1
+    fi
+
+    _info "开始安装 Cloudflare WARP 官方客户端 (warp-cli)..."
+
+    # Install dependencies
+    if [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
+        _info "安装 Debian/Ubuntu 依赖包..."
+        apt-get update -qq || true
+        apt-get install -y -qq curl gnupg ca-certificates lsb-release >/dev/null 2>&1 || true
+
+        _info "导入 Cloudflare GPG 密钥..."
+        mkdir -p /usr/share/keyrings
+        if ! curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg; then
+            _error_no_exit "导入 Cloudflare GPG 密钥失败"
+            _press_any_key
+            return 1
+        fi
+
+        _info "配置 Cloudflare APT 源..."
+        local codename=""
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            codename="${VERSION_CODENAME:-}"
+        fi
+        if [ -z "$codename" ] && command -v lsb_release >/dev/null 2>&1; then
+            codename=$(lsb_release -cs)
+        fi
+        if [ -z "$codename" ]; then
+            if [ "$os" == "ubuntu" ]; then
+                codename="jammy"
+            else
+                codename="bookworm"
+            fi
+        fi
+
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $codename main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+
+        _info "更新软件源并安装 cloudflare-warp..."
+        apt-get update -y
+        if ! apt-get install -y cloudflare-warp; then
+            _error_no_exit "安装 cloudflare-warp 失败，请检查网络或系统版本。"
+            _press_any_key
+            return 1
+        fi
+
+    elif [[ "$os" == "centos" || "$os" == "rhel" || "$os" == "rocky" || "$os" == "almalinux" ]]; then
+        _info "配置 Cloudflare YUM/DNF 源..."
+        if ! curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo | tee /etc/yum.repos.d/cloudflare-warp.repo >/dev/null; then
+            _error_no_exit "配置 Cloudflare YUM/DNF 源失败"
+            _press_any_key
+            return 1
+        fi
+
+        _info "更新缓存并安装 cloudflare-warp..."
+        if command -v dnf >/dev/null 2>&1; then
+            dnf makecache || true
+            if ! dnf install -y cloudflare-warp; then
+                _error_no_exit "安装 cloudflare-warp 失败，请检查网络或系统版本。"
+                _press_any_key
+                return 1
+            fi
+        else
+            yum makecache || true
+            if ! yum install -y cloudflare-warp; then
+                _error_no_exit "安装 cloudflare-warp 失败，请检查网络或系统版本。"
+                _press_any_key
+                return 1
+            fi
+        fi
+    fi
+
+    # Start and enable the service
+    _info "启动并启用 warp-svc 服务..."
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+        systemctl enable --now warp-svc || true
+        systemctl start warp-svc || true
+    elif [ -x "$(type -p rc-service)" ]; then
+        rc-service warp-svc start || true
+        rc-update add warp-svc default || true
+    fi
+
+    sleep 2
+
+    # Verify command availability
+    if ! command -v warp-cli >/dev/null 2>&1; then
+        _error_no_exit "未检测到 warp-cli 命令，可能安装未成功。"
+        _press_any_key
+        return 1
+    fi
+
+    # Config client
+    _info "正在配置 warp-cli..."
+
+    # 1. Registration
+    # Agree to terms of service and register
+    if ! warp-cli --accept-tos registration new; then
+        _warn "WARP 账户注册失败或已注册过，继续进行其他配置。"
+    fi
+
+    # 2. Mode proxy
+    _info "设置 WARP 运行模式为 Proxy 代理模式..."
+    if ! warp-cli --accept-tos mode proxy; then
+        _error_no_exit "设置 Proxy 模式失败"
+    fi
+
+    # 3. Port settings
+    local proxy_port
+    while true; do
+        read -rp "  请输入 Socks5 代理端口 (1024-65535, 默认 30000): " proxy_port
+        proxy_port="${proxy_port:-30000}"
+        if _is_digit "$proxy_port" && [ "$proxy_port" -ge 1024 ] && [ "$proxy_port" -le 65535 ]; then
+            break
+        fi
+        _warn "端口无效，请输入 1024 到 65535 之间的数字。"
+    done
+
+    _info "设置 Socks5 代理端口为 ${proxy_port}..."
+    if ! warp-cli --accept-tos proxy port "$proxy_port"; then
+        _error_no_exit "设置代理端口失败"
+    fi
+
+    # 4. MASQUE protocol choice
+    local use_masque
+    read -rp "  是否使用 MASQUE 协议连接? [y/N] (默认 N, 使用 Wireguard 协议): " use_masque
+    if [[ "$use_masque" =~ ^[Yy] ]]; then
+        _info "设置 WARP 传输协议为 MASQUE..."
+        warp-cli --accept-tos tunnel protocol set MASQUE || _warn "设置 MASQUE 协议失败，可能当前版本不支持或配置错误。"
+    fi
+
+    # 5. Connect WARP
+    _info "正在连接 WARP..."
+    if ! warp-cli --accept-tos connect; then
+        _error_no_exit "连接 WARP 失败"
+        _press_any_key
+        return 1
+    fi
+
+    # 6. Verify connection via proxy
+    _info "正在通过 Socks5 代理验证 WARP 出口 IP (大约耗时 5 秒)..."
+    sleep 5
+    local warp_ip=""
+    warp_ip=$(curl -s -m 8 --proxy socks5://127.0.0.1:"$proxy_port" ifconfig.me || true)
+    if [ -n "$warp_ip" ]; then
+        _success "WARP-cli 安装并配置成功！"
+        _status_kv "Socks5 代理" "socks5://127.0.0.1:${proxy_port}" "green" 15
+        _status_kv "WARP 出口 IP" "$warp_ip" "green" 15
+    else
+        _warn "通过 Socks5 代理获取 IP 失败。这可能是因为 WARP 连接延迟，或者没有成功启用。"
+        _info "你可以稍后通过 '刷新 WARP 网络' 来重试连接。"
+    fi
+
+    # 7. Optionally check IP quality
+    local check_ip_quality
+    read -rp "  是否使用 IP.Check.Place 测试 WARP IP 质量? [y/N] (默认 N): " check_ip_quality
+    if [[ "$check_ip_quality" =~ ^[Yy] ]]; then
+        _info "正在测试 IP 质量..."
+        bash <(curl -Ls IP.Check.Place) -x socks5://127.0.0.1:"$proxy_port"
+    fi
+
+    _press_any_key
 }
 
 _warp_run_upstream_script() {
@@ -1851,7 +2135,7 @@ _warp_run_command() {
                 return 1
             fi
         elif command -v warp-go >/dev/null 2>&1 || [ -s /opt/warp-go/warp.conf ]; then
-            _info "检测到已安装 warp-go，重启服务以刷新网络..."
+            _info "检测到已安装 warp-go，重启服务以刷新 network..."
             if command -v systemctl >/dev/null 2>&1; then
                 systemctl restart warp-go
                 return $?
@@ -1881,6 +2165,12 @@ _warp_run_command() {
             sleep 2
             warp-cli --accept-tos connect
             return $?
+        fi
+    elif [ "$mode" = "i" ]; then
+        local region="${1:-}"
+        if command -v warp-cli >/dev/null 2>&1 && ! command -v warp >/dev/null 2>&1 && ! command -v warp-go >/dev/null 2>&1; then
+            _error_no_exit "官方 warp-cli 不支持刷 Netflix 功能（因为官方客户端不支持自定义 Endpoint 优选 IP 且官方 IP 库已被 Netflix 封锁）。"
+            return 1
         fi
     fi
 
@@ -1953,6 +2243,13 @@ _warp_prompt_netflix_region() {
 
 _warp_refresh_netflix_now() {
     _header "WARP Netflix 刷 IP"
+
+    if command -v warp-cli >/dev/null 2>&1 && ! command -v warp >/dev/null 2>&1 && ! command -v warp-go >/dev/null 2>&1; then
+        _error_no_exit "官方 warp-cli 不支持刷 Netflix 功能（因为官方客户端不支持自定义 Endpoint 优选 IP 且官方 IP 库已被 Netflix 封锁）。"
+        _press_any_key
+        return 1
+    fi
+
     _info "更换 WARP IP，直到 Netflix 检测通过。"
 
     local ip_choice region
@@ -2001,6 +2298,108 @@ if command -v flock >/dev/null 2>&1; then
         exit 0
     }
 fi
+
+_check_netflix_local() {
+    local proxy_port="\$1"
+    local target_region="\${2:-}"
+    local ip_version="\${3:-}"
+    local ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    local proxy_opt=""
+    if [ -n "\$proxy_port" ] && [ "\$proxy_port" -gt 0 ]; then
+        proxy_opt="-x socks5://127.0.0.1:\$proxy_port"
+    fi
+    local dns_opt=""
+    if [ "\$ip_version" = "4" ]; then
+        dns_opt="-4"
+    elif [ "\$ip_version" = "6" ]; then
+        dns_opt="-6"
+    fi
+
+    local code
+    code=\$(curl -sL -o /dev/null -A "\$ua" -w "%{http_code}" --max-time 10 \${proxy_opt} \${dns_opt} "https://www.netflix.com/title/80018499")
+    if [ "\$code" -ne 200 ]; then
+        printf "blocked"
+        return 1
+    fi
+
+    local code2
+    code2=\$(curl -sL -o /dev/null -A "\$ua" -w "%{http_code}" --max-time 10 \${proxy_opt} \${dns_opt} "https://www.netflix.com/title/70143836")
+    if [ "\$code2" -ne 200 ]; then
+        printf "originals"
+        return 2
+    fi
+
+    if [ -n "\$target_region" ]; then
+        local current_region=""
+        current_region=\$(curl -s --max-time 5 \${proxy_opt} \${dns_opt} "https://ipinfo.io/country" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        if [ "\$current_region" != "\$(echo "\$target_region" | tr '[:upper:]' '[:lower:]')" ]; then
+            printf "region_mismatch:\%s" "\$current_region"
+            return 3
+        fi
+    fi
+
+    printf "unlocked"
+    return 0
+}
+
+_refresh_netflix_local_loop() {
+    local proxy_port="\$1"
+    local target_region="\${2:-}"
+    local ip_version="\${3:-}"
+    local max_mins="\${4:-120}"
+    local start_time
+    start_time=\$(date +%s)
+    local max_seconds=\$((max_mins * 60))
+    local attempt=0
+
+    printf '[%s] Start local Netflix IP rotation for warp-cli (port=%s, region=%s, ip_ver=%s)\\n' "\$(date '+%F %T %Z')" "\$proxy_port" "\${target_region:-any}" "\${ip_version:-auto}"
+    
+    while true; do
+        if [ "\$max_seconds" -gt 0 ]; then
+            local current_time
+            current_time=\$(date +%s)
+            local elapsed=\$((current_time - start_time))
+            if [ "\$elapsed" -ge "\$max_seconds" ]; then
+                printf '[%s] Reached maximum time limit (%s minutes), stopping.\\n' "\$(date '+%F %T %Z')" "\$max_mins"
+                return 1
+            fi
+        fi
+
+        local status
+        status=\$(_check_netflix_local "\$proxy_port" "\$target_region" "\$ip_version")
+        
+        case "\$status" in
+            unlocked)
+                printf '[%s] Successfully unlocked Netflix! Region: %s\\n' "\$(date '+%F %T %Z')" "\${target_region:-any}"
+                return 0
+                ;;
+            blocked)
+                printf '[%s] Netflix blocked. Rotating IP...\\n' "\$(date '+%F %T %Z')"
+                ;;
+            originals)
+                printf '[%s] Netflix Originals only. Rotating IP...\\n' "\$(date '+%F %T %Z')"
+                ;;
+            region_mismatch:*)
+                local actual_region="\${status##*:}"
+                printf '[%s] Netflix unlocked but region mismatch (current: %s, target: %s). Rotating IP...\\n' "\$(date '+%F %T %Z')" "\$actual_region" "\$target_region"
+                ;;
+            *)
+                printf '[%s] Netflix check anomaly (%s). Rotating IP...\\n' "\$(date '+%F %T %Z')" "\$status"
+                ;;
+        esac
+
+        attempt=\$((attempt + 1))
+        if [ "\$attempt" -ge 5 ]; then
+            printf '[%s] Official warp-cli retried %s times but still unable to unlock Netflix. Cloudflare IPs are blocked, and warp-cli does not support custom endpoints. Exiting.\\n' "\$(date '+%F %T %Z')" "\$attempt"
+            return 1
+        fi
+
+        warp-cli --accept-tos disconnect >/dev/null 2>&1
+        sleep 2
+        warp-cli --accept-tos connect >/dev/null 2>&1
+        sleep 5
+    done
+}
 
 run_warp() {
     if [[ "\$1" == "n" ]]; then
@@ -2054,13 +2453,32 @@ run_warp() {
             warp-cli --accept-tos connect
             return \$?
         fi
+    elif [[ "\$1" == "i" ]]; then
+        local region="\${2:-}"
+        if command -v warp-cli >/dev/null 2>&1; then
+            local ip_choice=""
+            if [ ! -t 0 ]; then
+                read -r ip_choice || true
+            fi
+            local ip_ver=""
+            if [ "\$ip_choice" = "1" ]; then
+                ip_ver="4"
+            elif [ "\$ip_choice" = "2" ]; then
+                ip_ver="6"
+            fi
+            local port=""
+            port=\$(warp-cli settings 2>/dev/null | grep -Ei 'proxy.*port|port' | grep -oE '[0-9]+' | head -n1)
+            port="\${port:-30000}"
+            _refresh_netflix_local_loop "\$port" "\$region" "\$ip_ver" "\$MAX_MINUTES"
+            return \$?
+        fi
     fi
 
     if command -v warp >/dev/null 2>&1; then
-        warp "\$@"
+        warp "$@"
         return \$?
     elif command -v warp-go >/dev/null 2>&1; then
-        warp-go "\$@"
+        warp-go "$@"
         return \$?
     fi
     if command -v curl >/dev/null 2>&1; then
@@ -2131,6 +2549,11 @@ _warp_configure_refresh_cron() {
     case "$mode_choice" in
         1) mode="network" ;;
         2)
+            if command -v warp-cli >/dev/null 2>&1 && ! command -v warp >/dev/null 2>&1 && ! command -v warp-go >/dev/null 2>&1; then
+                _error_no_exit "官方 warp-cli 不支持刷 Netflix IP 的定时任务（官方客户端不支持自定义 Endpoint 优选 IP 且官方 IP 库已被 Netflix 封锁）。"
+                _press_any_key
+                return
+            fi
             mode="netflix"
             _warp_prompt_netflix_ip_version
             _warp_prompt_netflix_region
@@ -2228,10 +2651,11 @@ _warp_remove_refresh_cron() {
 
 _warp_manage_screen() {
     _header "WARP 管理"
-    _menu_pair "1" "打开 warp-sh" "安装/管理 WARP" "green" "2" "打开 warp-go" "安装/管理 warp-go" "green"
-    _menu_pair "3" "刷新 WARP 网络" "重连 WARP" "green" "4" "刷 Netflix IP" "IPv4/IPv6" "green"
-    _menu_pair "5" "定时刷新" "北京时间" "green" "6" "查看定时任务" "配置/日志" "cyan"
-    _menu_pair "7" "删除定时任务" "" "yellow"
+    _menu_pair "1" "安装/管理 warp-cli" "官方客户端" "green"
+    _menu_pair "2" "打开 warp-sh" "安装/管理 WARP" "green" "3" "打开 warp-go" "安装/管理 warp-go" "green"
+    _menu_pair "4" "刷新 WARP 网络" "重连 WARP" "green" "5" "刷 Netflix IP" "IPv4/IPv6" "green"
+    _menu_pair "6" "定时刷新" "北京时间" "green" "7" "查看定时任务" "配置/日志" "cyan"
+    _menu_pair "8" "删除定时任务" "" "yellow"
     _separator
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
@@ -2241,15 +2665,16 @@ _warp_manage() {
     while true; do
         _ui_print_screen _warp_manage_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
         case "$ch" in
-            1) _warp_run_upstream_script "warp-sh" ;;
-            2) _warp_run_upstream_script "warp-go" ;;
-            3) _warp_refresh_now ;;
-            4) _warp_refresh_netflix_now ;;
-            5) _warp_configure_refresh_cron ;;
-            6) _warp_show_refresh_cron ;;
-            7) _warp_remove_refresh_cron ;;
+            1) _warp_install_cli ;;
+            2) _warp_run_upstream_script "warp-sh" ;;
+            3) _warp_run_upstream_script "warp-go" ;;
+            4) _warp_refresh_now ;;
+            5) _warp_refresh_netflix_now ;;
+            6) _warp_configure_refresh_cron ;;
+            7) _warp_show_refresh_cron ;;
+            8) _warp_remove_refresh_cron ;;
             0) return ;;
             * ) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
