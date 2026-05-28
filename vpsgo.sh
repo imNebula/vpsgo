@@ -9724,6 +9724,13 @@ _mihomo_read_config() {
             ;;
     esac
 
+    local EXPORT_PROXIES="0"
+    local export_proxies_answer
+    read -rp "  是否同时导出 VPS 自身的出站节点 (如 WARP、链式代理)? [y/N, 默认 N]: " export_proxies_answer
+    if [[ "$export_proxies_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+        EXPORT_PROXIES="1"
+    fi
+
     if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
         _info "配置文件: ${config_file}"
         _info "支持导出 listeners(Shadowsocks / AnyTLS / VLESS Reality / VLESS WS / HY2 / Tuic) 与 proxies(SS / WireGuard Beta)"
@@ -10123,35 +10130,36 @@ MIHOMO_SOCKS_YAML
         esac
     done < <(_mihomoconf_read_listener_rows "$config_file")
 
-    while IFS=$'\x1f' read -r p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport \
-        p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive \
-        p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding; do
-        [[ -z "${p_name:-}" ]] && continue
-        proxy_total=$((proxy_total + 1))
-        total_count=$((total_count + 1))
-        case "$p_type" in
-            ss)
-                if [[ -z "$p_server" || -z "$p_port" || -z "$p_cipher" || -z "$p_pass" ]]; then
-                    _warn "跳过 ${p_name}: ss 出站字段不完整(server/port/cipher/password)"
-                    continue
-                fi
-                local ss_proxy_udp ss_proxy_uot ss_proxy_link ss_proxy_udp_bool ss_proxy_uot_bool
-                IFS=$'\x1f' read -r ss_proxy_udp ss_proxy_uot < <(_mihomochain_ss_proxy_udp_uot_by_name "$config_file" "$p_name")
-                [[ "$ss_proxy_udp" == "1" ]] && ss_proxy_udp_bool="true" || ss_proxy_udp_bool="false"
-                [[ "$ss_proxy_uot" == "1" ]] && ss_proxy_uot_bool="true" || ss_proxy_uot_bool="false"
-                ss_proxy_link=$(_mihomoconf_gen_ss_link "$p_server" "$p_port" "$p_cipher" "$p_pass" "$p_name" "$ss_proxy_udp" "$ss_proxy_uot")
-                proxy_export=$((proxy_export + 1))
-                export_count=$((export_count + 1))
-                if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
-                    printf "%s\n" "$ss_proxy_link"
-                else
-                    _separator
-                    printf "  ${BOLD}[SS 出站] %s${PLAIN}\n" "$p_name"
-                    printf "    地址: ${GREEN}%s:%s${PLAIN}\n" "$p_server" "$p_port"
-                    printf "    加密: ${GREEN}%s${PLAIN}\n" "$p_cipher"
-                    printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_proxy_link"
-                    printf "    YAML:\n"
-                    cat <<MIHOMO_SS_PROXY_YAML
+    if [[ "$EXPORT_PROXIES" == "1" ]]; then
+        while IFS=$'\x1f' read -r p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport \
+            p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive \
+            p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding; do
+            [[ -z "${p_name:-}" ]] && continue
+            proxy_total=$((proxy_total + 1))
+            total_count=$((total_count + 1))
+            case "$p_type" in
+                ss)
+                    if [[ -z "$p_server" || -z "$p_port" || -z "$p_cipher" || -z "$p_pass" ]]; then
+                        _warn "跳过 ${p_name}: ss 出站字段不完整(server/port/cipher/password)"
+                        continue
+                    fi
+                    local ss_proxy_udp ss_proxy_uot ss_proxy_link ss_proxy_udp_bool ss_proxy_uot_bool
+                    IFS=$'\x1f' read -r ss_proxy_udp ss_proxy_uot < <(_mihomochain_ss_proxy_udp_uot_by_name "$config_file" "$p_name")
+                    [[ "$ss_proxy_udp" == "1" ]] && ss_proxy_udp_bool="true" || ss_proxy_udp_bool="false"
+                    [[ "$ss_proxy_uot" == "1" ]] && ss_proxy_uot_bool="true" || ss_proxy_uot_bool="false"
+                    ss_proxy_link=$(_mihomoconf_gen_ss_link "$p_server" "$p_port" "$p_cipher" "$p_pass" "$p_name" "$ss_proxy_udp" "$ss_proxy_uot")
+                    proxy_export=$((proxy_export + 1))
+                    export_count=$((export_count + 1))
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$ss_proxy_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[SS 出站] %s${PLAIN}\n" "$p_name"
+                        printf "    地址: ${GREEN}%s:%s${PLAIN}\n" "$p_server" "$p_port"
+                        printf "    加密: ${GREEN}%s${PLAIN}\n" "$p_cipher"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$ss_proxy_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_SS_PROXY_YAML
     proxies:
       - name: "${p_name}"
         type: ss
@@ -10161,32 +10169,32 @@ MIHOMO_SOCKS_YAML
         password: "${p_pass}"
         udp: ${ss_proxy_udp_bool}
 MIHOMO_SS_PROXY_YAML
-                    if [[ "$ss_proxy_uot" == "1" ]]; then
-                        cat <<MIHOMO_SS_PROXY_UOT_YAML
+                        if [[ "$ss_proxy_uot" == "1" ]]; then
+                            cat <<MIHOMO_SS_PROXY_UOT_YAML
         udp-over-tcp: ${ss_proxy_uot_bool}
         udp-over-tcp-version: 2
 MIHOMO_SS_PROXY_UOT_YAML
+                        fi
                     fi
-                fi
-                ;;
-            wireguard|wg)
-                if [[ -z "$p_server" || -z "$p_port" || -z "$p_wg_ip" || -z "$p_wg_private_key" || -z "$p_wg_public_key" ]]; then
-                    _warn "跳过 ${p_name}: wireguard(Beta) 字段不完整(server/port/ip/private-key/public-key)"
-                    continue
-                fi
-                [[ "$OUTPUT_LINK_ONLY" == "1" ]] && continue
-                proxy_export=$((proxy_export + 1))
-                export_count=$((export_count + 1))
-                local wg_allowed_yaml
-                wg_allowed_yaml=$(_mihomochain_yaml_list_from_csv "${p_wg_allowed_ips:-0.0.0.0/0,::/0}")
-                _separator
-                printf "  ${BOLD}[WireGuard Beta] %s${PLAIN}\n" "$p_name"
-                printf "    出站名: ${GREEN}%s${PLAIN}\n" "$p_name"
-                printf "    地址  : ${GREEN}%s:%s${PLAIN}\n" "$p_server" "$p_port"
-                printf "    IP    : ${GREEN}%s${PLAIN}\n" "$p_wg_ip"
-                [[ -n "$p_wg_ipv6" ]] && printf "    IPv6  : ${GREEN}%s${PLAIN}\n" "$p_wg_ipv6"
-                printf "    YAML:\n"
-                cat <<MIHOMO_WG_YAML
+                    ;;
+                wireguard|wg)
+                    if [[ -z "$p_server" || -z "$p_port" || -z "$p_wg_ip" || -z "$p_wg_private_key" || -z "$p_wg_public_key" ]]; then
+                        _warn "跳过 ${p_name}: wireguard(Beta) 字段不完整(server/port/ip/private-key/public-key)"
+                        continue
+                    fi
+                    [[ "$OUTPUT_LINK_ONLY" == "1" ]] && continue
+                    proxy_export=$((proxy_export + 1))
+                    export_count=$((export_count + 1))
+                    local wg_allowed_yaml
+                    wg_allowed_yaml=$(_mihomochain_yaml_list_from_csv "${p_wg_allowed_ips:-0.0.0.0/0,::/0}")
+                    _separator
+                    printf "  ${BOLD}[WireGuard Beta] %s${PLAIN}\n" "$p_name"
+                    printf "    出站名: ${GREEN}%s${PLAIN}\n" "$p_name"
+                    printf "    地址  : ${GREEN}%s:%s${PLAIN}\n" "$p_server" "$p_port"
+                    printf "    IP    : ${GREEN}%s${PLAIN}\n" "$p_wg_ip"
+                    [[ -n "$p_wg_ipv6" ]] && printf "    IPv6  : ${GREEN}%s${PLAIN}\n" "$p_wg_ipv6"
+                    printf "    YAML:\n"
+                    cat <<MIHOMO_WG_YAML
     proxies:
       - name: "${p_name}"
         type: wireguard
@@ -10194,34 +10202,35 @@ MIHOMO_SS_PROXY_UOT_YAML
         port: ${p_port}
         ip: "${p_wg_ip}"
 MIHOMO_WG_YAML
-                if [[ -n "$p_wg_ipv6" ]]; then
-                    printf '        ipv6: "%s"\n' "$p_wg_ipv6"
-                fi
-                cat <<MIHOMO_WG_YAML2
+                    if [[ -n "$p_wg_ipv6" ]]; then
+                        printf '        ipv6: "%s"\n' "$p_wg_ipv6"
+                    fi
+                    cat <<MIHOMO_WG_YAML2
         private-key: "${p_wg_private_key}"
         public-key: "${p_wg_public_key}"
         allowed-ips: ${wg_allowed_yaml}
         udp: true
 MIHOMO_WG_YAML2
-                if [[ -n "$p_wg_preshared_key" ]]; then
-                    printf '        pre-shared-key: "%s"\n' "$p_wg_preshared_key"
-                fi
-                if [[ -n "$p_wg_reserved" ]]; then
-                    if [[ "$p_wg_reserved" == \[*\] ]]; then
-                        printf '        reserved: %s\n' "$p_wg_reserved"
-                    else
-                        printf '        reserved: "%s"\n' "$p_wg_reserved"
+                    if [[ -n "$p_wg_preshared_key" ]]; then
+                        printf '        pre-shared-key: "%s"\n' "$p_wg_preshared_key"
                     fi
-                fi
-                if [[ -n "$p_wg_mtu" ]]; then
-                    printf '        mtu: %s\n' "$p_wg_mtu"
-                fi
-                if [[ -n "$p_wg_keepalive" ]]; then
-                    printf '        persistent-keepalive: %s\n' "$p_wg_keepalive"
-                fi
-                ;;
-        esac
-    done < <(_mihomochain_read_proxy_rows "$config_file")
+                    if [[ -n "$p_wg_reserved" ]]; then
+                        if [[ "$p_wg_reserved" == \[*\] ]]; then
+                            printf '        reserved: %s\n' "$p_wg_reserved"
+                        else
+                            printf '        reserved: "%s"\n' "$p_wg_reserved"
+                        fi
+                    fi
+                    if [[ -n "$p_wg_mtu" ]]; then
+                        printf '        mtu: %s\n' "$p_wg_mtu"
+                    fi
+                    if [[ -n "$p_wg_keepalive" ]]; then
+                        printf '        persistent-keepalive: %s\n' "$p_wg_keepalive"
+                    fi
+                    ;;
+            esac
+        done < <(_mihomochain_read_proxy_rows "$config_file")
+    fi
 
     if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
         _separator
@@ -10231,7 +10240,9 @@ MIHOMO_WG_YAML2
             _warn "共读取 ${total_count} 个节点，但没有可导出的 Shadowsocks/AnyTLS/VLESS/HY2/SS出站/WireGuard(Beta) 节点"
         else
             _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
-            _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta)"
+            if [[ "$EXPORT_PROXIES" == "1" ]]; then
+                _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta)"
+            fi
             _info "总计: 读取 ${total_count}，导出 ${export_count}"
         fi
     fi
@@ -25586,7 +25597,7 @@ EOF
                 _press_any_key
                 return 1
             fi
-            if ! err_msg=$(ip addr add "${he_client_ipv6}" dev he-ipv6 2>&1); then
+            if ! err_msg=$(ip addr add "${he_client_ipv6}/64" dev he-ipv6 2>&1); then
                 _error_no_exit "为 he-ipv6 绑定 Client IPv6 失败: ${err_msg}"
                 _press_any_key
                 return 1
