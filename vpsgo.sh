@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.2"
+VERSION="4.3"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -13079,7 +13079,8 @@ _mihomo_chain_proxy_manage() {
             2)
                 printf "  ${BOLD}添加出口节点${PLAIN}\n"
                 _separator
-                _menu_pair "1" "通过链接导入" "ss:// socks5:// hy2:// anytls:// vless:// tuic:// wireguard:// (Beta)" "green" "2" "手动录入" "" "green"
+                _menu_pair "1" "通过链接导入" "ss:// socks5:// hy2:// anytls:// vless:// tuic:// wireguard://" "green" "2" "手动录入" "各协议详细参数配置" "green"
+                _menu_item "3" "一键注册并自动导入 WARP 节点" "自动注册 Cloudflare WARP 账号并获取私钥/IP" "green"
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
                 local out_sni out_insecure out_obfs out_obfs_pass out_mport
@@ -13087,15 +13088,15 @@ _mihomo_chain_proxy_manage() {
                 local out_wg_ip out_wg_ipv6 out_wg_private_key out_wg_public_key out_wg_allowed_ips
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
                 local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding
-                read -rp "  选择 [1/2]: " import_mode
+                read -rp "  选择 [1-3]: " import_mode
                 import_mode=$(_mihomoconf_trim "${import_mode:-}")
                 case "$import_mode" in
-                    1|2) ;;
+                    1|2|3) ;;
                     *)
                         if [[ "$import_mode" == *"://"* ]]; then
-                            _error_no_exit "输入格式错误：这里请输入 1 或 2。若要通过链接导入，请先输入 1 再粘贴链接。"
+                            _error_no_exit "输入格式错误：这里请输入 1、2 或 3。若要通过链接导入，请先输入 1 再粘贴链接。"
                         else
-                            _error_no_exit "无效选项，请输入 1 或 2"
+                            _error_no_exit "无效选项，请输入 1、2 或 3"
                         fi
                         _press_any_key
                         continue
@@ -13674,6 +13675,119 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                         esac
+                        ;;
+                    3)
+                        local is_new_install=0
+                        if ! command -v sing-box >/dev/null 2>&1; then
+                            _warn "未检测到 sing-box 命令。自动生成 WARP 节点功能依赖 sing-box。"
+                            local confirm_install
+                            read -rp "  是否开始安装 sing-box? [Y/n]: " confirm_install
+                            confirm_install="${confirm_install:-y}"
+                            if [[ "$confirm_install" =~ ^[Yy] ]]; then
+                                is_new_install=1
+                                if command -v apt-get >/dev/null 2>&1; then
+                                    if ! _singbox_install_apt; then
+                                        _error_no_exit "sing-box 安装失败"
+                                        _press_any_key
+                                        continue
+                                    fi
+                                else
+                                    if ! _singbox_install_generic; then
+                                        _error_no_exit "sing-box 安装失败"
+                                        _press_any_key
+                                        continue
+                                    fi
+                                fi
+                                # Disable autostart and service immediately for new installation
+                                if _has_systemd; then
+                                    systemctl stop sing-box >/dev/null 2>&1 || true
+                                    systemctl disable sing-box >/dev/null 2>&1 || true
+                                fi
+                                if _has_openrc; then
+                                    rc-service sing-box stop >/dev/null 2>&1 || true
+                                    rc-update del sing-box default >/dev/null 2>&1 || true
+                                fi
+                            else
+                                _info "取消生成 WARP 节点"
+                                _press_any_key
+                                continue
+                            fi
+                        fi
+
+                        _info "正在通过 sing-box 注册并生成 Cloudflare WARP 节点配置..."
+                        _info "这需要向 Cloudflare API 发送注册请求，请确保您的网络能够正常发起请求。"
+
+                        local warp_json rc
+                        warp_json=$(sing-box generate warp-profile 2>/dev/null)
+                        rc=$?
+                        if [ $rc -ne 0 ] || [ -z "$warp_json" ]; then
+                            _warn "生成 WARP 节点失败，以下是错误输出："
+                            sing-box generate warp-profile
+                            _press_any_key
+                            continue
+                        fi
+
+                        local wg_private_key wg_ip wg_ipv6 wg_reserved wg_server wg_port
+                        wg_private_key=$(echo "$warp_json" | grep -oE '"private_key":\s*"[^"]+"' | awk -F'"' '{print $4}' || true)
+                        wg_server=$(echo "$warp_json" | grep -oE '"server":\s*"[^"]+"' | awk -F'"' '{print $4}' || true)
+                        wg_port=$(echo "$warp_json" | grep -oE '"server_port":\s*[0-9]+' | grep -oE '[0-9]+' || true)
+                        wg_ip=$(echo "$warp_json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -n1 || true)
+                        wg_ipv6=$(echo "$warp_json" | grep -oE '([0-9a-fA-F:]+)/[0-9]+' | grep -vE '^[0-9]' | head -n1 || true)
+                        local reserved_parsed
+                        reserved_parsed=$(echo "$warp_json" | grep -oE '"reserved":\s*\[[0-9,\s]+\]' | grep -oE '\[.*\]' | tr -d '[:space:]' || true)
+
+                        if [[ -z "$wg_private_key" || -z "$wg_ip" ]]; then
+                            _error_no_exit "解析 WARP 配置失败，可能返回数据格式不正确。"
+                            _info "完整返回内容："
+                            echo "$warp_json"
+                            _press_any_key
+                            continue
+                        fi
+
+                        _success "成功生成 Cloudflare WARP 账号信息！"
+                        printf "  私钥 (private-key): %s\n" "$wg_private_key"
+                        printf "  本地 IP (ip): %s\n" "$wg_ip"
+                        [[ -n "$wg_ipv6" ]] && printf "  本地 IPv6 (ipv6): %s\n" "$wg_ipv6"
+                        printf "  保留字节 (reserved): %s\n" "${reserved_parsed:-[0,0,0]}"
+                        printf "  端点服务器 (endpoint): %s:%s\n" "${wg_server:-162.159.193.10}" "${wg_port:-2408}"
+                        _separator
+
+                        local custom_name
+                        read -rp "  请输入出口节点名称 [默认 WARP-WireGuard]: " custom_name
+                        out_name=$(_mihomoconf_trim "${custom_name:-WARP-WireGuard}")
+                        
+                        local use_custom_ep ep_input ep_ip ep_port
+                        read -rp "  是否使用自定义/优选 Endpoint IP 与端口? (可避开默认 2408 端口的封锁) [y/N] (默认 N): " use_custom_ep
+                        if [[ "$use_custom_ep" =~ ^[Yy] ]]; then
+                            while true; do
+                                read -rp "  请输入自定义 Endpoint [默认 162.159.193.10:2408, 可输入 162.159.193.10:500]: " ep_input
+                                ep_input=$(_mihomoconf_trim "${ep_input:-162.159.193.10:2408}")
+                                if [[ "$ep_input" == *:* ]]; then
+                                    ep_ip="${ep_input%:*}"
+                                    ep_port="${ep_input##*:}"
+                                    if _is_valid_port "$ep_port"; then
+                                        out_server="$ep_ip"
+                                        out_port="$ep_port"
+                                        break
+                                    fi
+                                fi
+                                _warn "输入格式不正确或端口无效，请按照 IP:PORT 格式输入。"
+                            done
+                        else
+                            out_server="${wg_server:-162.159.193.10}"
+                            out_port="${wg_port:-2408}"
+                        fi
+
+                        out_type="wireguard"
+                        out_wg_ip="$wg_ip"
+                        out_wg_ipv6="$wg_ipv6"
+                        out_wg_private_key="$wg_private_key"
+                        out_wg_public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+                        out_wg_allowed_ips="0.0.0.0/0,::/0"
+                        out_wg_preshared_key=""
+                        out_wg_reserved="${reserved_parsed:-[0,0,0]}"
+                        out_wg_mtu="1420"
+                        out_wg_keepalive="25"
                         ;;
                 esac
 
