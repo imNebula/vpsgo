@@ -175,7 +175,17 @@ _github_proxy_supports_url() {
     host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
 
     case "$host" in
-        github.com|www.github.com|api.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
+        github.com|www.github.com)
+            case "$url" in
+                */releases/download/*|*/archive/*|*/raw/*|*/blob/*|*/info/refs*|*/git-upload-pack*)
+                    return 0
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+            ;;
+        raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
             return 0
             ;;
     esac
@@ -4531,7 +4541,17 @@ supports_proxy_url() {
     host="${host%%\?*}"
     host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
     case "$host" in
-        github.com|www.github.com|api.github.com|raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
+        github.com|www.github.com)
+            case "$url" in
+                */releases/download/*|*/archive/*|*/raw/*|*/blob/*|*/info/refs*|*/git-upload-pack*)
+                    return 0
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+            ;;
+        raw.githubusercontent.com|gist.github.com|gist.githubusercontent.com|codeload.github.com|objects.githubusercontent.com|*.githubusercontent.com|*.githubassets.com)
             return 0
             ;;
     esac
@@ -14732,13 +14752,13 @@ _get_foreign_dns_url() {
     case "$pid" in
         1) # Cloudflare
             case "$proto" in
-                2) echo "tls://cloudflare-dns.com" ;;
+                2) echo "tls://one.one.one.one" ;;
                 3)
                     _warn "Cloudflare 不支持 DoQ 协议，已切换为 DoH" >&2
-                    echo "https://cloudflare-dns.com/dns-query"
+                    echo "https://one.one.one.one/dns-query"
                     ;;
                 4) echo "1.1.1.1" ;;
-                *) echo "https://cloudflare-dns.com/dns-query" ;;
+                *) echo "https://one.one.one.one/dns-query" ;;
             esac
             ;;
         2) # Google
@@ -19699,7 +19719,7 @@ _resolve_ipv4() {
         doh.pub|dot.pub) echo "119.29.29.29" ;;
         dns.volcengine.com) echo "180.184.1.1" ;;
         doh.360.cn|dot.360.cn) echo "101.226.4.6" ;;
-        cloudflare-dns.com) echo "1.1.1.1" ;;
+        one.one.one.one|cloudflare-dns.com) echo "1.1.1.1" ;;
         doh.opendns.com|dns.opendns.com) echo "208.67.222.222" ;;
         dns.google) echo "8.8.8.8" ;;
         dns.adguard-dns.com) echo "94.140.14.14" ;;
