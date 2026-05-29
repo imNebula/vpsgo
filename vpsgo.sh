@@ -13795,12 +13795,65 @@ _mihomo_chain_proxy_manage() {
                         read -rp "  请输入出口节点名称 [默认 WARP-WireGuard]: " custom_name
                         out_name=$(_mihomoconf_trim "${custom_name:-WARP-WireGuard}")
                         
-                        local use_custom_ep ep_input ep_ip ep_port
-                        read -rp "  是否使用自定义/优选 Endpoint IP 与端口? (可避开默认 2408 端口的封锁) [y/N] (默认 N): " use_custom_ep
-                        if [[ "$use_custom_ep" =~ ^[Yy] ]]; then
+                        local ep_ip="${wg_server:-162.159.193.10}"
+                        local ep_port="${wg_port:-2408}"
+                        local first_check=1
+
+                        while true; do
+                            if [[ $first_check -eq 1 ]]; then
+                                _info "正在自动测试默认端点连通性 (${ep_ip}:${ep_port})..."
+                            else
+                                _info "正在测试端点连通性 (${ep_ip}:${ep_port})..."
+                            fi
+                            
+                            local curl_exit
+                            curl -s -I --connect-timeout 2 "http://${ep_ip}:${ep_port}" >/dev/null 2>&1
+                            curl_exit=$?
+                            
+                            if [[ "$curl_exit" == 28 || "$curl_exit" == 7 ]]; then
+                                _warn "端点 ${ep_ip}:${ep_port} 无法连接 (该端口可能已被您的 VPS 封锁)。"
+                                local fix_choice
+                                if [[ $first_check -eq 1 ]]; then
+                                    read -rp "  是否更换端口? (推荐) [Y/n]: " fix_choice
+                                    fix_choice="${fix_choice:-y}"
+                                else
+                                    read -rp "  是否仍然强制使用此端点？[y/N] (默认 N, 重新输入): " fix_choice
+                                fi
+                                
+                                if [[ $first_check -eq 1 && "$fix_choice" =~ ^[Yy] ]]; then
+                                    first_check=0
+                                elif [[ $first_check -eq 0 && ! "$fix_choice" =~ ^[Yy] ]]; then
+                                    : # continue to prompt
+                                else
+                                    out_server="$ep_ip"
+                                    out_port="$ep_port"
+                                    break
+                                fi
+                            else
+                                _success "端点 ${ep_ip}:${ep_port} 连通性测试通过！"
+                                local use_custom_ep
+                                if [[ $first_check -eq 1 ]]; then
+                                    read -rp "  是否需要使用自定义/优选 Endpoint IP 与端口? [y/N] (默认 N): " use_custom_ep
+                                    if [[ ! "$use_custom_ep" =~ ^[Yy] ]]; then
+                                        out_server="$ep_ip"
+                                        out_port="$ep_port"
+                                        break
+                                    fi
+                                    first_check=0
+                                else
+                                    out_server="$ep_ip"
+                                    out_port="$ep_port"
+                                    break
+                                fi
+                            fi
+
                             while true; do
-                                read -rp "  请输入自定义 Endpoint IP:端口，或仅输入端口号更换 [默认 162.159.193.10:2408, 可用端口如 500, 4500]: " ep_input
-                                ep_input=$(_mihomoconf_trim "${ep_input:-162.159.193.10:2408}")
+                                local ep_input
+                                read -rp "  请输入自定义 Endpoint IP:端口，或仅输入端口号更换 [常用端口如 500, 4500]: " ep_input
+                                if [[ -z "$ep_input" ]]; then
+                                    continue
+                                fi
+                                ep_input=$(_mihomoconf_trim "$ep_input")
                                 
                                 if [[ "$ep_input" =~ ^[0-9]+$ ]]; then
                                     ep_ip="${wg_server:-162.159.193.10}"
@@ -13817,33 +13870,9 @@ _mihomo_chain_proxy_manage() {
                                     _warn "端口无效，请输入 1-65535 之间的数字。"
                                     continue
                                 fi
-
-                                _info "正在测试出站端口连通性 (${ep_ip}:${ep_port})..."
-                                local curl_exit
-                                curl -s -I --connect-timeout 2 "http://${ep_ip}:${ep_port}" >/dev/null 2>&1
-                                curl_exit=$?
-                                
-                                # 52(Empty reply), 56(Recv failure), 22(HTTP page not retrieved), 0(Success) usually mean TCP connected.
-                                # 28(Timeout), 7(Failed to connect) usually mean blocked.
-                                if [[ "$curl_exit" == 28 || "$curl_exit" == 7 ]]; then
-                                    _warn "端点 ${ep_ip}:${ep_port} 无法连接 (可能是端口被封锁)。"
-                                    local confirm_use
-                                    read -rp "  是否仍然使用此端点？[y/N] (默认 N, 重新输入): " confirm_use
-                                    if [[ ! "$confirm_use" =~ ^[Yy] ]]; then
-                                        continue
-                                    fi
-                                else
-                                    _success "端点 ${ep_ip}:${ep_port} 连通性测试通过！"
-                                fi
-
-                                out_server="$ep_ip"
-                                out_port="$ep_port"
                                 break
                             done
-                        else
-                            out_server="${wg_server:-162.159.193.10}"
-                            out_port="${wg_port:-2408}"
-                        fi
+                        done
 
                         local detect_mtu_choice optimal_wg_mtu="1420"
                         read -rp "  是否探测最佳 MTU? (选择 N 将使用默认值 1420) [y/N] (默认 N): " detect_mtu_choice
