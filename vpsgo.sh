@@ -10237,6 +10237,8 @@ MIHOMO_WG_YAML2
                     if [[ -n "$p_wg_reserved" ]]; then
                         if [[ "$p_wg_reserved" == \[*\] ]]; then
                             printf '        reserved: %s\n' "$p_wg_reserved"
+                        elif [[ "$p_wg_reserved" == *,* ]]; then
+                            printf '        reserved: [%s]\n' "$p_wg_reserved"
                         else
                             printf '        reserved: "%s"\n' "$p_wg_reserved"
                         fi
@@ -11236,6 +11238,8 @@ EOF
             if [[ -n "$wg_reserved" ]]; then
                 if [[ "$wg_reserved" == \[*\] ]]; then
                     printf '    reserved: %s\n' "$wg_reserved" >> "$tmp_block"
+                elif [[ "$wg_reserved" == *,* ]]; then
+                    printf '    reserved: [%s]\n' "$wg_reserved" >> "$tmp_block"
                 else
                     printf '    reserved: "%s"\n' "$q_wg_reserved" >> "$tmp_block"
                 fi
