@@ -13712,268 +13712,96 @@ _mihomo_chain_proxy_manage() {
                         esac
                         ;;
                     3)
-                        _info "正在注册并生成 Cloudflare WARP 节点配置..."
-                        _info "这需要向 Cloudflare API 发送注册请求，请确保您的网络能够正常发起请求。"
-
-                        local wg_private_key="" wg_public_key=""
-
-                        # 方式1: wg genkey (wireguard-tools)
-                        if command -v wg >/dev/null 2>&1; then
-                            wg_private_key=$(wg genkey 2>/dev/null)
-                            wg_public_key=$(printf '%s' "$wg_private_key" | wg pubkey 2>/dev/null)
+                        # 1. 自动识别包管理器并安装完整依赖（针对 Alpine / Ubuntu / Debian）
+                        if command -v apk >/dev/null 2>&1; then
+                            apk update && apk add curl jq wireguard-tools
+                        elif command -v apt-get >/dev/null 2>&1; then
+                            sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools
                         fi
 
-                        # 方式2: openssl X25519 (无需额外安装)
-                        if [[ -z "$wg_private_key" || -z "$wg_public_key" ]] && command -v openssl >/dev/null 2>&1; then
-                            local _tmpkey
-                            _tmpkey=$(mktemp /tmp/wgkey.XXXXXX) || true
-                            if [[ -n "$_tmpkey" ]] && openssl genpkey -algorithm X25519 -out "$_tmpkey" 2>/dev/null; then
-                                wg_private_key=$(openssl pkey -in "$_tmpkey" -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n')
-                                wg_public_key=$(openssl pkey -in "$_tmpkey" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n')
-                            fi
-                            rm -f "$_tmpkey"
-                        fi
+                        # 2. 本地生成 WireGuard 密钥对
+                        PRIV_KEY=$(wg genkey)
+                        PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
 
-                        # 方式3: 尝试安装 wireguard-tools
-                        if [[ -z "$wg_private_key" || -z "$wg_public_key" ]]; then
-                            _info "尝试安装 wireguard-tools..."
-                            if command -v apt-get >/dev/null 2>&1; then
-                                apt-get install -y wireguard-tools >/dev/null 2>&1
-                            elif command -v apk >/dev/null 2>&1; then
-                                apk add --no-cache wireguard-tools >/dev/null 2>&1
-                            elif command -v dnf >/dev/null 2>&1; then
-                                dnf install -y wireguard-tools >/dev/null 2>&1
-                            elif command -v yum >/dev/null 2>&1; then
-                                yum install -y wireguard-tools >/dev/null 2>&1
-                            elif command -v pacman >/dev/null 2>&1; then
-                                pacman -S --noconfirm wireguard-tools >/dev/null 2>&1
-                            fi
-                            if command -v wg >/dev/null 2>&1; then
-                                wg_private_key=$(wg genkey 2>/dev/null)
-                                wg_public_key=$(printf '%s' "$wg_private_key" | wg pubkey 2>/dev/null)
-                            fi
-                        fi
+                        # 3. 构造 Cloudflare 严格校验所需的随机设备指纹参数
+                        INSTALL_ID=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 22)
+                        FCM_TOKEN="${INSTALL_ID}:APA91b$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 134)"
+                        TOS=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
-                        if [[ -z "$wg_private_key" || -z "$wg_public_key" ]]; then
-                            _warn "生成 WireGuard 密钥对失败。请确保系统已安装 openssl 或 wireguard-tools。"
+                        # 4. 组装符合新版 API 规范的 JSON 载荷
+                        PAYLOAD=$(cat <<EOF
+{
+  "key": "$PUB_KEY",
+  "install_id": "$INSTALL_ID",
+  "fcm_token": "$FCM_TOKEN",
+  "tos": "$TOS",
+  "model": "PC",
+  "serial_number": "$INSTALL_ID",
+  "locale": "zh_CN"
+}
+EOF
+)
+
+                        # 5. 携带伪装 App 请求头向最新有效的 API 端口发送请求
+                        RESPONSE=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
+                          -H "Content-Type: application/json; charset=UTF-8" \
+                          -H "User-Agent: okhttp/3.12.1" \
+                          -H "CF-Client-Version: a-6.10-2158" \
+                          -d "$PAYLOAD")
+
+                        # 6. 验证 API 响应有效性
+                        ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+                        if [[ -z "$ID" ]]; then
+                            echo "❌ 错误：向 Cloudflare 注册失败。"
+                            echo "API 返回原始数据: $RESPONSE"
                             _press_any_key
                             continue
                         fi
 
-                        local response api_url wg_server wg_port wg_ip wg_ipv6 client_id reserved_parsed
-                        local install_id fcm_token tos api_payload
-                        install_id=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 22)
-                        fcm_token="${install_id}:APA91b$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 134)"
-                        tos=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-                        api_payload="{\"key\":\"$wg_public_key\",\"install_id\":\"$install_id\",\"fcm_token\":\"$fcm_token\",\"tos\":\"$tos\",\"model\":\"PC\",\"serial_number\":\"$install_id\",\"locale\":\"zh_CN\"}"
-                        
-                        api_url="https://api.cloudflareclient.com/v0a2158/reg"
-                        response=$(curl -s -X POST "$api_url" \
-                            -H "User-Agent: okhttp/3.12.1" \
-                            -H "CF-Client-Version: a-6.10-2158" \
-                            -H "Content-Type: application/json; charset=UTF-8" \
-                            -d "$api_payload" 2>/dev/null)
+                        # 7. 提取并自动清洗 IP 地址（防带掩码格式错乱）
+                        PATH_V4=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v4 // empty' | cut -d'/' -f1)
+                        PATH_V6=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v6 // empty' | cut -d'/' -f1)
+                        CLIENT_ID_B64=$(echo "$RESPONSE" | jq -r '.config.client_id // empty')
 
-                        wg_server=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f1 || true)
-                        wg_port=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f2 || true)
-                        wg_ip=$(echo "$response" | grep -oE '"v4":"[0-9./]+"' | cut -d'"' -f4 | cut -d'/' -f1 | head -n1 || true)
-                        wg_ipv6=$(echo "$response" | grep -oE '"v6":"[0-9a-fA-F:/]+"' | cut -d'"' -f4 | cut -d'/' -f1 | head -n1 || true)
-                        client_id=$(echo "$response" | grep -oE '"client_id":"[^"]+"' | cut -d'"' -f4 || true)
-
-                        if [[ -n "$client_id" ]]; then
-                            local hex h1 h2 h3 r1 r2 r3
-                            hex=$(echo -n "$client_id" | base64 -d 2>/dev/null | hexdump -ve '/1 "%02X "')
-                            if [[ -n "$hex" ]]; then
-                                read -r h1 h2 h3 <<< "$hex"
+                        # 8. 完美兼容 Alpine (Busybox) 的 Hex 转换方式解析 Reserved 字段
+                        if [[ -z "$CLIENT_ID_B64" || "$CLIENT_ID_B64" == "null" ]]; then
+                            RESERVED="[0, 0, 0]"
+                        else
+                            HEX=$(echo -n "$CLIENT_ID_B64" | base64 -d 2>/dev/null | hexdump -ve '/1 "%02X "')
+                            if [[ -n "$HEX" ]]; then
+                                read -r h1 h2 h3 <<< "$HEX"
                                 r1=$((16#${h1:-00}))
                                 r2=$((16#${h2:-00}))
                                 r3=$((16#${h3:-00}))
-                                reserved_parsed="[$r1, $r2, $r3]"
-                            fi
-                        fi
-                        if [[ -z "$reserved_parsed" ]]; then
-                            reserved_parsed="[0,0,0]"
-                        fi
-
-                        if [[ -z "$wg_ip" ]]; then
-                            _warn "通过 Cloudflare API 注册 WARP 失败，以下是 API 返回内容："
-                            echo "$response"
-                            _press_any_key
-                            continue
-                        fi
-
-                        wg_ip="${wg_ip}/32"
-                        [[ -n "$wg_ipv6" ]] && wg_ipv6="${wg_ipv6}/128"
-
-                        _success "成功生成 Cloudflare WARP 账号信息！"
-
-                        local has_v4=0 has_v6=0
-                        _dns_has_ipv4_default_route && has_v4=1
-                        _dns_has_ipv6_default_route && has_v6=1
-
-                        if [[ "$has_v4" == "1" && "$has_v6" == "0" ]]; then
-                            _warn "检测到当前服务器为 IPv4 单栈网络。"
-                            _info "默认端点域名 (engage.cloudflareclient.com) 可能因系统解析偏好导致连接失败。"
-                            _menu_pair "1" "使用 IPv4 端点 (162.159.192.1)" "推荐" "green" "2" "保持默认域名" "" "green"
-                            local ep_choice
-                            read -rp "  请选择 [1-2] 默认 1: " ep_choice
-                            if [[ "$ep_choice" != "2" ]]; then
-                                wg_server="162.159.192.1"
-                            fi
-                        elif [[ "$has_v4" == "0" && "$has_v6" == "1" ]]; then
-                            _warn "检测到当前服务器为 IPv6 单栈网络。"
-                            _info "默认端点域名 (engage.cloudflareclient.com) 可能因系统解析偏好导致连接失败。"
-                            _menu_pair "1" "使用 IPv6 端点 (2606:4700:d0::a29f:c001)" "推荐" "green" "2" "保持默认域名" "" "green"
-                            local ep_choice
-                            read -rp "  请选择 [1-2] 默认 1: " ep_choice
-                            if [[ "$ep_choice" != "2" ]]; then
-                                wg_server="2606:4700:d0::a29f:c001"
-                            fi
-                        else
-                            _info "检测到当前服务器为双栈网络 (IPv4/IPv6)。"
-                            _menu_pair "1" "保持默认域名 (engage.cloudflareclient.com)" "推荐" "green" "2" "强制使用 IPv4 (162.159.192.1)" "" "green"
-                            _menu_item "3" "强制使用 IPv6 (2606:4700:d0::a29f:c001)" "" "green"
-                            local ep_choice
-                            read -rp "  请选择 [1-3] 默认 1: " ep_choice
-                            if [[ "$ep_choice" == "2" ]]; then
-                                wg_server="162.159.192.1"
-                            elif [[ "$ep_choice" == "3" ]]; then
-                                wg_server="2606:4700:d0::a29f:c001"
-                            fi
-                        fi
-                        _separator
-
-                        printf "  私钥 (private-key): %s\n" "$wg_private_key"
-                        printf "  本地 IP (ip): %s\n" "$wg_ip"
-                        [[ -n "$wg_ipv6" ]] && printf "  本地 IPv6 (ipv6): %s\n" "$wg_ipv6"
-                        printf "  保留字节 (reserved): %s\n" "${reserved_parsed:-[0,0,0]}"
-                        printf "  端点服务器 (endpoint): %s:%s\n" "${wg_server:-162.159.193.10}" "${wg_port:-2408}"
-                        _separator
-
-                        local custom_name
-                        read -rp "  请输入出口节点名称 [默认 WARP-WireGuard]: " custom_name
-                        out_name=$(_mihomoconf_trim "${custom_name:-WARP-WireGuard}")
-                        
-                        local ep_ip="${wg_server:-162.159.193.10}"
-                        local ep_port="${wg_port:-2408}"
-                        local first_check=1
-
-                        while true; do
-                            local do_test="y"
-                            if [[ $first_check -eq 1 ]]; then
-                                read -rp "  是否测试端点连通性 (${ep_ip}:${ep_port})? [Y/n]: " do_test
-                            fi
-                            
-                            if [[ ! "$do_test" =~ ^[Nn] ]]; then
-                                _info "正在测试端点连通性 (${ep_ip}:${ep_port})..."
-                                
-                                local curl_exit curl_url
-                                if [[ "$ep_ip" == *:* ]]; then
-                                    curl_url="http://[${ep_ip}]:${ep_port}"
-                                else
-                                    curl_url="http://${ep_ip}:${ep_port}"
-                                fi
-                                curl -s -I --connect-timeout 2 "$curl_url" >/dev/null 2>&1
-                                curl_exit=$?
-                                
-                                if [[ "$curl_exit" == 28 || "$curl_exit" == 7 ]]; then
-                                    _warn "端点 ${ep_ip}:${ep_port} 无法连接 (端口被封锁或无有效路由)。"
-                                    local fix_choice
-                                    if [[ $first_check -eq 1 ]]; then
-                                        read -rp "  是否更换端点/端口? (推荐) [Y/n]: " fix_choice
-                                        fix_choice="${fix_choice:-y}"
-                                    else
-                                        read -rp "  是否仍然强制使用此端点？[y/N] (默认 N, 重新输入): " fix_choice
-                                    fi
-                                    
-                                    if [[ $first_check -eq 1 && "$fix_choice" =~ ^[Yy] ]]; then
-                                        first_check=0
-                                    elif [[ $first_check -eq 0 && ! "$fix_choice" =~ ^[Yy] ]]; then
-                                        : # continue to prompt
-                                    else
-                                        out_server="$ep_ip"
-                                        out_port="$ep_port"
-                                        break
-                                    fi
-                                else
-                                    _success "端点 ${ep_ip}:${ep_port} 连通性测试通过！"
-                                    local use_custom_ep
-                                    if [[ $first_check -eq 1 ]]; then
-                                        read -rp "  是否需要使用自定义/优选 Endpoint IP 与端口? [y/N] (默认 N): " use_custom_ep
-                                        if [[ ! "$use_custom_ep" =~ ^[Yy] ]]; then
-                                            out_server="$ep_ip"
-                                            out_port="$ep_port"
-                                            break
-                                        fi
-                                        first_check=0
-                                    else
-                                        out_server="$ep_ip"
-                                        out_port="$ep_port"
-                                        break
-                                    fi
-                                fi
+                                RESERVED="[$r1, $r2, $r3]"
                             else
-                                local use_custom_ep
-                                if [[ $first_check -eq 1 ]]; then
-                                    read -rp "  是否需要使用自定义/优选 Endpoint IP 与端口? [y/N] (默认 N): " use_custom_ep
-                                    if [[ ! "$use_custom_ep" =~ ^[Yy] ]]; then
-                                        out_server="$ep_ip"
-                                        out_port="$ep_port"
-                                        break
-                                    fi
-                                    first_check=0
-                                else
-                                    out_server="$ep_ip"
-                                    out_port="$ep_port"
-                                    break
-                                fi
+                                RESERVED="[0, 0, 0]"
                             fi
-
-                            while true; do
-                                local ep_input
-                                read -rp "  请输入自定义 Endpoint IP:端口，或仅输入端口号更换 [常用端口如 500, 4500]: " ep_input
-                                if [[ -z "$ep_input" ]]; then
-                                    continue
-                                fi
-                                ep_input=$(_mihomoconf_trim "$ep_input")
-                                
-                                if [[ "$ep_input" =~ ^[0-9]+$ ]]; then
-                                    ep_ip="${wg_server:-162.159.193.10}"
-                                    ep_port="$ep_input"
-                                elif [[ "$ep_input" == *:* ]]; then
-                                    ep_ip="${ep_input%:*}"
-                                    ep_port="${ep_input##*:}"
-                                else
-                                    _warn "输入格式不正确，请按照 IP:PORT 格式或仅输入数字端口号。"
-                                    continue
-                                fi
-
-                                if ! _is_valid_port "$ep_port"; then
-                                    _warn "端口无效，请输入 1-65535 之间的数字。"
-                                    continue
-                                fi
-                                break
-                            done
-                        done
-
-                        local detect_mtu_choice optimal_wg_mtu="1420"
-                        read -rp "  是否探测最佳 MTU? (选择 N 将使用默认值 1420) [y/N] (默认 N): " detect_mtu_choice
-                        if [[ "$detect_mtu_choice" =~ ^[Yy] ]]; then
-                            _info "正在向 ${out_server} 探测最佳 MTU..."
-                            optimal_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
-                            _success "探测完成，推荐 WireGuard MTU 为: ${optimal_wg_mtu}"
                         fi
 
-                        out_type="wireguard"
-                        out_wg_ip="$wg_ip"
-                        out_wg_ipv6="$wg_ipv6"
-                        out_wg_private_key="$wg_private_key"
-                        out_wg_public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-                        out_wg_allowed_ips="0.0.0.0/0,::/0"
-                        out_wg_preshared_key=""
-                        out_wg_reserved="${reserved_parsed:-[0,0,0]}"
-                        out_wg_mtu="$optimal_wg_mtu"
-                        out_wg_keepalive="25"
+                        # 9. 格式化输出标准的 Mihomo 节点配置
+                        echo ""
+                        echo "=========================================================="
+                        echo "  🎉 WARP 凭证生成成功！请直接复制下方配置至 Mihomo proxies"
+                        echo "=========================================================="
+                        cat <<EOF
+  - name: "WARP-WireGuard"
+    type: wireguard
+    server: "engage.cloudflareclient.com"
+    port: 2408
+    ip: "$PATH_V4"
+    ipv6: "$PATH_V6"
+    private-key: "$PRIV_KEY"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    reserved: $RESERVED
+    mtu: 1280
+    udp: true
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+EOF
+                        echo "=========================================================="
+                        _press_any_key
+                        continue
                         ;;
                 esac
 
