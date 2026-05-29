@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.7"
+VERSION="4.8"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -13702,60 +13702,36 @@ _mihomo_chain_proxy_manage() {
                         esac
                         ;;
                     3)
-                        local is_new_install=0
-                        if ! command -v sing-box >/dev/null 2>&1; then
-                            _warn "未检测到 sing-box 命令。自动生成 WARP 节点功能依赖 sing-box。"
-                            local confirm_install
-                            read -rp "  是否开始安装 sing-box? [Y/n]: " confirm_install
-                            confirm_install="${confirm_install:-y}"
-                            if [[ "$confirm_install" =~ ^[Yy] ]]; then
-                                is_new_install=1
-                                if command -v apt-get >/dev/null 2>&1; then
-                                    if ! _singbox_install_apt; then
-                                        _error_no_exit "sing-box 安装失败"
-                                        _press_any_key
-                                        continue
-                                    fi
-                                elif command -v apk >/dev/null 2>&1; then
-                                    if ! _singbox_install_alpine; then
-                                        _error_no_exit "sing-box 安装失败"
-                                        _press_any_key
-                                        continue
-                                    fi
-                                else
-                                    if ! _singbox_install_generic; then
-                                        _error_no_exit "sing-box 安装失败"
-                                        _press_any_key
-                                        continue
-                                    fi
-                                fi
-                                # Disable autostart and service immediately for new installation
-                                if _has_systemd; then
-                                    systemctl stop sing-box >/dev/null 2>&1 || true
-                                    systemctl disable sing-box >/dev/null 2>&1 || true
-                                fi
-                                if _has_openrc; then
-                                    rc-service sing-box stop >/dev/null 2>&1 || true
-                                    rc-update del sing-box default >/dev/null 2>&1 || true
-                                fi
-                            else
-                                _info "取消生成 WARP 节点"
+                        # 确保 wg 命令可用 (wireguard-tools)
+                        if ! command -v wg >/dev/null 2>&1; then
+                            _info "安装 wireguard-tools (用于生成 WireGuard 密钥对)..."
+                            if command -v apt-get >/dev/null 2>&1; then
+                                apt-get install -y wireguard-tools >/dev/null 2>&1
+                            elif command -v apk >/dev/null 2>&1; then
+                                apk add --no-cache wireguard-tools >/dev/null 2>&1
+                            elif command -v dnf >/dev/null 2>&1; then
+                                dnf install -y wireguard-tools >/dev/null 2>&1
+                            elif command -v yum >/dev/null 2>&1; then
+                                yum install -y wireguard-tools >/dev/null 2>&1
+                            elif command -v pacman >/dev/null 2>&1; then
+                                pacman -S --noconfirm wireguard-tools >/dev/null 2>&1
+                            fi
+                            if ! command -v wg >/dev/null 2>&1; then
+                                _error_no_exit "wireguard-tools 安装失败，请手动安装后重试"
                                 _press_any_key
                                 continue
                             fi
                         fi
 
-                        _info "正在通过 sing-box 注册并生成 Cloudflare WARP 节点配置..."
+                        _info "正在注册并生成 Cloudflare WARP 节点配置..."
                         _info "这需要向 Cloudflare API 发送注册请求，请确保您的网络能够正常发起请求。"
 
-                        local warp_json rc
-                        local wg_keys wg_private_key wg_public_key
-                        wg_keys=$(sing-box generate wg-keypair 2>/dev/null)
-                        wg_private_key=$(echo "$wg_keys" | grep -Ei 'private[-_ ]?key' | awk '{print $NF}' || true)
-                        wg_public_key=$(echo "$wg_keys" | grep -Ei 'public[-_ ]?key' | awk '{print $NF}' || true)
+                        local wg_private_key wg_public_key
+                        wg_private_key=$(wg genkey 2>/dev/null)
+                        wg_public_key=$(printf '%s' "$wg_private_key" | wg pubkey 2>/dev/null)
 
                         if [[ -z "$wg_private_key" || -z "$wg_public_key" ]]; then
-                            _warn "使用 sing-box 生成 WireGuard 密钥对失败。"
+                            _warn "生成 WireGuard 密钥对失败。"
                             _press_any_key
                             continue
                         fi
@@ -13790,35 +13766,8 @@ _mihomo_chain_proxy_manage() {
                             continue
                         fi
 
-                        warp_json=$(cat <<EOF
-{
-  "private_key": "$wg_private_key",
-  "server": "${wg_server:-engage.cloudflareclient.com}",
-  "server_port": ${wg_port:-2408},
-  "addresses": [
-    "${wg_ip}/32"$( [[ -n "$wg_ipv6" ]] && echo ", \"${wg_ipv6}/128\"" )
-  ],
-  "reserved": $reserved_parsed
-}
-EOF
-)
-
-                        local wg_private_key wg_ip wg_ipv6 wg_reserved wg_server wg_port
-                        wg_private_key=$(echo "$warp_json" | grep -oE '"private_key":\s*"[^"]+"' | awk -F'"' '{print $4}' || true)
-                        wg_server=$(echo "$warp_json" | grep -oE '"server":\s*"[^"]+"' | awk -F'"' '{print $4}' || true)
-                        wg_port=$(echo "$warp_json" | grep -oE '"server_port":\s*[0-9]+' | grep -oE '[0-9]+' || true)
-                        wg_ip=$(echo "$warp_json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | head -n1 || true)
-                        wg_ipv6=$(echo "$warp_json" | grep -oE '([0-9a-fA-F:]+)/[0-9]+' | grep -vE '^[0-9]' | head -n1 || true)
-                        local reserved_parsed
-                        reserved_parsed=$(echo "$warp_json" | grep -oE '"reserved":\s*\[[0-9,\s]+\]' | grep -oE '\[.*\]' | tr -d '[:space:]' || true)
-
-                        if [[ -z "$wg_private_key" || -z "$wg_ip" ]]; then
-                            _error_no_exit "解析 WARP 配置失败，可能返回数据格式不正确。"
-                            _info "完整返回内容："
-                            echo "$warp_json"
-                            _press_any_key
-                            continue
-                        fi
+                        wg_ip="${wg_ip}/32"
+                        [[ -n "$wg_ipv6" ]] && wg_ipv6="${wg_ipv6}/128"
 
                         _success "成功生成 Cloudflare WARP 账号信息！"
                         printf "  私钥 (private-key): %s\n" "$wg_private_key"
