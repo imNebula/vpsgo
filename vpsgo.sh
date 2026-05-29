@@ -13799,18 +13799,46 @@ _mihomo_chain_proxy_manage() {
                         read -rp "  是否使用自定义/优选 Endpoint IP 与端口? (可避开默认 2408 端口的封锁) [y/N] (默认 N): " use_custom_ep
                         if [[ "$use_custom_ep" =~ ^[Yy] ]]; then
                             while true; do
-                                read -rp "  请输入自定义 Endpoint [默认 162.159.193.10:2408, 可输入 162.159.193.10:500]: " ep_input
+                                read -rp "  请输入自定义 Endpoint IP:端口，或仅输入端口号更换 [默认 162.159.193.10:2408, 可用端口如 500, 4500]: " ep_input
                                 ep_input=$(_mihomoconf_trim "${ep_input:-162.159.193.10:2408}")
-                                if [[ "$ep_input" == *:* ]]; then
+                                
+                                if [[ "$ep_input" =~ ^[0-9]+$ ]]; then
+                                    ep_ip="${wg_server:-162.159.193.10}"
+                                    ep_port="$ep_input"
+                                elif [[ "$ep_input" == *:* ]]; then
                                     ep_ip="${ep_input%:*}"
                                     ep_port="${ep_input##*:}"
-                                    if _is_valid_port "$ep_port"; then
-                                        out_server="$ep_ip"
-                                        out_port="$ep_port"
-                                        break
-                                    fi
+                                else
+                                    _warn "输入格式不正确，请按照 IP:PORT 格式或仅输入数字端口号。"
+                                    continue
                                 fi
-                                _warn "输入格式不正确或端口无效，请按照 IP:PORT 格式输入。"
+
+                                if ! _is_valid_port "$ep_port"; then
+                                    _warn "端口无效，请输入 1-65535 之间的数字。"
+                                    continue
+                                fi
+
+                                _info "正在测试出站端口连通性 (${ep_ip}:${ep_port})..."
+                                local curl_exit
+                                curl -s -I --connect-timeout 2 "http://${ep_ip}:${ep_port}" >/dev/null 2>&1
+                                curl_exit=$?
+                                
+                                # 52(Empty reply), 56(Recv failure), 22(HTTP page not retrieved), 0(Success) usually mean TCP connected.
+                                # 28(Timeout), 7(Failed to connect) usually mean blocked.
+                                if [[ "$curl_exit" == 28 || "$curl_exit" == 7 ]]; then
+                                    _warn "端点 ${ep_ip}:${ep_port} 无法连接 (可能是端口被封锁)。"
+                                    local confirm_use
+                                    read -rp "  是否仍然使用此端点？[y/N] (默认 N, 重新输入): " confirm_use
+                                    if [[ ! "$confirm_use" =~ ^[Yy] ]]; then
+                                        continue
+                                    fi
+                                else
+                                    _success "端点 ${ep_ip}:${ep_port} 连通性测试通过！"
+                                fi
+
+                                out_server="$ep_ip"
+                                out_port="$ep_port"
+                                break
                             done
                         else
                             out_server="${wg_server:-162.159.193.10}"
