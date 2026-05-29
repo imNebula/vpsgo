@@ -9127,12 +9127,9 @@ proxies:
     type: wireguard
     server: 1.1.1.1
     port: 51820
-    ip: "10.0.0.2/32"
+    ip: "10.0.0.2"
     private-key: "4J4kaP57uSQ90bzDoyzyFh7cZV2T6GpPwhD/c1e28GY="
     public-key: "2EdWUBPvC93MdEkTHspaWsstMQSpoJxYHb9kUSUieFc="
-    allowed-ips:
-      - "0.0.0.0/0"
-      - "::/0"
 rules:
   - MATCH,DIRECT
 EOF
@@ -10220,15 +10217,14 @@ MIHOMO_SS_PROXY_UOT_YAML
         type: wireguard
         server: "${p_server}"
         port: ${p_port}
-        ip: "${p_wg_ip}"
+        ip: "${p_wg_ip%%/*}"
 MIHOMO_WG_YAML
                     if [[ -n "$p_wg_ipv6" ]]; then
-                        printf '        ipv6: "%s"\n' "$p_wg_ipv6"
+                        printf '        ipv6: "%s"\n' "${p_wg_ipv6%%/*}"
                     fi
                     cat <<MIHOMO_WG_YAML2
         private-key: "${p_wg_private_key}"
         public-key: "${p_wg_public_key}"
-        allowed-ips: ${wg_allowed_yaml}
         udp: true
 MIHOMO_WG_YAML2
                     if [[ -n "$p_wg_preshared_key" ]]; then
@@ -10245,9 +10241,6 @@ MIHOMO_WG_YAML2
                     fi
                     if [[ -n "$p_wg_mtu" ]]; then
                         printf '        mtu: %s\n' "$p_wg_mtu"
-                    fi
-                    if [[ -n "$p_wg_keepalive" ]]; then
-                        printf '        persistent-keepalive: %s\n' "$p_wg_keepalive"
                     fi
                     ;;
             esac
@@ -11223,14 +11216,13 @@ EOF
     type: wireguard
     server: "${q_server}"
     port: ${port}
-    ip: "${q_wg_ip}"
+    ip: "${q_wg_ip%%/*}"
     private-key: "${q_wg_private_key}"
     public-key: "${q_wg_public_key}"
-    allowed-ips: ${q_wg_allowed_ips}
     udp: true
 EOF
             if [[ -n "$q_wg_ipv6" ]]; then
-                printf '    ipv6: "%s"\n' "$q_wg_ipv6" >> "$tmp_block"
+                printf '    ipv6: "%s"\n' "${q_wg_ipv6%%/*}" >> "$tmp_block"
             fi
             if [[ -n "$q_wg_preshared_key" ]]; then
                 printf '    pre-shared-key: "%s"\n' "$q_wg_preshared_key" >> "$tmp_block"
@@ -11246,9 +11238,6 @@ EOF
             fi
             if [[ -n "$wg_mtu" ]]; then
                 printf '    mtu: %s\n' "$wg_mtu" >> "$tmp_block"
-            fi
-            if [[ -n "$wg_keepalive" ]]; then
-                printf '    persistent-keepalive: %s\n' "$wg_keepalive" >> "$tmp_block"
             fi
             ;;
         tuic)
@@ -13788,6 +13777,43 @@ _mihomo_chain_proxy_manage() {
                         [[ -n "$wg_ipv6" ]] && wg_ipv6="${wg_ipv6}/128"
 
                         _success "成功生成 Cloudflare WARP 账号信息！"
+
+                        local has_v4=0 has_v6=0
+                        _dns_has_ipv4_default_route && has_v4=1
+                        _dns_has_ipv6_default_route && has_v6=1
+
+                        if [[ "$has_v4" == "1" && "$has_v6" == "0" ]]; then
+                            _warn "检测到当前服务器为 IPv4 单栈网络。"
+                            _info "默认端点域名 (engage.cloudflareclient.com) 可能因系统解析偏好导致连接失败。"
+                            _menu_pair "1" "使用 IPv4 端点 (162.159.192.1)" "推荐" "green" "2" "保持默认域名" "" "green"
+                            local ep_choice
+                            read -rp "  请选择 [1-2] 默认 1: " ep_choice
+                            if [[ "$ep_choice" != "2" ]]; then
+                                wg_server="162.159.192.1"
+                            fi
+                        elif [[ "$has_v4" == "0" && "$has_v6" == "1" ]]; then
+                            _warn "检测到当前服务器为 IPv6 单栈网络。"
+                            _info "默认端点域名 (engage.cloudflareclient.com) 可能因系统解析偏好导致连接失败。"
+                            _menu_pair "1" "使用 IPv6 端点 (2606:4700:d0::a29f:c001)" "推荐" "green" "2" "保持默认域名" "" "green"
+                            local ep_choice
+                            read -rp "  请选择 [1-2] 默认 1: " ep_choice
+                            if [[ "$ep_choice" != "2" ]]; then
+                                wg_server="2606:4700:d0::a29f:c001"
+                            fi
+                        else
+                            _info "检测到当前服务器为双栈网络 (IPv4/IPv6)。"
+                            _menu_pair "1" "保持默认域名 (engage.cloudflareclient.com)" "推荐" "green" "2" "强制使用 IPv4 (162.159.192.1)" "" "green"
+                            _menu_item "3" "强制使用 IPv6 (2606:4700:d0::a29f:c001)" "" "green"
+                            local ep_choice
+                            read -rp "  请选择 [1-3] 默认 1: " ep_choice
+                            if [[ "$ep_choice" == "2" ]]; then
+                                wg_server="162.159.192.1"
+                            elif [[ "$ep_choice" == "3" ]]; then
+                                wg_server="2606:4700:d0::a29f:c001"
+                            fi
+                        fi
+                        _separator
+
                         printf "  私钥 (private-key): %s\n" "$wg_private_key"
                         printf "  本地 IP (ip): %s\n" "$wg_ip"
                         [[ -n "$wg_ipv6" ]] && printf "  本地 IPv6 (ipv6): %s\n" "$wg_ipv6"
