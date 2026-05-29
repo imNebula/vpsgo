@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.10"
+VERSION="4.11"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -13384,7 +13384,24 @@ _mihomo_chain_proxy_manage() {
                                         out_user=$(_mihomochain_urldecode "$link_userinfo")
                                     fi
                                 else
-                                    link_hostport="$link_body"
+                                    # 兼容 socks5://BASE64 形式（部分客户端如 v2rayN 导出时会用 base64 编码 user:pass@server:port）
+                                    socks_decoded=$(_mihomochain_base64url_decode "$link_body" 2>/dev/null || true)
+                                    if [[ -n "$socks_decoded" && "$socks_decoded" == *:* ]] && _mihomochain_parse_host_port "${socks_decoded#*@}" _tmp_s _tmp_p 2>/dev/null; then
+                                        if [[ "$socks_decoded" == *@* ]]; then
+                                            link_userinfo="${socks_decoded%@*}"
+                                            link_hostport="${socks_decoded#*@}"
+                                            if [[ "$link_userinfo" == *:* ]]; then
+                                                out_user=$(_mihomochain_urldecode "${link_userinfo%%:*}")
+                                                out_pass=$(_mihomochain_urldecode "${link_userinfo#*:}")
+                                            else
+                                                out_user=$(_mihomochain_urldecode "$link_userinfo")
+                                            fi
+                                        else
+                                            link_hostport="$socks_decoded"
+                                        fi
+                                    else
+                                        link_hostport="$link_body"
+                                    fi
                                 fi
                                 if ! _mihomochain_parse_host_port "$link_hostport" out_server out_port; then
                                     _error_no_exit "socks5 链接解析失败，需为 socks5://[user:pass@]server:port"
@@ -13743,23 +13760,35 @@ _mihomo_chain_proxy_manage() {
                             continue
                         fi
 
-                        local response api_url wg_server wg_port wg_ip wg_ipv6 client_id reserved_dec reserved_parsed
+                        local response api_url wg_server wg_port wg_ip wg_ipv6 client_id reserved_parsed
+                        local install_id fcm_token tos api_payload
+                        install_id=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 22)
+                        fcm_token="${install_id}:APA91b$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 134)"
+                        tos=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+                        api_payload="{\"key\":\"$wg_public_key\",\"install_id\":\"$install_id\",\"fcm_token\":\"$fcm_token\",\"tos\":\"$tos\",\"model\":\"PC\",\"serial_number\":\"$install_id\",\"locale\":\"zh_CN\"}"
+                        
                         api_url="https://api.cloudflareclient.com/v0a2158/reg"
                         response=$(curl -s -X POST "$api_url" \
-                            -H "User-Agent: CF-Client-Version/a-7.21-0721" \
-                            -H "Content-Type: application/json" \
-                            -d "{\"key\":\"$wg_public_key\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>/dev/null)
+                            -H "User-Agent: okhttp/3.12.1" \
+                            -H "CF-Client-Version: a-6.10-2158" \
+                            -H "Content-Type: application/json; charset=UTF-8" \
+                            -d "$api_payload" 2>/dev/null)
 
                         wg_server=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f1 || true)
                         wg_port=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f2 || true)
-                        wg_ip=$(echo "$response" | grep -oE '"v4":"[0-9.]+"' | cut -d'"' -f4 || true)
-                        wg_ipv6=$(echo "$response" | grep -oE '"v6":"[0-9a-fA-F:]+"' | cut -d'"' -f4 || true)
+                        wg_ip=$(echo "$response" | grep -oE '"v4":"[^"]+"' | cut -d'"' -f4 | cut -d'/' -f1 || true)
+                        wg_ipv6=$(echo "$response" | grep -oE '"v6":"[^"]+"' | cut -d'"' -f4 | cut -d'/' -f1 || true)
                         client_id=$(echo "$response" | grep -oE '"client_id":"[^"]+"' | cut -d'"' -f4 || true)
 
                         if [[ -n "$client_id" ]]; then
-                            reserved_dec=$(echo -n "$client_id" | base64 -d 2>/dev/null | od -An -v -t u1 | tr -s ' ' ',' | tr -d '\n' | sed 's/^,//;s/,$//' || true)
-                            if [[ -n "$reserved_dec" ]]; then
-                                reserved_parsed="[$reserved_dec]"
+                            local hex h1 h2 h3 r1 r2 r3
+                            hex=$(echo -n "$client_id" | base64 -d 2>/dev/null | hexdump -ve '/1 "%02X "')
+                            if [[ -n "$hex" ]]; then
+                                read -r h1 h2 h3 <<< "$hex"
+                                r1=$((16#${h1:-00}))
+                                r2=$((16#${h2:-00}))
+                                r3=$((16#${h3:-00}))
+                                reserved_parsed="[$r1, $r2, $r3]"
                             fi
                         fi
                         if [[ -z "$reserved_parsed" ]]; then
@@ -13830,37 +13859,60 @@ _mihomo_chain_proxy_manage() {
                         local first_check=1
 
                         while true; do
+                            local do_test="y"
                             if [[ $first_check -eq 1 ]]; then
-                                _info "正在自动测试默认端点连通性 (${ep_ip}:${ep_port})..."
-                            else
-                                _info "正在测试端点连通性 (${ep_ip}:${ep_port})..."
+                                read -rp "  是否测试端点连通性 (${ep_ip}:${ep_port})? [Y/n]: " do_test
                             fi
                             
-                            local curl_exit
-                            curl -s -I --connect-timeout 2 "http://${ep_ip}:${ep_port}" >/dev/null 2>&1
-                            curl_exit=$?
-                            
-                            if [[ "$curl_exit" == 28 || "$curl_exit" == 7 ]]; then
-                                _warn "端点 ${ep_ip}:${ep_port} 无法连接 (该端口可能已被您的 VPS 封锁)。"
-                                local fix_choice
-                                if [[ $first_check -eq 1 ]]; then
-                                    read -rp "  是否更换端口? (推荐) [Y/n]: " fix_choice
-                                    fix_choice="${fix_choice:-y}"
-                                else
-                                    read -rp "  是否仍然强制使用此端点？[y/N] (默认 N, 重新输入): " fix_choice
-                                fi
+                            if [[ ! "$do_test" =~ ^[Nn] ]]; then
+                                _info "正在测试端点连通性 (${ep_ip}:${ep_port})..."
                                 
-                                if [[ $first_check -eq 1 && "$fix_choice" =~ ^[Yy] ]]; then
-                                    first_check=0
-                                elif [[ $first_check -eq 0 && ! "$fix_choice" =~ ^[Yy] ]]; then
-                                    : # continue to prompt
+                                local curl_exit curl_url
+                                if [[ "$ep_ip" == *:* ]]; then
+                                    curl_url="http://[${ep_ip}]:${ep_port}"
                                 else
-                                    out_server="$ep_ip"
-                                    out_port="$ep_port"
-                                    break
+                                    curl_url="http://${ep_ip}:${ep_port}"
+                                fi
+                                curl -s -I --connect-timeout 2 "$curl_url" >/dev/null 2>&1
+                                curl_exit=$?
+                                
+                                if [[ "$curl_exit" == 28 || "$curl_exit" == 7 ]]; then
+                                    _warn "端点 ${ep_ip}:${ep_port} 无法连接 (端口被封锁或无有效路由)。"
+                                    local fix_choice
+                                    if [[ $first_check -eq 1 ]]; then
+                                        read -rp "  是否更换端点/端口? (推荐) [Y/n]: " fix_choice
+                                        fix_choice="${fix_choice:-y}"
+                                    else
+                                        read -rp "  是否仍然强制使用此端点？[y/N] (默认 N, 重新输入): " fix_choice
+                                    fi
+                                    
+                                    if [[ $first_check -eq 1 && "$fix_choice" =~ ^[Yy] ]]; then
+                                        first_check=0
+                                    elif [[ $first_check -eq 0 && ! "$fix_choice" =~ ^[Yy] ]]; then
+                                        : # continue to prompt
+                                    else
+                                        out_server="$ep_ip"
+                                        out_port="$ep_port"
+                                        break
+                                    fi
+                                else
+                                    _success "端点 ${ep_ip}:${ep_port} 连通性测试通过！"
+                                    local use_custom_ep
+                                    if [[ $first_check -eq 1 ]]; then
+                                        read -rp "  是否需要使用自定义/优选 Endpoint IP 与端口? [y/N] (默认 N): " use_custom_ep
+                                        if [[ ! "$use_custom_ep" =~ ^[Yy] ]]; then
+                                            out_server="$ep_ip"
+                                            out_port="$ep_port"
+                                            break
+                                        fi
+                                        first_check=0
+                                    else
+                                        out_server="$ep_ip"
+                                        out_port="$ep_port"
+                                        break
+                                    fi
                                 fi
                             else
-                                _success "端点 ${ep_ip}:${ep_port} 连通性测试通过！"
                                 local use_custom_ep
                                 if [[ $first_check -eq 1 ]]; then
                                     read -rp "  是否需要使用自定义/优选 Endpoint IP 与端口? [y/N] (默认 N): " use_custom_ep
