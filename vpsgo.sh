@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.11"
+VERSION="4.12"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -13776,8 +13776,8 @@ _mihomo_chain_proxy_manage() {
 
                         wg_server=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f1 || true)
                         wg_port=$(echo "$response" | grep -oE '"host":"[^"]+"' | head -n1 | cut -d'"' -f4 | cut -d':' -f2 || true)
-                        wg_ip=$(echo "$response" | grep -oE '"v4":"[^"]+"' | cut -d'"' -f4 | cut -d'/' -f1 || true)
-                        wg_ipv6=$(echo "$response" | grep -oE '"v6":"[^"]+"' | cut -d'"' -f4 | cut -d'/' -f1 || true)
+                        wg_ip=$(echo "$response" | grep -oE '"v4":"[0-9./]+"' | cut -d'"' -f4 | cut -d'/' -f1 | head -n1 || true)
+                        wg_ipv6=$(echo "$response" | grep -oE '"v6":"[0-9a-fA-F:/]+"' | cut -d'"' -f4 | cut -d'/' -f1 | head -n1 || true)
                         client_id=$(echo "$response" | grep -oE '"client_id":"[^"]+"' | cut -d'"' -f4 || true)
 
                         if [[ -n "$client_id" ]]; then
