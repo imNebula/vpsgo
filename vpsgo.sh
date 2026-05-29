@@ -13785,7 +13785,20 @@ EOF
 
                         out_name="WARP-WireGuard"
                         out_type="wireguard"
-                        out_server="engage.cloudflareclient.com"
+                        
+                        local has_v4=0 has_v6=0
+                        _dns_has_ipv4_default_route && has_v4=1
+                        _dns_has_ipv6_default_route && has_v6=1
+                        
+                        if [[ "$has_v4" == "1" && "$has_v6" == "0" ]]; then
+                            _warn "检测到当前服务器为 IPv4 单栈网络，自动指定为 IPv4 端点..."
+                            out_server="162.159.192.1"
+                        elif [[ "$has_v4" == "0" && "$has_v6" == "1" ]]; then
+                            _warn "检测到当前服务器为 IPv6 单栈网络，自动指定为 IPv6 端点..."
+                            out_server="2606:4700:d0::a29f:c001"
+                        else
+                            out_server="engage.cloudflareclient.com"
+                        fi
                         out_port="2408"
                         out_wg_ip="${PATH_V4}/32"
                         if [[ -n "$PATH_V6" ]]; then
