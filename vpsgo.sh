@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.5"
+VERSION="4.6"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -16678,8 +16678,22 @@ _singbox_install_generic() {
 }
 
 _singbox_install_alpine() {
-    _info "使用 Alpine APK 安装..."
-    apk add --no-cache sing-box
+    _info "使用官方安装脚本 (Alpine 修复版)..."
+    local tmp_script
+    tmp_script=$(mktemp /tmp/singbox_install.XXXXXX) || return 1
+    if curl -fsSL https://sing-box.app/install.sh -o "$tmp_script"; then
+        local content
+        if content=$(cat "$tmp_script" 2>/dev/null); then
+            content="${content//\\\"\$package_name\\\"/\\\"./\$package_name\\\"}"
+            echo "$content" > "$tmp_script"
+            bash "$tmp_script"
+            local ret=$?
+            rm -f "$tmp_script"
+            return $ret
+        fi
+    fi
+    rm -f "$tmp_script"
+    return 1
 }
 
 _singbox_setup() {
