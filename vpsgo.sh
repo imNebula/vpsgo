@@ -13714,11 +13714,11 @@ _mihomo_chain_proxy_manage() {
                         esac
                         ;;
                     3)
-                        # 1. 自动识别包管理器并安装完整依赖（针对 Alpine / Ubuntu / Debian）
+                        # 1. 自动识别包管理器并安装完整依赖（针对 Alpine / Ubuntu / Debian，增加 MTU 检测所需的 ping）
                         if command -v apk >/dev/null 2>&1; then
-                            apk update && apk add curl jq wireguard-tools
+                            apk update && apk add curl jq wireguard-tools iputils
                         elif command -v apt-get >/dev/null 2>&1; then
-                            sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools
+                            sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools iputils-ping
                         fi
 
                         # 2. 本地生成 WireGuard 密钥对
@@ -13798,7 +13798,16 @@ EOF
                         out_wg_allowed_ips="0.0.0.0/0,::/0"
                         out_wg_preshared_key=""
                         out_wg_reserved="$RESERVED"
-                        out_wg_mtu="1280"
+                        
+                        local detect_mtu_choice optimal_wg_mtu="1280"
+                        read -rp "  是否探测最佳 MTU? (选择 N 将使用默认值 1280) [y/N] (默认 N): " detect_mtu_choice
+                        if [[ "$detect_mtu_choice" =~ ^[Yy] ]]; then
+                            _info "正在向 ${out_server} 探测最佳 MTU..."
+                            optimal_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
+                            _success "探测完成，推荐 WireGuard MTU 为: ${optimal_wg_mtu}"
+                        fi
+                        
+                        out_wg_mtu="$optimal_wg_mtu"
                         out_wg_keepalive="25"
                         ;;
                 esac
