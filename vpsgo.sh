@@ -10226,6 +10226,8 @@ MIHOMO_WG_YAML
         private-key: "${p_wg_private_key}"
         public-key: "${p_wg_public_key}"
         udp: true
+        remote-dns-resolve: true
+        dns: [1.1.1.1, 8.8.8.8]
 MIHOMO_WG_YAML2
                     if [[ -n "$p_wg_preshared_key" ]]; then
                         printf '        pre-shared-key: "%s"\n' "$p_wg_preshared_key"
@@ -13779,29 +13781,25 @@ EOF
                             fi
                         fi
 
-                        # 9. 格式化输出标准的 Mihomo 节点配置
-                        echo ""
-                        echo "=========================================================="
-                        echo "  🎉 WARP 凭证生成成功！请直接复制下方配置至 Mihomo proxies"
-                        echo "=========================================================="
-                        cat <<EOF
-  - name: "WARP-WireGuard"
-    type: wireguard
-    server: "engage.cloudflareclient.com"
-    port: 2408
-    ip: "$PATH_V4"
-    ipv6: "$PATH_V6"
-    private-key: "$PRIV_KEY"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    reserved: $RESERVED
-    mtu: 1280
-    udp: true
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-EOF
-                        echo "=========================================================="
-                        _press_any_key
-                        continue
+                        _success "成功生成 Cloudflare WARP 账号信息并准备添加至节点列表！"
+
+                        out_name="WARP-WireGuard"
+                        out_type="wireguard"
+                        out_server="engage.cloudflareclient.com"
+                        out_port="2408"
+                        out_wg_ip="${PATH_V4}/32"
+                        if [[ -n "$PATH_V6" ]]; then
+                            out_wg_ipv6="${PATH_V6}/128"
+                        else
+                            out_wg_ipv6=""
+                        fi
+                        out_wg_private_key="$PRIV_KEY"
+                        out_wg_public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+                        out_wg_allowed_ips="0.0.0.0/0,::/0"
+                        out_wg_preshared_key=""
+                        out_wg_reserved="$RESERVED"
+                        out_wg_mtu="1280"
+                        out_wg_keepalive="25"
                         ;;
                 esac
 
