@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.6"
+VERSION="4.7"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -16678,22 +16678,70 @@ _singbox_install_generic() {
 }
 
 _singbox_install_alpine() {
-    _info "使用官方安装脚本 (Alpine 修复版)..."
-    local tmp_script
-    tmp_script=$(mktemp /tmp/singbox_install.XXXXXX) || return 1
-    if curl -fsSL https://sing-box.app/install.sh -o "$tmp_script"; then
-        local content
-        if content=$(cat "$tmp_script" 2>/dev/null); then
-            content="${content//\\\"\$package_name\\\"/\\\"./\$package_name\\\"}"
-            echo "$content" > "$tmp_script"
-            bash "$tmp_script"
-            local ret=$?
-            rm -f "$tmp_script"
-            return $ret
-        fi
+    _info "Alpine 检测到，使用二进制安装..."
+
+    local goarch
+    case "$(uname -m)" in
+        x86_64|amd64)        goarch="amd64" ;;
+        aarch64|arm64)       goarch="arm64" ;;
+        armv7*|armhf)        goarch="armv7" ;;
+        i386|i486|i586|i686) goarch="386" ;;
+        *)
+            _error_no_exit "不支持的架构: $(uname -m)"
+            return 1
+            ;;
+    esac
+
+    local version latest_json api_url
+    api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+    api_url=$(_github_proxy_url "$api_url")
+    latest_json=$(curl -fsSL "$api_url" 2>/dev/null) || {
+        _error_no_exit "获取 sing-box 最新版本失败"
+        return 1
+    }
+    version=$(printf '%s' "$latest_json" | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')
+    if [[ -z "$version" ]]; then
+        _error_no_exit "解析 sing-box 版本号失败"
+        return 1
     fi
-    rm -f "$tmp_script"
-    return 1
+    _info "最新版本: v${version}"
+
+    local tarball="sing-box-${version}-linux-${goarch}.tar.gz"
+    local url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${tarball}"
+    url=$(_github_proxy_url "$url")
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d /tmp/singbox_install.XXXXXX) || return 1
+
+    _info "下载 ${tarball} ..."
+    if ! curl -fSL -o "${tmp_dir}/${tarball}" "$url"; then
+        _error_no_exit "下载失败: ${url}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    _info "解压并安装..."
+    if ! tar -xzf "${tmp_dir}/${tarball}" -C "$tmp_dir"; then
+        _error_no_exit "解压失败"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    local bin_path="${tmp_dir}/sing-box-${version}-linux-${goarch}/sing-box"
+    if [[ ! -f "$bin_path" ]]; then
+        _error_no_exit "未在压缩包中找到 sing-box 二进制文件"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    install -m 0755 "$bin_path" /usr/local/bin/sing-box || {
+        _error_no_exit "安装 sing-box 到 /usr/local/bin 失败"
+        rm -rf "$tmp_dir"
+        return 1
+    }
+
+    rm -rf "$tmp_dir"
+    _info "sing-box v${version} 安装成功"
 }
 
 _singbox_setup() {
