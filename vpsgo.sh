@@ -13716,6 +13716,12 @@ _mihomo_chain_proxy_manage() {
                                         _press_any_key
                                         continue
                                     fi
+                                elif command -v apk >/dev/null 2>&1; then
+                                    if ! _singbox_install_alpine; then
+                                        _error_no_exit "sing-box 安装失败"
+                                        _press_any_key
+                                        continue
+                                    fi
                                 else
                                     if ! _singbox_install_generic; then
                                         _error_no_exit "sing-box 安装失败"
@@ -16671,6 +16677,11 @@ _singbox_install_generic() {
     bash <(curl -fsSL https://sing-box.app/install.sh)
 }
 
+_singbox_install_alpine() {
+    _info "使用 Alpine APK 安装..."
+    apk add --no-cache sing-box
+}
+
 _singbox_setup() {
     _header "sing-box 安装"
 
@@ -16707,6 +16718,12 @@ _singbox_setup() {
     echo ""
     if command -v apt-get >/dev/null 2>&1; then
         if ! _singbox_install_apt; then
+            _error_no_exit "sing-box 安装/更新失败"
+            _press_any_key
+            return
+        fi
+    elif command -v apk >/dev/null 2>&1; then
+        if ! _singbox_install_alpine; then
             _error_no_exit "sing-box 安装/更新失败"
             _press_any_key
             return
