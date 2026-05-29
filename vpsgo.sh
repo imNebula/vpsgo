@@ -13705,7 +13705,7 @@ _mihomo_chain_proxy_manage() {
                         _info "正在注册并生成 Cloudflare WARP 节点配置..."
                         _info "这需要向 Cloudflare API 发送注册请求，请确保您的网络能够正常发起请求。"
 
-                        local wg_private_key wg_public_key
+                        local wg_private_key="" wg_public_key=""
 
                         # 方式1: wg genkey (wireguard-tools)
                         if command -v wg >/dev/null 2>&1; then
