@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.8"
+VERSION="4.9"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -13702,9 +13702,31 @@ _mihomo_chain_proxy_manage() {
                         esac
                         ;;
                     3)
-                        # 确保 wg 命令可用 (wireguard-tools)
-                        if ! command -v wg >/dev/null 2>&1; then
-                            _info "安装 wireguard-tools (用于生成 WireGuard 密钥对)..."
+                        _info "正在注册并生成 Cloudflare WARP 节点配置..."
+                        _info "这需要向 Cloudflare API 发送注册请求，请确保您的网络能够正常发起请求。"
+
+                        local wg_private_key wg_public_key
+
+                        # 方式1: wg genkey (wireguard-tools)
+                        if command -v wg >/dev/null 2>&1; then
+                            wg_private_key=$(wg genkey 2>/dev/null)
+                            wg_public_key=$(printf '%s' "$wg_private_key" | wg pubkey 2>/dev/null)
+                        fi
+
+                        # 方式2: openssl X25519 (无需额外安装)
+                        if [[ -z "$wg_private_key" || -z "$wg_public_key" ]] && command -v openssl >/dev/null 2>&1; then
+                            local _tmpkey
+                            _tmpkey=$(mktemp /tmp/wgkey.XXXXXX) || true
+                            if [[ -n "$_tmpkey" ]] && openssl genpkey -algorithm X25519 -out "$_tmpkey" 2>/dev/null; then
+                                wg_private_key=$(openssl pkey -in "$_tmpkey" -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n')
+                                wg_public_key=$(openssl pkey -in "$_tmpkey" -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr -d '\n')
+                            fi
+                            rm -f "$_tmpkey"
+                        fi
+
+                        # 方式3: 尝试安装 wireguard-tools
+                        if [[ -z "$wg_private_key" || -z "$wg_public_key" ]]; then
+                            _info "尝试安装 wireguard-tools..."
                             if command -v apt-get >/dev/null 2>&1; then
                                 apt-get install -y wireguard-tools >/dev/null 2>&1
                             elif command -v apk >/dev/null 2>&1; then
@@ -13716,22 +13738,14 @@ _mihomo_chain_proxy_manage() {
                             elif command -v pacman >/dev/null 2>&1; then
                                 pacman -S --noconfirm wireguard-tools >/dev/null 2>&1
                             fi
-                            if ! command -v wg >/dev/null 2>&1; then
-                                _error_no_exit "wireguard-tools 安装失败，请手动安装后重试"
-                                _press_any_key
-                                continue
+                            if command -v wg >/dev/null 2>&1; then
+                                wg_private_key=$(wg genkey 2>/dev/null)
+                                wg_public_key=$(printf '%s' "$wg_private_key" | wg pubkey 2>/dev/null)
                             fi
                         fi
 
-                        _info "正在注册并生成 Cloudflare WARP 节点配置..."
-                        _info "这需要向 Cloudflare API 发送注册请求，请确保您的网络能够正常发起请求。"
-
-                        local wg_private_key wg_public_key
-                        wg_private_key=$(wg genkey 2>/dev/null)
-                        wg_public_key=$(printf '%s' "$wg_private_key" | wg pubkey 2>/dev/null)
-
                         if [[ -z "$wg_private_key" || -z "$wg_public_key" ]]; then
-                            _warn "生成 WireGuard 密钥对失败。"
+                            _warn "生成 WireGuard 密钥对失败。请确保系统已安装 openssl 或 wireguard-tools。"
                             _press_any_key
                             continue
                         fi
