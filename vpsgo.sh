@@ -13714,35 +13714,29 @@ _mihomo_chain_proxy_manage() {
                         esac
                         ;;
                     3)
-                        # 1. 自动识别包管理器并安装完整依赖（针对 Alpine / Ubuntu / Debian / CentOS / Arch，包含 MTU 检测所需的 ping）
+                        # 安装依赖
                         if command -v apk >/dev/null 2>&1; then
-                            apk update && apk add curl jq wireguard-tools iputils
+                            apk update && apk add curl jq wireguard-tools
                         elif command -v apt-get >/dev/null 2>&1; then
-                            sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools iputils-ping
+                            sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools
                         elif command -v dnf >/dev/null 2>&1; then
-                            sudo dnf install -y curl jq wireguard-tools iputils
+                            sudo dnf install -y curl jq wireguard-tools
                         elif command -v yum >/dev/null 2>&1; then
-                            sudo yum install -y curl jq wireguard-tools iputils
+                            sudo yum install -y curl jq wireguard-tools
                         elif command -v pacman >/dev/null 2>&1; then
-                            sudo pacman -Sy --noconfirm curl jq wireguard-tools iputils
-                        fi
-                        
-                        if ! command -v jq >/dev/null 2>&1 || ! command -v wg >/dev/null 2>&1; then
-                            _error_no_exit "jq 或 wg (wireguard-tools) 未安装成功，请手动安装后重试"
-                            _press_any_key
-                            continue
+                            sudo pacman -Sy --noconfirm curl jq wireguard-tools
                         fi
 
-                        # 2. 本地生成 WireGuard 密钥对
+                        # 生成 WireGuard 密钥对
                         PRIV_KEY=$(wg genkey)
                         PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
 
-                        # 3. 构造 Cloudflare 严格校验所需的随机设备指纹参数
+                        # 构造随机设备指纹
                         INSTALL_ID=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 22)
                         FCM_TOKEN="${INSTALL_ID}:APA91b$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 134)"
                         TOS=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
-                        # 4. 组装符合新版 API 规范的 JSON 载荷
+                        # 组装 JSON 载荷
                         PAYLOAD=$(cat <<EOF
 {
   "key": "$PUB_KEY",
@@ -13756,14 +13750,14 @@ _mihomo_chain_proxy_manage() {
 EOF
 )
 
-                        # 5. 携带伪装 App 请求头向最新有效的 API 端口发送请求
+                        # 发送注册请求
                         RESPONSE=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
                           -H "Content-Type: application/json; charset=UTF-8" \
                           -H "User-Agent: okhttp/3.12.1" \
                           -H "CF-Client-Version: a-6.10-2158" \
                           -d "$PAYLOAD")
 
-                        # 6. 验证 API 响应有效性
+                        # 验证响应
                         ID=$(echo "$RESPONSE" | jq -r '.id // empty')
                         if [[ -z "$ID" ]]; then
                             echo "❌ 错误：向 Cloudflare 注册失败。"
@@ -13772,12 +13766,12 @@ EOF
                             continue
                         fi
 
-                        # 7. 提取并自动清洗 IP 地址（防带掩码格式错乱）
-                        PATH_V4=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v4 // empty' | cut -d'/' -f1 | grep -v '^null$')
-                        PATH_V6=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v6 // empty' | cut -d'/' -f1 | grep -v '^null$')
-                        CLIENT_ID_B64=$(echo "$RESPONSE" | jq -r '.config.client_id // empty' | grep -v '^null$')
+                        # 提取 IP 地址
+                        PATH_V4=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v4 // empty' | cut -d'/' -f1)
+                        PATH_V6=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v6 // empty' | cut -d'/' -f1)
+                        CLIENT_ID_B64=$(echo "$RESPONSE" | jq -r '.config.client_id // empty')
 
-                        # 8. 完美兼容 Alpine (Busybox) 的 Hex 转换方式解析 Reserved 字段
+                        # 解析 Reserved 字段
                         if [[ -z "$CLIENT_ID_B64" || "$CLIENT_ID_B64" == "null" ]]; then
                             RESERVED="[0, 0, 0]"
                         else
@@ -13793,47 +13787,21 @@ EOF
                             fi
                         fi
 
-                        _success "成功生成 Cloudflare WARP 账号信息并准备添加至节点列表！"
+                        _success "WARP 凭证生成成功！"
 
                         out_name="WARP-WireGuard"
                         out_type="wireguard"
-                        
-                        local has_v4=0 has_v6=0
-                        _dns_has_ipv4_default_route && has_v4=1
-                        _dns_has_ipv6_default_route && has_v6=1
-                        
-                        if [[ "$has_v4" == "1" && "$has_v6" == "0" ]]; then
-                            _warn "检测到当前服务器为 IPv4 单栈网络，自动指定为 IPv4 端点..."
-                            out_server="162.159.192.1"
-                        elif [[ "$has_v4" == "0" && "$has_v6" == "1" ]]; then
-                            _warn "检测到当前服务器为 IPv6 单栈网络，自动指定为 IPv6 端点..."
-                            out_server="2606:4700:d0::a29f:c001"
-                        else
-                            out_server="engage.cloudflareclient.com"
-                        fi
+                        out_server="engage.cloudflareclient.com"
                         out_port="2408"
-                        out_wg_ip="${PATH_V4}/32"
-                        if [[ -n "$PATH_V6" ]]; then
-                            out_wg_ipv6="${PATH_V6}/128"
-                        else
-                            out_wg_ipv6=""
-                        fi
+                        out_wg_ip="$PATH_V4"
+                        out_wg_ipv6="$PATH_V6"
                         out_wg_private_key="$PRIV_KEY"
                         out_wg_public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
                         out_wg_allowed_ips="0.0.0.0/0,::/0"
                         out_wg_preshared_key=""
                         out_wg_reserved="$RESERVED"
-                        
-                        local detect_mtu_choice optimal_wg_mtu="1280"
-                        read -rp "  是否探测最佳 MTU? (选择 N 将使用默认值 1280) [y/N] (默认 N): " detect_mtu_choice
-                        if [[ "$detect_mtu_choice" =~ ^[Yy] ]]; then
-                            _info "正在向 ${out_server} 探测最佳 MTU..."
-                            optimal_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
-                            _success "探测完成，推荐 WireGuard MTU 为: ${optimal_wg_mtu}"
-                        fi
-                        
-                        out_wg_mtu="$optimal_wg_mtu"
-                        out_wg_keepalive="25"
+                        out_wg_mtu="1280"
+                        out_wg_keepalive=""
                         ;;
                 esac
 
