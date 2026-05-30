@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.13"
+VERSION="4.14"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -13799,7 +13799,9 @@ EOF
                         out_wg_allowed_ips="0.0.0.0/0,::/0"
                         out_wg_preshared_key=""
                         out_wg_reserved="$RESERVED"
-                        out_wg_mtu="1280"
+                        _info "正在探测最佳 MTU..."
+                        out_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
+                        _success "MTU: ${out_wg_mtu}"
                         out_wg_keepalive=""
                         ;;
                 esac
@@ -27801,6 +27803,215 @@ _proxy_tools_menu() {
     done
 }
 
+_auto_detect_apply_mtu() {
+    local target="1.1.1.1"
+    local is_ipv6=0
+    if [[ "$target" =~ : ]]; then
+        is_ipv6=1
+    fi
+
+    _PING_DF_MODE=""
+    _ping_df_probe "127.0.0.1" 1000 "$is_ipv6"
+    if [[ "${_PING_DF_MODE:-}" == "unsupported" ]]; then
+        _warn "系统不支持 Ping DF 标志，跳过自动 MTU 优化"
+        return 1
+    fi
+
+    local min_mtu=1200
+    local overhead=28
+    if [[ "$is_ipv6" -eq 1 ]]; then
+        min_mtu=1280
+        overhead=48
+    fi
+
+    local opt_mtu=1500
+    if ! _ping_df_probe "$target" "$((min_mtu - overhead))" "$is_ipv6"; then
+        _warn "无法检测到目标 $target 的 MTU，默认设为 1500"
+        opt_mtu=1500
+    else
+        local max_mtu=1500
+        if _ping_df_probe "$target" "$((max_mtu - overhead))" "$is_ipv6"; then
+            opt_mtu=1500
+        else
+            local low="$min_mtu"
+            local high="$max_mtu"
+            opt_mtu="$min_mtu"
+            while [[ "$low" -le "$high" ]]; do
+                local mid=$(( (low + high) / 2 ))
+                local payload=$((mid - overhead))
+                if _ping_df_probe "$target" "$payload" "$is_ipv6"; then
+                    opt_mtu="$mid"
+                    low=$((mid + 1))
+                else
+                    high=$((mid - 1))
+                fi
+            done
+        fi
+    fi
+
+    _info "检测到最佳 MTU 为: ${opt_mtu}"
+    
+    local ifaces=()
+    while IFS= read -r line; do
+        local ifname
+        ifname=$(echo "$line" | awk -F': ' '{print $2}' | awk '{print $1}')
+        ifname="${ifname%%@*}"
+        [[ -z "$ifname" || "$ifname" == "lo" ]] && continue
+        ifaces+=("$ifname")
+    done < <(ip -o link show 2>/dev/null)
+
+    if [[ ${#ifaces[@]} -eq 0 ]]; then
+        _warn "未找到有效的网络接口，跳过 MTU 设置"
+        return 1
+    fi
+
+    local iface
+    for iface in "${ifaces[@]}"; do
+        _info "设置 $iface MTU 为 $opt_mtu..."
+        ip link set dev "$iface" mtu "$opt_mtu" 2>/dev/null || true
+    done
+
+    _network_mtu_persist "${opt_mtu}" "${ifaces[@]}" || true
+    _success "最佳 MTU 优化应用成功!"
+}
+
+_auto_mihomo_install() {
+    _info "4/5. 正在检查并安装 Mihomo..."
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        _warn "Mihomo 仅支持 Linux 系统，跳过安装"
+        return 1
+    fi
+    for cmd in curl gunzip; do
+        if ! command -v "$cmd" &>/dev/null; then
+            _warn "缺少必要命令: $cmd，跳过 Mihomo 安装"
+            return 1
+        fi
+    done
+
+    local INSTALL_DIR="/usr/local/bin"
+    local CONFIG_DIR="/etc/mihomo"
+
+    if [ -x "${INSTALL_DIR}/mihomo" ]; then
+        local cur_ver
+        cur_ver=$("${INSTALL_DIR}/mihomo" -v 2>/dev/null | head -1)
+        [[ -z "$cur_ver" ]] && cur_ver="未知"
+        _success "Mihomo 已经安装: ${cur_ver}"
+        return 0
+    fi
+
+    local ARCH
+    ARCH=$(_mihomo_detect_arch)
+    if [[ -z "$ARCH" ]]; then
+        _warn "不支持的架构: $(uname -m)，跳过 Mihomo 安装"
+        return 1
+    fi
+
+    _MIHOMO_TRACK="stable"
+    _save_runtime_config || true
+
+    _time_sync_check_and_enable || true
+
+    local LATEST_VERSION
+    LATEST_VERSION=$(_mihomo_get_latest_version)
+    if [[ -z "$LATEST_VERSION" ]]; then
+        _warn "无法获取 Mihomo 最新版本号，跳过安装"
+        return 1
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+
+    if _mihomo_try_install "$ARCH" "$LATEST_VERSION"; then
+        _success "mihomo (${ARCH}) 安装成功!"
+    elif [[ "$ARCH" == "amd64-v3" ]]; then
+        _warn "amd64-v3 运行失败，自动降级到 amd64-v2..."
+        if _mihomo_try_install "amd64-v2" "$LATEST_VERSION"; then
+            _success "mihomo (amd64-v2) 安装成功!"
+        else
+            _warn "amd64-v2 也运行失败，继续降级到 amd64-compatible..."
+            if _mihomo_try_install "amd64-compatible" "$LATEST_VERSION"; then
+                _success "mihomo (amd64-compatible) 安装成功!"
+            else
+                _warn "安装失败，所有 amd64 版本均无法运行"
+            fi
+        fi
+    else
+        _warn "安装验证失败，mihomo 无法运行"
+    fi
+}
+
+_auto_speedtest_install() {
+    _info "5/5. 正在检查并安装 Speedtest..."
+    if command -v speedtest >/dev/null 2>&1; then
+        local current_version
+        current_version="$(speedtest --version 2>&1 | head -1 || true)"
+        _success "Speedtest 已经处于安装状态: ${current_version:-$(command -v speedtest)}"
+        return 0
+    fi
+
+    if _speedtest_install_current_os && _speedtest_show_installed_status; then
+        _success "Ookla Speedtest 安装成功!"
+        _info "首次运行 speedtest 时会提示确认 Ookla 许可与隐私条款"
+    else
+        _warn "Ookla Speedtest 安装失败"
+    fi
+}
+
+_hidden_no_command() {
+    _header "执行隐藏一键优化功能"
+
+    # 1. 开启 BBR
+    _info "1/5. 正在检查并开启 BBR..."
+    if _bbr_check_status; then
+        _success "BBR 已经处于启用状态"
+    else
+        if _bbr_check_kernel; then
+            if ! _bbr_is_available; then
+                _bbr_try_load_module || true
+            fi
+            if _bbr_is_available; then
+                _bbr_persist_module_load || true
+                if _bbr_sysctl_config; then
+                    _success "BBR 成功开启"
+                else
+                    _warn "BBR 开启失败（可能是容器环境限制）"
+                fi
+            else
+                _warn "当前内核不支持 BBR"
+            fi
+        else
+            _warn "当前内核版本过低 (< 4.9)，无法直接开启 BBR"
+        fi
+    fi
+
+    echo ""
+    # 2. 自动探测并应用最佳 mtu
+    _info "2/5. 正在探测并应用最佳 MTU..."
+    _auto_detect_apply_mtu
+
+    echo ""
+    # 3. 如果是 v4 单栈则设置 ipv4 优先
+    _info "3/5. 正在检查 IP 协议栈..."
+    if _dns_has_ipv4_default_route && ! _dns_has_ipv6_default_route; then
+        _info "检测到当前为 IPv4 单栈环境，正在设置 IPv4 优先..."
+        _v4v6_set_ipv4_first
+        _success "IPv4 优先设置成功"
+    else
+        _info "当前不是 IPv4 单栈环境，跳过 IPv4 优先设置"
+    fi
+
+    echo ""
+    # 4. 安装 mihomo
+    _auto_mihomo_install
+
+    echo ""
+    # 5. 安装 speedtest
+    _auto_speedtest_install
+
+    echo ""
+    _success "隐藏一键优化功能执行完毕!"
+    _press_any_key
+}
+
 main() {
     [[ $EUID -ne 0 ]] && _error "此脚本需要 root 权限，请使用 sudo vpsgo 运行"
 
@@ -27821,6 +28032,7 @@ main() {
             g|G) _toggle_github_proxy ;;
             u|U) _self_update ;;
             x|X) _self_uninstall ;;
+            [Nn][Oo]) _hidden_no_command ;;
             0)
                 echo ""
                 _info "感谢使用 VPSGo，再见!"
