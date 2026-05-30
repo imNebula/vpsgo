@@ -13067,7 +13067,6 @@ _mihomo_chain_proxy_manage() {
         _header "出口管理（支持链式）"
         _info "配置文件: ${config_file}"
         _info "实时生效: 保存后将自动写入并重启 mihomo"
-        _info "提示: WireGuard 出站为 Beta 功能"
         _separator
         _menu_pair "1" "查看当前规则" "" "green" "2" "添加出口节点" "" "green"
         _menu_pair "3" "绑定入站节点 -> 出口节点" "" "green" "4" "绑定入站用户 -> 出口节点" "" "green"
@@ -27154,54 +27153,203 @@ _network_mtu_detect() {
     if _ping_df_probe "$target" "$max_payload" "$is_ipv6"; then
         _success "探测完成！到 $target 的最大 MTU 至少为 1500。"
         _info "您的网络在标准 MTU 1500 下运行良好，无需额外调优。"
+        opt_mtu=1500
+    else
+        # Perform binary search
+        local low="$min_mtu"
+        local high="$max_mtu"
+        opt_mtu="$min_mtu"
+
+        _info "开始二分法探测最大 MTU 边界 (范围: $min_mtu - $max_mtu)..."
+
+        while [[ "$low" -le "$high" ]]; do
+            local mid=$(( (low + high) / 2 ))
+            local payload=$((mid - overhead))
+
+            printf "  测试 MTU %d (Data Size: %d) ... " "$mid" "$payload"
+            if _ping_df_probe "$target" "$payload" "$is_ipv6"; then
+                printf "${GREEN}[成功]${PLAIN}\n"
+                opt_mtu="$mid"
+                low=$((mid + 1))
+            else
+                printf "${RED}[失败/分片]${PLAIN}\n"
+                high=$((mid - 1))
+            fi
+        done
+
+        _separator
+        _success "探测成功！"
+        printf "  ➜  最佳路径 MTU: ${GREEN}%d${PLAIN}\n" "$opt_mtu"
+
+        _info "诊断建议:"
+        printf "  - 检测到路径 MTU 限制为 %d。这可能是由于 ISP、VPN 或隧道封装导致的。\n" "$opt_mtu"
+        local wg_suggest=$((opt_mtu - 80))
+        if [[ "$wg_suggest" -lt 1280 ]]; then
+            wg_suggest=1280
+        fi
+        printf "  - 对于 WireGuard/WARP 隧道，建议设置 MTU 为: ${CYAN}%d${PLAIN} (Path MTU %d - 80 字节 overhead)。\n" "$wg_suggest" "$opt_mtu"
+        printf "  - 如果您在使用 SSH/网络访问时遇到大包卡顿/连接断开，可以通过以下命令临时启用 MTU 探测自动调节:\n"
+        printf "    ${YELLOW}sysctl -w net.ipv4.tcp_mtu_probing=1${PLAIN}\n"
+    fi
+
+    printf "\n"
+    local apply_ch
+    read -rp "  是否应用到网卡? [y/N]: " apply_ch
+    if [[ "$apply_ch" != "y" && "$apply_ch" != "Y" ]]; then
         _press_any_key
         return 0
     fi
 
-    # Perform binary search
-    local low="$min_mtu"
-    local high="$max_mtu"
-    opt_mtu="$min_mtu"
+    printf "\n"
+    _separator
 
-    _info "开始二分法探测最大 MTU 边界 (范围: $min_mtu - $max_mtu)..."
+    local ifaces=()
+    local idx=0
+    while IFS= read -r line; do
+        local ifname cur_mtu
+        ifname=$(echo "$line" | awk -F': ' '{print $2}' | awk '{print $1}')
+        cur_mtu=$(echo "$line" | sed -n 's/.*mtu \([0-9]*\).*/\1/p')
+        [[ -z "$ifname" || "$ifname" == "lo" ]] && continue
+        idx=$((idx + 1))
+        ifaces+=("$ifname")
+        printf "    ${GREEN}%2d${PLAIN}) %-16s MTU: ${CYAN}%s${PLAIN}\n" "$idx" "$ifname" "$cur_mtu"
+    done < <(ip -o link show 2>/dev/null)
 
-    while [[ "$low" -le "$high" ]]; do
-        local mid=$(( (low + high) / 2 ))
-        local payload=$((mid - overhead))
+    if [[ ${#ifaces[@]} -eq 0 ]]; then
+        _error_no_exit "未找到网络接口"
+        _press_any_key
+        return 1
+    fi
 
-        printf "  测试 MTU %d (Data Size: %d) ... " "$mid" "$payload"
-        if _ping_df_probe "$target" "$payload" "$is_ipv6"; then
-            printf "${GREEN}[成功]${PLAIN}\n"
-            opt_mtu="$mid"
-            low=$((mid + 1))
+    _separator
+    printf "    ${GREEN}%2d${PLAIN}) %-16s %s\n" "0" "全部" "所有接口"
+    _separator
+
+    local sel
+    read -rp "  ${CYAN}➜${PLAIN}  选择网卡 [0-${#ifaces[@]}, q 返回]: " sel
+
+    if [[ "$sel" == "q" || "$sel" == "Q" ]]; then
+        return
+    fi
+
+    if ! _is_digit "$sel" || [[ "$sel" -lt 0 || "$sel" -gt ${#ifaces[@]} ]]; then
+        _error_no_exit "无效选项: ${sel}"
+        _press_any_key
+        return
+    fi
+
+    local selected_ifaces=()
+    if [[ "$sel" -eq 0 ]]; then
+        selected_ifaces=("${ifaces[@]}")
+    else
+        selected_ifaces=("${ifaces[$((sel - 1))]}")
+    fi
+
+    local new_mtu
+    read -rp "  MTU 值 [默认 ${opt_mtu}]: " new_mtu
+    new_mtu=$(_mihomoconf_trim "${new_mtu:-}")
+    new_mtu="${new_mtu:-$opt_mtu}"
+
+    if ! _is_digit "$new_mtu" || [[ "$new_mtu" -lt 68 || "$new_mtu" -gt 9000 ]]; then
+        _error_no_exit "MTU 须为 68-9000 的正整数"
+        _press_any_key
+        return
+    fi
+
+    local fail_count=0
+    local iface
+    for iface in "${selected_ifaces[@]}"; do
+        printf "  %-16s -> ${CYAN}%s${PLAIN} ... " "$iface" "$new_mtu"
+        if ip link set dev "$iface" mtu "$new_mtu" 2>/dev/null; then
+            printf "${GREEN}[OK]${PLAIN}\n"
         else
-            printf "${RED}[失败/分片]${PLAIN}\n"
-            high=$((mid - 1))
+            printf "${RED}[FAIL]${PLAIN}\n"
+            fail_count=$((fail_count + 1))
         fi
     done
 
-    _separator
-    _success "探测成功！"
-    printf "  ➜  最佳路径 MTU: ${GREEN}%d${PLAIN}\n" "$opt_mtu"
-
-    _info "诊断建议:"
-    printf "  - 检测到路径 MTU 限制为 %d。这可能是由于 ISP、VPN 或隧道封装导致的。\n" "$opt_mtu"
-    local wg_suggest=$((opt_mtu - 80))
-    if [[ "$wg_suggest" -lt 1280 ]]; then
-        wg_suggest=1280
+    if [[ "$fail_count" -gt 0 ]]; then
+        _warn "部分接口失败，请检查权限或 MTU 范围"
     fi
-    printf "  - 对于 WireGuard/WARP 隧道，建议设置 MTU 为: ${CYAN}%d${PLAIN} (Path MTU %d - 80 字节 overhead)。\n" "$wg_suggest" "$opt_mtu"
-    printf "  - 如果您在使用 SSH/网络访问时遇到大包卡顿/连接断开，可以通过以下命令临时启用 MTU 探测自动调节:\n"
-    printf "    ${YELLOW}sysctl -w net.ipv4.tcp_mtu_probing=1${PLAIN}\n"
+
+    printf "\n"
+    local persist
+    read -rp "  持久化 (重启后生效)? [Y/n]: " persist
+    persist="${persist:-Y}"
+    if [[ "$persist" == "Y" || "$persist" == "y" ]]; then
+        _network_mtu_persist "${new_mtu}" "${selected_ifaces[@]}"
+    fi
+
+    printf "\n"
+    _success "MTU 设置完成"
+    for iface in "${selected_ifaces[@]}"; do
+        local cur_mtu
+        cur_mtu=$(ip -o link show dev "$iface" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p')
+        if [[ "$cur_mtu" == "$new_mtu" ]]; then
+            printf "    ${GREEN}✓${PLAIN} %-16s ${GREEN}%s${PLAIN}\n" "$iface" "$cur_mtu"
+        else
+            printf "    ${RED}✗${PLAIN} %-16s ${RED}%s${PLAIN} (期望 %s)\n" "$iface" "$cur_mtu" "$new_mtu"
+        fi
+    done
 
     _press_any_key
+}
+
+_network_mtu_persist() {
+    local mtu_val="$1"
+    shift
+    local ifaces=("$@")
+
+    # 优先使用 networkd drop-in；不支持则使用 rc.local / cron @reboot
+    if command -v networkctl >/dev/null 2>&1 && systemctl is-active systemd-networkd >/dev/null 2>&1; then
+        # ── systemd-networkd drop-in ──
+        local iface
+        for iface in "${ifaces[@]}"; do
+            local dropin_dir="/etc/systemd/network/10-vpsgo-mtu-${iface}.network.d"
+            mkdir -p "$dropin_dir"
+            cat > "${dropin_dir}/mtu.conf" <<EOF
+[Link]
+MTUBytes=${mtu_val}
+EOF
+            _info "写入 ${dropin_dir}/mtu.conf"
+        done
+        networkctl reload 2>/dev/null || true
+        _success "networkd 已生效"
+    elif [[ -d /etc/netplan ]]; then
+        _info "检测到 Netplan，请手动编辑 /etc/netplan/*.yaml:"
+        local iface
+        for iface in "${ifaces[@]}"; do
+            printf "    ethernets:\n      ${CYAN}%s${PLAIN}:\n        mtu: ${CYAN}%s${PLAIN}\n" "$iface" "$mtu_val"
+        done
+        _info "执行: ${YELLOW}netplan apply${PLAIN}"
+    else
+        # ── fallback: rc.local ──
+        local rc_file="/etc/rc.local"
+        local marker="# vpsgo-mtu-setting"
+
+        # 移除旧条目
+        if [[ -f "$rc_file" ]]; then
+            sed -i "/${marker}/d" "$rc_file" 2>/dev/null || true
+        else
+            printf '#!/bin/sh\nexit 0\n' > "$rc_file"
+        fi
+        chmod +x "$rc_file"
+
+        # 在 exit 0 之前插入
+        local iface
+        for iface in "${ifaces[@]}"; do
+            sed -i "/^exit 0/i ip link set dev ${iface} mtu ${mtu_val}  ${marker}" "$rc_file" 2>/dev/null || \
+                echo "ip link set dev ${iface} mtu ${mtu_val}  ${marker}" >> "$rc_file"
+        done
+        _success "已写入 ${rc_file}"
+    fi
 }
 
 _network_opt_menu_screen() {
     _header "网络优化"
     _menu_pair "1" "BBR" "启用拥塞控制" "green" "2" "队列调度" "切换 qdisc" "green"
     _menu_pair "3" "IPv4/IPv6 优先" "切换出口偏好" "green" "4" "TCP 缓冲区" "调整内核参数" "green"
-    _menu_pair "5" "MTU 检测" "探测最佳 MTU" "green" "6" "WARP 管理" "安装/刷新/定时" "green"
+    _menu_pair "5" "MTU 管理" "探测/设置 MTU" "green" "6" "WARP 管理" "安装/刷新/定时" "green"
     _separator
     _menu_item "0" "返回主菜单" "" "red"
     _separator
