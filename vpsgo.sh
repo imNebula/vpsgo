@@ -13714,11 +13714,23 @@ _mihomo_chain_proxy_manage() {
                         esac
                         ;;
                     3)
-                        # 1. 自动识别包管理器并安装完整依赖（针对 Alpine / Ubuntu / Debian，增加 MTU 检测所需的 ping）
+                        # 1. 自动识别包管理器并安装完整依赖（针对 Alpine / Ubuntu / Debian / CentOS / Arch，包含 MTU 检测所需的 ping）
                         if command -v apk >/dev/null 2>&1; then
                             apk update && apk add curl jq wireguard-tools iputils
                         elif command -v apt-get >/dev/null 2>&1; then
                             sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools iputils-ping
+                        elif command -v dnf >/dev/null 2>&1; then
+                            sudo dnf install -y curl jq wireguard-tools iputils
+                        elif command -v yum >/dev/null 2>&1; then
+                            sudo yum install -y curl jq wireguard-tools iputils
+                        elif command -v pacman >/dev/null 2>&1; then
+                            sudo pacman -Sy --noconfirm curl jq wireguard-tools iputils
+                        fi
+                        
+                        if ! command -v jq >/dev/null 2>&1 || ! command -v wg >/dev/null 2>&1; then
+                            _error_no_exit "jq 或 wg (wireguard-tools) 未安装成功，请手动安装后重试"
+                            _press_any_key
+                            continue
                         fi
 
                         # 2. 本地生成 WireGuard 密钥对
@@ -13761,9 +13773,9 @@ EOF
                         fi
 
                         # 7. 提取并自动清洗 IP 地址（防带掩码格式错乱）
-                        PATH_V4=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v4 // empty' | cut -d'/' -f1)
-                        PATH_V6=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v6 // empty' | cut -d'/' -f1)
-                        CLIENT_ID_B64=$(echo "$RESPONSE" | jq -r '.config.client_id // empty')
+                        PATH_V4=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v4 // empty' | cut -d'/' -f1 | grep -v '^null$')
+                        PATH_V6=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v6 // empty' | cut -d'/' -f1 | grep -v '^null$')
+                        CLIENT_ID_B64=$(echo "$RESPONSE" | jq -r '.config.client_id // empty' | grep -v '^null$')
 
                         # 8. 完美兼容 Alpine (Busybox) 的 Hex 转换方式解析 Reserved 字段
                         if [[ -z "$CLIENT_ID_B64" || "$CLIENT_ID_B64" == "null" ]]; then
