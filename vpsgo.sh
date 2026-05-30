@@ -27208,6 +27208,7 @@ _network_mtu_detect() {
     while IFS= read -r line; do
         local ifname cur_mtu
         ifname=$(echo "$line" | awk -F': ' '{print $2}' | awk '{print $1}')
+        ifname="${ifname%%@*}"
         cur_mtu=$(echo "$line" | sed -n 's/.*mtu \([0-9]*\).*/\1/p')
         [[ -z "$ifname" || "$ifname" == "lo" ]] && continue
         idx=$((idx + 1))
