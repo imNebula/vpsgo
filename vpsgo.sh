@@ -5021,6 +5021,8 @@ _mihomo_setup() {
         _press_any_key
         return
     fi
+    _ensure_curl || true
+    _ensure_gunzip || true
     for cmd in curl gunzip; do
         if ! command -v "$cmd" &>/dev/null; then
             _error_no_exit "缺少必要命令: $cmd，请先安装"
@@ -15645,6 +15647,7 @@ _iperf3_setup() {
 _nodequality_setup() {
     _header "NodeQuality 网络质量测试"
 
+    _ensure_curl || true
     if ! command -v curl >/dev/null 2>&1; then
         _error_no_exit "需要 curl 命令，请先安装"
         _press_any_key
@@ -16678,6 +16681,7 @@ _singbox_install_alpine() {
 _singbox_setup() {
     _header "sing-box 安装"
 
+    _ensure_curl || true
     if ! command -v curl >/dev/null 2>&1; then
         _error_no_exit "需要 curl 命令，请先安装"
         _press_any_key
@@ -17495,6 +17499,7 @@ _snell_install_latest_core() {
         _error_no_exit "Snell 仅支持 Linux 系统"
         return 1
     fi
+    _ensure_curl || true
     if ! command -v curl >/dev/null 2>&1; then
         _error_no_exit "缺少必要命令: curl，请先安装"
         return 1
@@ -18318,6 +18323,8 @@ _realm_install_latest_core() {
         _error_no_exit "Realm 仅支持 Linux 系统"
         return 1
     fi
+    _ensure_curl || true
+    _ensure_tar || true
     for cmd in curl tar; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             _error_no_exit "缺少必要命令: $cmd，请先安装"
@@ -19597,6 +19604,8 @@ _ssrust_install_latest_core() {
         _error_no_exit "shadowsocks-rust 仅支持 Linux 系统"
         return 1
     fi
+    _ensure_curl || true
+    _ensure_tar || true
     for cmd in curl tar; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             _error_no_exit "缺少必要命令: $cmd，请先安装"
@@ -23719,6 +23728,118 @@ _dns_apply_permanent() {
     return 0
 }
 
+_ensure_curl() {
+    if command -v curl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _warn "未检测到 curl，尝试自动安装..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq || true
+        apt-get install -y -qq curl ca-certificates
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl ca-certificates
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl ca-certificates
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm curl ca-certificates
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache curl ca-certificates
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y curl ca-certificates
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+        _info "curl 安装完成"
+        return 0
+    fi
+    return 1
+}
+
+_ensure_tar() {
+    if command -v tar >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _warn "未检测到 tar，尝试自动安装..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq || true
+        apt-get install -y -qq tar
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y tar
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y tar
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm tar
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache tar
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y tar
+    fi
+
+    if command -v tar >/dev/null 2>&1; then
+        _info "tar 安装完成"
+        return 0
+    fi
+    return 1
+}
+
+_ensure_gunzip() {
+    if command -v gunzip >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _warn "未检测到 gunzip，尝试自动安装..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq || true
+        apt-get install -y -qq gzip
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y gzip
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y gzip
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm gzip
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache gzip
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y gzip
+    fi
+
+    if command -v gunzip >/dev/null 2>&1; then
+        _info "gunzip 安装完成"
+        return 0
+    fi
+    return 1
+}
+
+_dns_ensure_dig() {
+    if command -v dig >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _warn "未检测到 dig，尝试自动安装 DNS 测速工具..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq || true
+        apt-get install -y -qq dnsutils
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y bind-utils
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y bind-utils
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm bind
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache bind-tools
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y bind-utils
+    fi
+
+    if command -v dig >/dev/null 2>&1; then
+        _info "dig 安装完成"
+        return 0
+    fi
+    return 1
+}
+
 _dns_ensure_lookup_tool() {
     if command -v dig >/dev/null 2>&1 || command -v nslookup >/dev/null 2>&1; then
         return 0
@@ -23964,7 +24085,7 @@ _dns_benchmark_mainstream() {
     _dns_is_ipv6_only_host && _info "检测到 IPv6-only 网络，建议优先测试 DNS64 或 IPv6 DNS 组。"
     _warn "结果受线路、运营商缓存、网络波动影响，建议多测几次取平均。"
 
-    _dns_ensure_lookup_tool || true
+    _dns_ensure_dig || true
     if ! command -v dig >/dev/null 2>&1; then
         _error_no_exit "测速依赖 dig，当前环境不可用，请先安装后重试。"
         _press_any_key
