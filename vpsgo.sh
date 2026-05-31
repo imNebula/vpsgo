@@ -27119,16 +27119,40 @@ _network_mtu_detect() {
     _PING_DF_MODE=""
     _ping_df_probe "127.0.0.1" 1000 "$is_ipv6"
     if [[ "${_PING_DF_MODE:-}" == "unsupported" ]]; then
-        _error_no_exit "当前系统不支持设置 Ping DF (Don't Fragment) 标志，无法进行 MTU 探测。"
+        _warn "当前 ping 不支持设置 DF (Don't Fragment) 标志，正在尝试自动安装 iputils-ping..."
+        local _install_ok=0
         if command -v apk >/dev/null 2>&1; then
-            _info "提示: 您似乎正在使用 Alpine Linux, 可以通过安装 iputils-ping 支持此功能:"
-            _info "  apk add iputils"
+            _info "检测到 Alpine Linux，正在执行: apk add --no-cache iputils"
+            if apk add --no-cache iputils >/dev/null 2>&1; then
+                _install_ok=1
+            else
+                _error_no_exit "安装 iputils 失败，请手动执行: apk add iputils"
+            fi
         elif command -v apt-get >/dev/null 2>&1; then
-            _info "提示: 可以通过安装 iputils-ping 支持此功能:"
-            _info "  apt-get install -y iputils-ping"
+            _info "正在执行: apt-get install -y iputils-ping"
+            if apt-get install -y iputils-ping >/dev/null 2>&1; then
+                _install_ok=1
+            else
+                _error_no_exit "安装 iputils-ping 失败，请手动执行: apt-get install -y iputils-ping"
+            fi
+        else
+            _error_no_exit "无法识别包管理器，请手动安装支持 DF 标志的 ping 工具后重试。"
         fi
-        _press_any_key
-        return 1
+
+        if [[ "$_install_ok" -eq 1 ]]; then
+            _success "安装成功，重新检测 DF 支持..."
+            _PING_DF_MODE=""
+            _ping_df_probe "127.0.0.1" 1000 "$is_ipv6"
+        fi
+
+        if [[ "${_PING_DF_MODE:-}" == "unsupported" ]]; then
+            _error_no_exit "当前系统仍不支持设置 Ping DF (Don't Fragment) 标志，无法进行 MTU 探测。"
+            _press_any_key
+            return 1
+        elif [[ "$_install_ok" -eq 0 ]]; then
+            _press_any_key
+            return 1
+        fi
     fi
 
     local min_mtu=1200
