@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.16"
+VERSION="4.99"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -5184,7 +5184,7 @@ _mihomoconf_check_reality_domain() {
     
     # 1. 检测 HTTP/2 (使用 GET 且跟随重定向保证兼容性)
     local http_ver
-    http_ver=$(curl -sL -o /dev/null -w "%{http_version}\n" --connect-timeout 3 "https://${domain}" 2>/dev/null)
+    http_ver=$(curl -k -sL -o /dev/null -w "%{http_version}\n" --connect-timeout 3 "https://${domain}" 2>/dev/null)
     if [[ "$?" -eq 0 && "$http_ver" == "2" ]]; then
         has_h2=1
     fi
@@ -5195,7 +5195,7 @@ _mihomoconf_check_reality_domain() {
     fi
     
     # 2. 检测 TLS 1.3
-    if curl -Iv "https://${domain}" 2>&1 | grep -E -q "TLSv1.3|SSL connection using TLSv1.3"; then
+    if curl -k -Iv "https://${domain}" 2>&1 | grep -E -i -q "using TLSv? ?1\.3"; then
         has_tls13=1
     fi
     
@@ -5391,7 +5391,7 @@ _mihomoconf_test_reality_domains_auto() {
         if [[ "$exit_code" -le 1 ]]; then
             # 2. 测试延迟
             local latency
-            latency=$(curl -o /dev/null -s -w "%{time_connect}\n" --connect-timeout 2 "https://${d}" 2>/dev/null)
+            latency=$(curl -k -o /dev/null -s -w "%{time_connect}\n" --connect-timeout 2 "https://${d}" 2>/dev/null)
             if [[ "$?" -eq 0 && -n "$latency" && "$latency" != "0.000000" && "$latency" != "0.000" ]]; then
                 local latency_ms
                 latency_ms=$(awk "BEGIN {print int($latency * 1000)}")
@@ -5669,6 +5669,83 @@ _mihomoconf_gen_vless_ws_link() {
     echo "vless://${uuid}@${server}:${port}${query}#${encoded_name}"
 }
 
+_mihomoconf_gen_vless_grpc_link() {
+    local server="$1" port="$2" uuid="$3" name="$4" serviceName="$5" tls="$6" host="$7"
+    local encoded_name query=""
+    local -a params=()
+
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    params+=("encryption=none")
+    params+=("type=grpc")
+    [[ -n "$serviceName" ]] && params+=("serviceName=$(_mihomoconf_urlencode "$serviceName")")
+    if [[ "$tls" == "true" ]]; then
+        params+=("security=tls")
+        [[ -n "$host" ]] && params+=("sni=$(_mihomoconf_urlencode "$host")")
+    else
+        params+=("security=none")
+    fi
+    [[ -n "$host" ]] && params+=("host=$(_mihomoconf_urlencode "$host")")
+
+    if (( ${#params[@]} > 0 )); then
+        local IFS='&'
+        query="?${params[*]}"
+    fi
+    echo "vless://${uuid}@${server}:${port}${query}#${encoded_name}"
+}
+
+_mihomoconf_gen_vmess_link() {
+    local server="$1" port="$2" uuid="$3" name="$4" net="${5:-tcp}" path="${6:-}" tls="${7:-false}" host="${8:-}"
+    local tls_str=""
+    [[ "$tls" == "true" ]] && tls_str="tls" || tls_str=""
+    local type_val="none"
+    local json_str
+    json_str=$(cat <<EOF
+{
+  "v": "2",
+  "ps": "$name",
+  "add": "$server",
+  "port": "$port",
+  "id": "$uuid",
+  "aid": "0",
+  "scy": "auto",
+  "net": "$net",
+  "type": "$type_val",
+  "host": "$host",
+  "path": "$path",
+  "tls": "$tls_str",
+  "sni": "$host"
+}
+EOF
+)
+    local encoded
+    encoded=$(echo -n "$json_str" | base64 | tr -d '\n')
+    echo "vmess://${encoded}"
+}
+
+_mihomoconf_gen_trojan_link() {
+    local server="$1" port="$2" password="$3" name="$4" net="${5:-tcp}" path="${6:-}" tls="${7:-true}" host="${8:-}"
+    local encoded_name query=""
+    local -a params=()
+
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    params+=("type=${net}")
+    if [[ "$tls" == "true" ]]; then
+        [[ -n "$host" ]] && params+=("sni=$(_mihomoconf_urlencode "$host")")
+    fi
+    if [[ "$net" == "ws" ]]; then
+        [[ -n "$path" ]] && params+=("path=$(_mihomoconf_urlencode "$path")")
+        [[ -n "$host" ]] && params+=("host=$(_mihomoconf_urlencode "$host")")
+    elif [[ "$net" == "grpc" ]]; then
+        [[ -n "$path" ]] && params+=("serviceName=$(_mihomoconf_urlencode "$path")")
+        [[ -n "$host" ]] && params+=("host=$(_mihomoconf_urlencode "$host")")
+    fi
+
+    if (( ${#params[@]} > 0 )); then
+        local IFS='&'
+        query="?${params[*]}"
+    fi
+    echo "trojan://${password}@${server}:${port}${query}#${encoded_name}"
+}
 
 _mihomoconf_gen_socks_link() {
     local server="$1" port="$2" username="$3" password="$4" name="$5"
@@ -5794,8 +5871,26 @@ _mihomoconf_has_listener_type() {
             if (type_val == "vless") {
                 if (is_ws) {
                     resolved_type = "vless-ws"
+                } else if (is_grpc) {
+                    resolved_type = "vless-grpc"
                 } else {
                     resolved_type = "vless"
+                }
+            } else if (type_val == "vmess") {
+                if (is_ws) {
+                    resolved_type = "vmess-ws"
+                } else if (is_grpc) {
+                    resolved_type = "vmess-grpc"
+                } else {
+                    resolved_type = "vmess"
+                }
+            } else if (type_val == "trojan") {
+                if (is_ws) {
+                    resolved_type = "trojan-ws"
+                } else if (is_grpc) {
+                    resolved_type = "trojan-grpc"
+                } else {
+                    resolved_type = "trojan"
                 }
             }
             if (resolved_type == t) {
@@ -5803,6 +5898,7 @@ _mihomoconf_has_listener_type() {
             }
             in_item = 0
             is_ws = 0
+            is_grpc = 0
             type_val = ""
         }
         BEGIN {
@@ -5810,6 +5906,7 @@ _mihomoconf_has_listener_type() {
             in_item=0
             found=0
             is_ws=0
+            is_grpc=0
             type_val=""
         }
         /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
@@ -5826,8 +5923,11 @@ _mihomoconf_has_listener_type() {
             next
         }
         in_item {
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-vless-type:[[:space:]]*ws/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
+            }
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
+                is_grpc=1
             }
             if ($0 ~ /^    type:/) {
                 line=$0
@@ -5864,8 +5964,26 @@ _mihomoconf_list_listeners() {
             if (type_val == "vless") {
                 if (is_ws) {
                     resolved_type = "vless-ws"
+                } else if (is_grpc) {
+                    resolved_type = "vless-grpc"
                 } else {
                     resolved_type = "vless"
+                }
+            } else if (type_val == "vmess") {
+                if (is_ws) {
+                    resolved_type = "vmess-ws"
+                } else if (is_grpc) {
+                    resolved_type = "vmess-grpc"
+                } else {
+                    resolved_type = "vmess"
+                }
+            } else if (type_val == "trojan") {
+                if (is_ws) {
+                    resolved_type = "trojan-ws"
+                } else if (is_grpc) {
+                    resolved_type = "trojan-grpc"
+                } else {
+                    resolved_type = "trojan"
                 }
             }
             if (resolved_type == t) {
@@ -5877,6 +5995,7 @@ _mihomoconf_list_listeners() {
             }
             in_item = 0
             is_ws = 0
+            is_grpc = 0
             type_val = ""
             name = ""
             tag = ""
@@ -5886,6 +6005,7 @@ _mihomoconf_list_listeners() {
             in_listeners=0
             in_item=0
             is_ws=0
+            is_grpc=0
             type_val=""
             name=""
             tag=""
@@ -5908,8 +6028,11 @@ _mihomoconf_list_listeners() {
             next
         }
         in_item {
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-vless-type:[[:space:]]*ws/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
+            }
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
+                is_grpc=1
             }
             if ($0 ~ /^    type:/) {
                 line=$0
@@ -5958,8 +6081,26 @@ _mihomoconf_remove_listeners_by_type() {
             if (type_val == "vless") {
                 if (is_ws) {
                     resolved_type = "vless-ws"
+                } else if (is_grpc) {
+                    resolved_type = "vless-grpc"
                 } else {
                     resolved_type = "vless"
+                }
+            } else if (type_val == "vmess") {
+                if (is_ws) {
+                    resolved_type = "vmess-ws"
+                } else if (is_grpc) {
+                    resolved_type = "vmess-grpc"
+                } else {
+                    resolved_type = "vmess"
+                }
+            } else if (type_val == "trojan") {
+                if (is_ws) {
+                    resolved_type = "trojan-ws"
+                } else if (is_grpc) {
+                    resolved_type = "trojan-grpc"
+                } else {
+                    resolved_type = "trojan"
                 }
             }
             if (resolved_type == t) {
@@ -5977,6 +6118,7 @@ _mihomoconf_remove_listeners_by_type() {
             skip_item=0
             item_buf=""
             is_ws=0
+            is_grpc=0
             type_val=""
         }
         /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
@@ -6000,13 +6142,17 @@ _mihomoconf_remove_listeners_by_type() {
             in_item=1
             item_buf=$0 "\n"
             is_ws=0
+            is_grpc=0
             type_val=""
             next
         }
         in_item {
             item_buf=item_buf $0 "\n"
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-vless-type:[[:space:]]*ws/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
+            }
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
+                is_grpc=1
             }
             if ($0 ~ /^    type:/) {
                 line=$0
@@ -6072,6 +6218,18 @@ _mihomoconf_read_listener_rows() {
                     actual_type = "vless-ws"
                 } else if (vless_type == "grpc") {
                     actual_type = "vless-grpc"
+                }
+            } else if (type == "vmess") {
+                if (vless_type == "ws") {
+                    actual_type = "vmess-ws"
+                } else if (vless_type == "grpc") {
+                    actual_type = "vmess-grpc"
+                }
+            } else if (type == "trojan") {
+                if (vless_type == "ws") {
+                    actual_type = "trojan-ws"
+                } else if (vless_type == "grpc") {
+                    actual_type = "trojan-grpc"
                 }
             }
             printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
@@ -6226,45 +6384,45 @@ _mihomoconf_read_listener_rows() {
             vless_client_fingerprint=unquote(trim(line))
             next
         }
-        /^[[:space:]]+#[[:space:]]*vpsgo-vless-type:/ {
+        /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:/ {
             line=$0
-            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-type:[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*/, "", line)
             vless_type=unquote(trim(line))
             next
         }
-        /^[[:space:]]+#[[:space:]]*vpsgo-vless-ws-path:/ {
+        /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-path:/ {
             line=$0
-            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-ws-path:[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-path:[[:space:]]*/, "", line)
             vless_ws_path=unquote(trim(line))
             next
         }
-        /^[[:space:]]+#[[:space:]]*vpsgo-vless-ws-tls:/ {
+        /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-tls:/ {
             line=$0
-            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-ws-tls:[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-tls:[[:space:]]*/, "", line)
             vless_ws_tls=unquote(trim(line))
             next
         }
-        /^[[:space:]]+#[[:space:]]*vpsgo-vless-ws-host:/ {
+        /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-host:/ {
             line=$0
-            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-ws-host:[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-host:[[:space:]]*/, "", line)
             vless_ws_host=unquote(trim(line))
             next
         }
-        /^[[:space:]]+#[[:space:]]*vpsgo-vless-grpc-service-name:/ {
+        /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-service-name:/ {
             line=$0
-            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-grpc-service-name:[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-service-name:[[:space:]]*/, "", line)
             vless_grpc_service_name=unquote(trim(line))
             next
         }
-        /^[[:space:]]+#[[:space:]]*vpsgo-vless-grpc-tls:/ {
+        /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-tls:/ {
             line=$0
-            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-grpc-tls:[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-tls:[[:space:]]*/, "", line)
             vless_ws_tls=unquote(trim(line))
             next
         }
-        /^[[:space:]]+#[[:space:]]*vpsgo-vless-grpc-host:/ {
+        /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-host:/ {
             line=$0
-            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-grpc-host:[[:space:]]*/, "", line)
+            gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-host:[[:space:]]*/, "", line)
             vless_ws_host=unquote(trim(line))
             next
         }
@@ -7224,7 +7382,7 @@ _mihomoconf_add_socks_listener_user() {
             if (resolved_tag == "") resolved_tag=item_name
             if (resolved_tag == target || item_name == target) {
                 matched=1
-                if (item_type != "socks") {
+                if (item_type != "socks" && item_type != "trojan") {
                     unsupported=1
                     print_item()
                 } else {
@@ -7423,7 +7581,7 @@ _mihomoconf_add_vless_listener_user() {
             if (resolved_tag == "") resolved_tag=item_name
             if (resolved_tag == target || item_name == target) {
                 matched=1
-                if (item_type != "vless") {
+                if (item_type != "vless" && item_type != "vmess") {
                     unsupported=1
                     print_item()
                 } else {
@@ -7996,17 +8154,39 @@ _mihomoconf_setup() {
 
     local WRITE_MODE="new"
     local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n" ENABLE_TUIC="n" ENABLE_SOCKS="n" ENABLE_VLESS_WS="n"
+    local ENABLE_VMESS="n" ENABLE_VMESS_WS="n" ENABLE_VMESS_GRPC="n"
+    local ENABLE_VLESS_GRPC="n"
+    local ENABLE_TROJAN="n" ENABLE_TROJAN_WS="n" ENABLE_TROJAN_GRPC="n"
+
     local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0 TUIC_COUNT=0 SOCKS_COUNT=0 VLESS_WS_COUNT=0
+    local VMESS_COUNT=0 VMESS_WS_COUNT=0 VMESS_GRPC_COUNT=0
+    local VLESS_GRPC_COUNT=0
+    local TROJAN_COUNT=0 TROJAN_WS_COUNT=0 TROJAN_GRPC_COUNT=0
+
     local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n" TUIC_REPLACE="n" SOCKS_REPLACE="n" VLESS_WS_REPLACE="n"
+    local VMESS_REPLACE="n" VMESS_WS_REPLACE="n" VMESS_GRPC_REPLACE="n"
+    local VLESS_GRPC_REPLACE="n"
+    local TROJAN_REPLACE="n" TROJAN_WS_REPLACE="n" TROJAN_GRPC_REPLACE="n"
 
     local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
     local SS_CIPHER=""
-    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="1"
+    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0"
     local -a ANYTLS_PORTS=() ANYTLS_TAGS=() ANYTLS_USER_ROWS=()
     local ANYTLS_SNI=""
+    
+    local -a VMESS_PORTS=() VMESS_TAGS=() VMESS_USER_ROWS=()
+    local -a VMESS_WS_PORTS=() VMESS_WS_TAGS=() VMESS_WS_USER_ROWS=() VMESS_WS_PATHS=() VMESS_WS_TLS_OPTS=() VMESS_WS_HOSTS=()
+    local -a VMESS_GRPC_PORTS=() VMESS_GRPC_TAGS=() VMESS_GRPC_USER_ROWS=() VMESS_GRPC_SERVICE_NAMES=() VMESS_GRPC_TLS_OPTS=() VMESS_GRPC_HOSTS=()
+
     local -a VLESS_PORTS=() VLESS_TAGS=() VLESS_USER_ROWS=() VLESS_PRIVATE_KEYS=() VLESS_PUBLIC_KEYS=() VLESS_SHORT_IDS=()
     local VLESS_REALITY_SERVER_NAME="" VLESS_FLOW="xtls-rprx-vision" VLESS_CLIENT_FINGERPRINT="chrome"
     local -a VLESS_WS_PORTS=() VLESS_WS_TAGS=() VLESS_WS_USER_ROWS=() VLESS_WS_PATHS=() VLESS_WS_TLS_OPTS=() VLESS_WS_HOSTS=()
+    local -a VLESS_GRPC_PORTS=() VLESS_GRPC_TAGS=() VLESS_GRPC_USER_ROWS=() VLESS_GRPC_SERVICE_NAMES=() VLESS_GRPC_TLS_OPTS=() VLESS_GRPC_HOSTS=()
+
+    local -a TROJAN_PORTS=() TROJAN_TAGS=() TROJAN_USER_ROWS=() TROJAN_TLS_OPTS=() TROJAN_HOSTS=()
+    local -a TROJAN_WS_PORTS=() TROJAN_WS_TAGS=() TROJAN_WS_USER_ROWS=() TROJAN_WS_PATHS=() TROJAN_WS_TLS_OPTS=() TROJAN_WS_HOSTS=()
+    local -a TROJAN_GRPC_PORTS=() TROJAN_GRPC_TAGS=() TROJAN_GRPC_USER_ROWS=() TROJAN_GRPC_SERVICE_NAMES=() TROJAN_GRPC_TLS_OPTS=() TROJAN_GRPC_HOSTS=()
+
     local -a HY2_PORTS=() HY2_TAGS=() HY2_MPORTS=() HY2_OBFS_PASSWORDS=() HY2_USER_ROWS=()
     local -a RESERVED_PORTS=() NEW_PORTS=()
     local HY2_UP="" HY2_DOWN=""
@@ -8026,7 +8206,7 @@ _mihomoconf_setup() {
     fi
     _info "配置: ${CONFIG_FILE}"
     _info "状态: ${CONFIG_STATUS}"
-    _info "协议: Shadowsocks / AnyTLS / VLESS Reality / VLESS WS / HY2 / Tuic / Socks5"
+    _info "协议: Shadowsocks / VMess / VLESS / Trojan / HY2 / TUIC / AnyTLS / Socks5"
     SAVED_HOST=$(_mihomoconf_get_saved_host "$CONFIG_FILE")
     [[ -n "$SAVED_HOST" ]] && _info "已保存 Host: ${SAVED_HOST}"
     IPV4_GOOGLE_PREF=$(_mihomoconf_ipv4_google_pref_get "$CONFIG_FILE")
@@ -8057,35 +8237,82 @@ _mihomoconf_setup() {
     printf "  ${BOLD}选择协议，可重复输入${PLAIN}\n"
     printf "  ${DIM}提示: 每输入一次数字就会创建一个对应协议入站，例如 1 1 3 = 2个Shadowsocks + 1个HY2${PLAIN}\n"
     _separator
-    _menu_pair "1" "Shadowsocks" "" "green" "2" "AnyTLS" "" "green"
-    _menu_pair "3" "VLESS Vision Reality" "" "green" "4" "HY2" "" "green"
-    _menu_pair "5" "Tuic" "" "green" "6" "Socks5" "" "green"
-    _menu_item "7" "VLESS WebSocket (CDN 回源)" "" "green"
+    _menu_pair "1" "Shadowsocks (SS)" "" "green" "2" "VMess (含 TCP / WS / gRPC)" "" "green"
+    _menu_pair "3" "VLESS (含 Reality / WS / gRPC)" "" "green" "4" "Trojan (含 TCP / WS / gRPC)" "" "green"
+    _menu_pair "5" "Hysteria 2 (HY2)" "" "green" "6" "TUIC" "" "green"
+    _menu_pair "7" "AnyTLS" "" "green" "8" "Socks5" "" "green"
     _separator
     local PROTOCOL_CHOICES
-    read -rp "  选择 (如 \"1 1 2\" 表示 2 个 SS + 1 个 AnyTLS): " -a PROTOCOL_CHOICES
+    read -rp "  选择 (如 \"1 1 2\" 表示 2 个 SS + 1 个 VMess): " -a PROTOCOL_CHOICES
 
     for ch in "${PROTOCOL_CHOICES[@]}"; do
         case "$ch" in
             1) ENABLE_SS="y"; SS_COUNT=$((SS_COUNT + 1)) ;;
-            2) ENABLE_ANYTLS="y"; ANYTLS_COUNT=$((ANYTLS_COUNT + 1)) ;;
-            3) ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
-            4) ENABLE_HY2="y"; HY2_COUNT=$((HY2_COUNT + 1)) ;;
-            5) ENABLE_TUIC="y"; TUIC_COUNT=$((TUIC_COUNT + 1)) ;;
-            6) ENABLE_SOCKS="y"; SOCKS_COUNT=$((SOCKS_COUNT + 1)) ;;
-            7) ENABLE_VLESS_WS="y"; VLESS_WS_COUNT=$((VLESS_WS_COUNT + 1)) ;;
+            2)
+                printf "    ${BOLD}配置第 $((VMESS_COUNT + VMESS_WS_COUNT + VMESS_GRPC_COUNT + 1)) 个 VMess 节点类型:${PLAIN}\n"
+                printf "      1) VMess TCP (标准)\n"
+                printf "      2) VMess WebSocket (CDN 回源)\n"
+                printf "      3) VMess gRPC (CDN 回源)\n"
+                local vmess_sub
+                read -rp "      选择 [1-3]（默认 1）: " vmess_sub
+                case "${vmess_sub:-1}" in
+                    1) ENABLE_VMESS="y"; VMESS_COUNT=$((VMESS_COUNT + 1)) ;;
+                    2) ENABLE_VMESS_WS="y"; VMESS_WS_COUNT=$((VMESS_WS_COUNT + 1)) ;;
+                    3) ENABLE_VMESS_GRPC="y"; VMESS_GRPC_COUNT=$((VMESS_GRPC_COUNT + 1)) ;;
+                    *) _warn "未知 VMess 类型，默认选择 VMess TCP"; ENABLE_VMESS="y"; VMESS_COUNT=$((VMESS_COUNT + 1)) ;;
+                esac
+                ;;
+            3)
+                printf "    ${BOLD}配置第 $((VLESS_COUNT + VLESS_WS_COUNT + VLESS_GRPC_COUNT + 1)) 个 VLESS 节点类型:${PLAIN}\n"
+                printf "      1) VLESS Reality (XTLS Vision)\n"
+                printf "      2) VLESS WebSocket (CDN 回源)\n"
+                printf "      3) VLESS gRPC (CDN 回源)\n"
+                local vless_sub
+                read -rp "      选择 [1-3]（默认 1）: " vless_sub
+                case "${vless_sub:-1}" in
+                    1) ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
+                    2) ENABLE_VLESS_WS="y"; VLESS_WS_COUNT=$((VLESS_WS_COUNT + 1)) ;;
+                    3) ENABLE_VLESS_GRPC="y"; VLESS_GRPC_COUNT=$((VLESS_GRPC_COUNT + 1)) ;;
+                    *) _warn "未知 VLESS 类型，默认选择 VLESS Reality"; ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
+                esac
+                ;;
+            4)
+                printf "    ${BOLD}配置第 $((TROJAN_COUNT + TROJAN_WS_COUNT + TROJAN_GRPC_COUNT + 1)) 个 Trojan 节点类型:${PLAIN}\n"
+                printf "      1) Trojan TCP (TLS 直连)\n"
+                printf "      2) Trojan WebSocket (CDN 回源)\n"
+                printf "      3) Trojan gRPC (CDN 回源)\n"
+                local trojan_sub
+                read -rp "      选择 [1-3]（默认 1）: " trojan_sub
+                case "${trojan_sub:-1}" in
+                    1) ENABLE_TROJAN="y"; TROJAN_COUNT=$((TROJAN_COUNT + 1)) ;;
+                    2) ENABLE_TROJAN_WS="y"; TROJAN_WS_COUNT=$((TROJAN_WS_COUNT + 1)) ;;
+                    3) ENABLE_TROJAN_GRPC="y"; TROJAN_GRPC_COUNT=$((TROJAN_GRPC_COUNT + 1)) ;;
+                    *) _warn "未知 Trojan 类型，默认选择 Trojan TCP"; ENABLE_TROJAN="y"; TROJAN_COUNT=$((TROJAN_COUNT + 1)) ;;
+                esac
+                ;;
+            5) ENABLE_HY2="y"; HY2_COUNT=$((HY2_COUNT + 1)) ;;
+            6) ENABLE_TUIC="y"; TUIC_COUNT=$((TUIC_COUNT + 1)) ;;
+            7) ENABLE_ANYTLS="y"; ANYTLS_COUNT=$((ANYTLS_COUNT + 1)) ;;
+            8) ENABLE_SOCKS="y"; SOCKS_COUNT=$((SOCKS_COUNT + 1)) ;;
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 ]]; then
+    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
     fi
     _status_kv "SS 数量" "${SS_COUNT}" "cyan" 10
     _status_kv "AnyTLS 数量" "${ANYTLS_COUNT}" "cyan" 10
-    _status_kv "VLESS 数量" "${VLESS_COUNT}" "cyan" 10
+    _status_kv "VLESS Reality 数量" "${VLESS_COUNT}" "cyan" 10
     _status_kv "VLESS WS 数量" "${VLESS_WS_COUNT}" "cyan" 10
+    _status_kv "VLESS gRPC 数量" "${VLESS_GRPC_COUNT}" "cyan" 10
+    _status_kv "VMess TCP 数量" "${VMESS_COUNT}" "cyan" 10
+    _status_kv "VMess WS 数量" "${VMESS_WS_COUNT}" "cyan" 10
+    _status_kv "VMess gRPC 数量" "${VMESS_GRPC_COUNT}" "cyan" 10
+    _status_kv "Trojan TCP 数量" "${TROJAN_COUNT}" "cyan" 10
+    _status_kv "Trojan WS 数量" "${TROJAN_WS_COUNT}" "cyan" 10
+    _status_kv "Trojan gRPC 数量" "${TROJAN_GRPC_COUNT}" "cyan" 10
     _status_kv "HY2 数量" "${HY2_COUNT}" "cyan" 10
     _status_kv "Tuic 数量" "${TUIC_COUNT}" "cyan" 10
     _status_kv "Socks5 数量" "${SOCKS_COUNT}" "cyan" 10
@@ -8162,6 +8389,76 @@ _mihomoconf_setup() {
         read -rp "  选择 [1/2]（默认 2）: " socks_action
             [[ "${socks_action:-2}" == "1" ]] && SOCKS_REPLACE="y"
         fi
+        if [[ "$ENABLE_VMESS" == "y" ]] && _mihomoconf_has_listener_type "vmess"; then
+            _warn "配置中已存在 VMess TCP 节点:"
+            _mihomoconf_list_listeners "vmess"
+            _separator
+            _menu_pair "1" "覆盖已有 VMess TCP 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local vmess_action
+        read -rp "  选择 [1/2]（默认 2）: " vmess_action
+            [[ "${vmess_action:-2}" == "1" ]] && VMESS_REPLACE="y"
+        fi
+        if [[ "$ENABLE_VMESS_WS" == "y" ]] && _mihomoconf_has_listener_type "vmess-ws"; then
+            _warn "配置中已存在 VMess WS 节点:"
+            _mihomoconf_list_listeners "vmess-ws"
+            _separator
+            _menu_pair "1" "覆盖已有 VMess WS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local vmess_ws_action
+        read -rp "  选择 [1/2]（默认 2）: " vmess_ws_action
+            [[ "${vmess_ws_action:-2}" == "1" ]] && VMESS_WS_REPLACE="y"
+        fi
+        if [[ "$ENABLE_VMESS_GRPC" == "y" ]] && _mihomoconf_has_listener_type "vmess-grpc"; then
+            _warn "配置中已存在 VMess gRPC 节点:"
+            _mihomoconf_list_listeners "vmess-grpc"
+            _separator
+            _menu_pair "1" "覆盖已有 VMess gRPC 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local vmess_grpc_action
+        read -rp "  选择 [1/2]（默认 2）: " vmess_grpc_action
+            [[ "${vmess_grpc_action:-2}" == "1" ]] && VMESS_GRPC_REPLACE="y"
+        fi
+        if [[ "$ENABLE_VLESS_GRPC" == "y" ]] && _mihomoconf_has_listener_type "vless-grpc"; then
+            _warn "配置中已存在 VLESS gRPC 节点:"
+            _mihomoconf_list_listeners "vless-grpc"
+            _separator
+            _menu_pair "1" "覆盖已有 VLESS gRPC 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local vless_grpc_action
+        read -rp "  选择 [1/2]（默认 2）: " vless_grpc_action
+            [[ "${vless_grpc_action:-2}" == "1" ]] && VLESS_GRPC_REPLACE="y"
+        fi
+        if [[ "$ENABLE_TROJAN" == "y" ]] && _mihomoconf_has_listener_type "trojan"; then
+            _warn "配置中已存在 Trojan TCP 节点:"
+            _mihomoconf_list_listeners "trojan"
+            _separator
+            _menu_pair "1" "覆盖已有 Trojan TCP 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local trojan_action
+        read -rp "  选择 [1/2]（默认 2）: " trojan_action
+            [[ "${trojan_action:-2}" == "1" ]] && TROJAN_REPLACE="y"
+        fi
+        if [[ "$ENABLE_TROJAN_WS" == "y" ]] && _mihomoconf_has_listener_type "trojan-ws"; then
+            _warn "配置中已存在 Trojan WS 节点:"
+            _mihomoconf_list_listeners "trojan-ws"
+            _separator
+            _menu_pair "1" "覆盖已有 Trojan WS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local trojan_ws_action
+        read -rp "  选择 [1/2]（默认 2）: " trojan_ws_action
+            [[ "${trojan_ws_action:-2}" == "1" ]] && TROJAN_WS_REPLACE="y"
+        fi
+        if [[ "$ENABLE_TROJAN_GRPC" == "y" ]] && _mihomoconf_has_listener_type "trojan-grpc"; then
+            _warn "配置中已存在 Trojan gRPC 节点:"
+            _mihomoconf_list_listeners "trojan-grpc"
+            _separator
+            _menu_pair "1" "覆盖已有 Trojan gRPC 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local trojan_grpc_action
+        read -rp "  选择 [1/2]（默认 2）: " trojan_grpc_action
+            [[ "${trojan_grpc_action:-2}" == "1" ]] && TROJAN_GRPC_REPLACE="y"
+        fi
     fi
 
     # ---- 端口冲突基线: 追加模式下保留现有端口（被替换协议除外）----
@@ -8183,6 +8480,12 @@ _mihomoconf_setup() {
                 vless) [[ "$VLESS_REPLACE" == "y" ]] && continue ;;
                 vless-ws) [[ "$VLESS_WS_REPLACE" == "y" ]] && continue ;;
                 vless-grpc) [[ "$VLESS_GRPC_REPLACE" == "y" ]] && continue ;;
+                vmess) [[ "$VMESS_REPLACE" == "y" ]] && continue ;;
+                vmess-ws) [[ "$VMESS_WS_REPLACE" == "y" ]] && continue ;;
+                vmess-grpc) [[ "$VMESS_GRPC_REPLACE" == "y" ]] && continue ;;
+                trojan) [[ "$TROJAN_REPLACE" == "y" ]] && continue ;;
+                trojan-ws) [[ "$TROJAN_WS_REPLACE" == "y" ]] && continue ;;
+                trojan-grpc) [[ "$TROJAN_GRPC_REPLACE" == "y" ]] && continue ;;
                 hysteria2) [[ "$HY2_REPLACE" == "y" ]] && continue ;;
                 tuic) [[ "$TUIC_REPLACE" == "y" ]] && continue ;;
                 socks) [[ "$SOCKS_REPLACE" == "y" ]] && continue ;;
@@ -8437,6 +8740,379 @@ _mihomoconf_setup() {
         _info "VLESS WebSocket 已生成 ${#VLESS_WS_PORTS[@]} 个入站，共 ${_vless_ws_user_total} 个 user"
     fi
 
+    # ---- VMess TCP 配置 ----
+    if [[ "$ENABLE_VMESS" == "y" ]]; then
+        printf "  ${BOLD}VMess TCP 配置${PLAIN}\n"
+        _separator
+        local _vmess_idx vmess_port_input
+        for ((_vmess_idx=1; _vmess_idx<=VMESS_COUNT; _vmess_idx++)); do
+            while true; do
+                read -rp "    VMess TCP #${_vmess_idx} 监听端口 [默认 10086]: " vmess_port_input
+                vmess_port_input=$(_mihomoconf_trim "${vmess_port_input:-10086}")
+                if _is_valid_port "$vmess_port_input"; then
+                    if _mihomoconf_port_in_list "$vmess_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${vmess_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$vmess_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${vmess_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    VMESS_PORTS+=("$vmess_port_input")
+                    NEW_PORTS+=("$vmess_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local i _user_rows _u_name _u_uuid _vmess_user_total=0
+        for i in "${!VMESS_PORTS[@]}"; do
+            VMESS_TAGS+=("$(_mihomoconf_gen_listener_tag "vmess_relay")")
+            _user_rows=$(_mihomoconf_collect_users_input "VMess TCP #$((i + 1))" "" "vless")
+            while IFS=$'\t' read -r _u_name _u_uuid; do
+                [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
+                VMESS_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
+                _vmess_user_total=$((_vmess_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "VMess TCP 已生成 ${#VMESS_PORTS[@]} 个入站，共 ${_vmess_user_total} 个 user"
+    fi
+
+    # ---- VMess WebSocket 配置 ----
+    if [[ "$ENABLE_VMESS_WS" == "y" ]]; then
+        printf "  ${BOLD}VMess WebSocket 配置${PLAIN}\n"
+        _separator
+        local _vmess_ws_idx vmess_ws_port_input
+        for ((_vmess_ws_idx=1; _vmess_ws_idx<=VMESS_WS_COUNT; _vmess_ws_idx++)); do
+            while true; do
+                read -rp "    VMess WS #${_vmess_ws_idx} 监听端口 [默认 10087]: " vmess_ws_port_input
+                vmess_ws_port_input=$(_mihomoconf_trim "${vmess_ws_port_input:-10087}")
+                if _is_valid_port "$vmess_ws_port_input"; then
+                    if _mihomoconf_port_in_list "$vmess_ws_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${vmess_ws_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$vmess_ws_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${vmess_ws_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    VMESS_WS_PORTS+=("$vmess_ws_port_input")
+                    NEW_PORTS+=("$vmess_ws_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local _vmess_ws_path_input _vmess_ws_tls_input _vmess_ws_host_input
+        local i _user_rows _u_name _u_uuid _vmess_ws_user_total=0
+        for i in "${!VMESS_WS_PORTS[@]}"; do
+            read -rp "    VMess WS #$((i + 1)) WebSocket Path [默认 /vmess-ws]: " _vmess_ws_path_input
+            _vmess_ws_path_input=$(_mihomoconf_trim "${_vmess_ws_path_input:-/vmess-ws}")
+            [[ "${_vmess_ws_path_input:0:1}" != "/" ]] && _vmess_ws_path_input="/${_vmess_ws_path_input}"
+            VMESS_WS_PATHS+=("$_vmess_ws_path_input")
+
+            read -rp "    VMess WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [y/N]: " _vmess_ws_tls_input
+            _vmess_ws_tls_input=$(_mihomoconf_trim "${_vmess_ws_tls_input:-N}")
+            if [[ "$_vmess_ws_tls_input" =~ ^[Yy]$ ]]; then
+                VMESS_WS_TLS_OPTS+=("true")
+            else
+                VMESS_WS_TLS_OPTS+=("false")
+            fi
+
+            read -rp "    VMess WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vmess_ws_host_input
+            VMESS_WS_HOSTS+=("$(_mihomoconf_trim "${_vmess_ws_host_input:-}")")
+
+            VMESS_WS_TAGS+=("$(_mihomoconf_gen_listener_tag "vmess_ws_relay")")
+
+            _user_rows=$(_mihomoconf_collect_users_input "VMess WS #$((i + 1))" "" "vless")
+            while IFS=$'\t' read -r _u_name _u_uuid; do
+                [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
+                VMESS_WS_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
+                _vmess_ws_user_total=$((_vmess_ws_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "VMess WebSocket 已生成 ${#VMESS_WS_PORTS[@]} 个入站，共 ${_vmess_ws_user_total} 个 user"
+    fi
+
+    # ---- VMess gRPC 配置 ----
+    if [[ "$ENABLE_VMESS_GRPC" == "y" ]]; then
+        printf "  ${BOLD}VMess gRPC 配置${PLAIN}\n"
+        _separator
+        local _vmess_grpc_idx vmess_grpc_port_input
+        for ((_vmess_grpc_idx=1; _vmess_grpc_idx<=VMESS_GRPC_COUNT; _vmess_grpc_idx++)); do
+            while true; do
+                read -rp "    VMess gRPC #${_vmess_grpc_idx} 监听端口 [默认 10088]: " vmess_grpc_port_input
+                vmess_grpc_port_input=$(_mihomoconf_trim "${vmess_grpc_port_input:-10088}")
+                if _is_valid_port "$vmess_grpc_port_input"; then
+                    if _mihomoconf_port_in_list "$vmess_grpc_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${vmess_grpc_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$vmess_grpc_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${vmess_grpc_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    VMESS_GRPC_PORTS+=("$vmess_grpc_port_input")
+                    NEW_PORTS+=("$vmess_grpc_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local _vmess_grpc_service_name_input _vmess_grpc_tls_input _vmess_grpc_host_input
+        local i _user_rows _u_name _u_uuid _vmess_grpc_user_total=0
+        for i in "${!VMESS_GRPC_PORTS[@]}"; do
+            read -rp "    VMess gRPC #$((i + 1)) gRPC Service Name [默认 vmess-grpc]: " _vmess_grpc_service_name_input
+            _vmess_grpc_service_name_input=$(_mihomoconf_trim "${_vmess_grpc_service_name_input:-vmess-grpc}")
+            VMESS_GRPC_SERVICE_NAMES+=("$_vmess_grpc_service_name_input")
+
+            read -rp "    VMess gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [y/N]: " _vmess_grpc_tls_input
+            _vmess_grpc_tls_input=$(_mihomoconf_trim "${_vmess_grpc_tls_input:-N}")
+            if [[ "$_vmess_grpc_tls_input" =~ ^[Yy]$ ]]; then
+                VMESS_GRPC_TLS_OPTS+=("true")
+            else
+                VMESS_GRPC_TLS_OPTS+=("false")
+            fi
+
+            read -rp "    VMess gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vmess_grpc_host_input
+            VMESS_GRPC_HOSTS+=("$(_mihomoconf_trim "${_vmess_grpc_host_input:-}")")
+
+            VMESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vmess_grpc_relay")")
+
+            _user_rows=$(_mihomoconf_collect_users_input "VMess gRPC #$((i + 1))" "" "vless")
+            while IFS=$'\t' read -r _u_name _u_uuid; do
+                [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
+                VMESS_GRPC_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
+                _vmess_grpc_user_total=$((_vmess_grpc_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "VMess gRPC 已生成 ${#VMESS_GRPC_PORTS[@]} 个入站，共 ${_vmess_grpc_user_total} 个 user"
+    fi
+
+    # ---- VLESS gRPC 配置 ----
+    if [[ "$ENABLE_VLESS_GRPC" == "y" ]]; then
+        printf "  ${BOLD}VLESS gRPC 配置${PLAIN}\n"
+        _separator
+        local _vless_grpc_idx vless_grpc_port_input
+        for ((_vless_grpc_idx=1; _vless_grpc_idx<=VLESS_GRPC_COUNT; _vless_grpc_idx++)); do
+            while true; do
+                read -rp "    VLESS gRPC #${_vless_grpc_idx} 监听端口 [默认 8443]: " vless_grpc_port_input
+                vless_grpc_port_input=$(_mihomoconf_trim "${vless_grpc_port_input:-8443}")
+                if _is_valid_port "$vless_grpc_port_input"; then
+                    if _mihomoconf_port_in_list "$vless_grpc_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${vless_grpc_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$vless_grpc_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${vless_grpc_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    VLESS_GRPC_PORTS+=("$vless_grpc_port_input")
+                    NEW_PORTS+=("$vless_grpc_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local _vless_grpc_service_name_input _vless_grpc_tls_input _vless_grpc_host_input
+        local i _user_rows _u_name _u_uuid _vless_grpc_user_total=0
+        for i in "${!VLESS_GRPC_PORTS[@]}"; do
+            read -rp "    VLESS gRPC #$((i + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_grpc_service_name_input
+            _vless_grpc_service_name_input=$(_mihomoconf_trim "${_vless_grpc_service_name_input:-vless-grpc}")
+            VLESS_GRPC_SERVICE_NAMES+=("$_vless_grpc_service_name_input")
+
+            read -rp "    VLESS gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [y/N]: " _vless_grpc_tls_input
+            _vless_grpc_tls_input=$(_mihomoconf_trim "${_vless_grpc_tls_input:-N}")
+            if [[ "$_vless_grpc_tls_input" =~ ^[Yy]$ ]]; then
+                VLESS_GRPC_TLS_OPTS+=("true")
+            else
+                VLESS_GRPC_TLS_OPTS+=("false")
+            fi
+
+            read -rp "    VLESS gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_grpc_host_input
+            VLESS_GRPC_HOSTS+=("$(_mihomoconf_trim "${_vless_grpc_host_input:-}")")
+
+            VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
+
+            _user_rows=$(_mihomoconf_collect_users_input "VLESS gRPC #$((i + 1))" "" "vless")
+            while IFS=$'\t' read -r _u_name _u_uuid; do
+                [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
+                VLESS_GRPC_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
+                _vless_grpc_user_total=$((_vless_grpc_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "VLESS gRPC 已生成 ${#VLESS_GRPC_PORTS[@]} 个入站，共 ${_vless_grpc_user_total} 个 user"
+    fi
+
+    # ---- Trojan TCP 配置 ----
+    if [[ "$ENABLE_TROJAN" == "y" ]]; then
+        printf "  ${BOLD}Trojan TCP 配置${PLAIN}\n"
+        _separator
+        local _trojan_idx trojan_port_input
+        for ((_trojan_idx=1; _trojan_idx<=TROJAN_COUNT; _trojan_idx++)); do
+            while true; do
+                read -rp "    Trojan TCP #${_trojan_idx} 监听端口 [默认 12443]: " trojan_port_input
+                trojan_port_input=$(_mihomoconf_trim "${trojan_port_input:-12443}")
+                if _is_valid_port "$trojan_port_input"; then
+                    if _mihomoconf_port_in_list "$trojan_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${trojan_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$trojan_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${trojan_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    TROJAN_PORTS+=("$trojan_port_input")
+                    NEW_PORTS+=("$trojan_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local _trojan_tls_input _trojan_host_input
+        local i _user_rows _u_name _u_pass _trojan_user_total=0
+        for i in "${!TROJAN_PORTS[@]}"; do
+            read -rp "    Trojan TCP #$((i + 1)) 是否启用 TLS [Y/n]: " _trojan_tls_input
+            _trojan_tls_input=$(_mihomoconf_trim "${_trojan_tls_input:-Y}")
+            if [[ "$_trojan_tls_input" =~ ^[Nn]$ ]]; then
+                TROJAN_TLS_OPTS+=("false")
+            else
+                TROJAN_TLS_OPTS+=("true")
+            fi
+
+            read -rp "    Trojan TCP #$((i + 1)) SNI / Host (使用证书的域名): " _trojan_host_input
+            TROJAN_HOSTS+=("$(_mihomoconf_trim "${_trojan_host_input:-}")")
+
+            TROJAN_TAGS+=("$(_mihomoconf_gen_listener_tag "trojan_relay")")
+
+            _user_rows=$(_mihomoconf_collect_users_input "Trojan TCP #$((i + 1))")
+            while IFS=$'\t' read -r _u_name _u_pass; do
+                [[ -z "${_u_name:-}" || -z "${_u_pass:-}" ]] && continue
+                TROJAN_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_pass}")
+                _trojan_user_total=$((_trojan_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "Trojan TCP 已生成 ${#TROJAN_PORTS[@]} 个入站，共 ${_trojan_user_total} 个 user"
+    fi
+
+    # ---- Trojan WebSocket 配置 ----
+    if [[ "$ENABLE_TROJAN_WS" == "y" ]]; then
+        printf "  ${BOLD}Trojan WebSocket 配置${PLAIN}\n"
+        _separator
+        local _trojan_ws_idx trojan_ws_port_input
+        for ((_trojan_ws_idx=1; _trojan_ws_idx<=TROJAN_WS_COUNT; _trojan_ws_idx++)); do
+            while true; do
+                read -rp "    Trojan WS #${_trojan_ws_idx} 监听端口 [默认 12444]: " trojan_ws_port_input
+                trojan_ws_port_input=$(_mihomoconf_trim "${trojan_ws_port_input:-12444}")
+                if _is_valid_port "$trojan_ws_port_input"; then
+                    if _mihomoconf_port_in_list "$trojan_ws_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${trojan_ws_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$trojan_ws_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${trojan_ws_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    TROJAN_WS_PORTS+=("$trojan_ws_port_input")
+                    NEW_PORTS+=("$trojan_ws_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local _trojan_ws_path_input _trojan_ws_tls_input _trojan_ws_host_input
+        local i _user_rows _u_name _u_pass _trojan_ws_user_total=0
+        for i in "${!TROJAN_WS_PORTS[@]}"; do
+            read -rp "    Trojan WS #$((i + 1)) WebSocket Path [默认 /trojan-ws]: " _trojan_ws_path_input
+            _trojan_ws_path_input=$(_mihomoconf_trim "${_trojan_ws_path_input:-/trojan-ws}")
+            [[ "${_trojan_ws_path_input:0:1}" != "/" ]] && _trojan_ws_path_input="/${_trojan_ws_path_input}"
+            TROJAN_WS_PATHS+=("$_trojan_ws_path_input")
+
+            read -rp "    Trojan WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [Y/n]: " _trojan_ws_tls_input
+            _trojan_ws_tls_input=$(_mihomoconf_trim "${_trojan_ws_tls_input:-Y}")
+            if [[ "$_trojan_ws_tls_input" =~ ^[Nn]$ ]]; then
+                TROJAN_WS_TLS_OPTS+=("false")
+            else
+                TROJAN_WS_TLS_OPTS+=("true")
+            fi
+
+            read -rp "    Trojan WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _trojan_ws_host_input
+            TROJAN_WS_HOSTS+=("$(_mihomoconf_trim "${_trojan_ws_host_input:-}")")
+
+            TROJAN_WS_TAGS+=("$(_mihomoconf_gen_listener_tag "trojan_ws_relay")")
+
+            _user_rows=$(_mihomoconf_collect_users_input "Trojan WS #$((i + 1))")
+            while IFS=$'\t' read -r _u_name _u_pass; do
+                [[ -z "${_u_name:-}" || -z "${_u_pass:-}" ]] && continue
+                TROJAN_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_pass}")
+                _trojan_ws_user_total=$((_trojan_ws_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "Trojan WebSocket 已生成 ${#TROJAN_WS_PORTS[@]} 个入站，共 ${_trojan_ws_user_total} 个 user"
+    fi
+
+    # ---- Trojan gRPC 配置 ----
+    if [[ "$ENABLE_TROJAN_GRPC" == "y" ]]; then
+        printf "  ${BOLD}Trojan gRPC 配置${PLAIN}\n"
+        _separator
+        local _trojan_grpc_idx trojan_grpc_port_input
+        for ((_trojan_grpc_idx=1; _trojan_grpc_idx<=TROJAN_GRPC_COUNT; _trojan_grpc_idx++)); do
+            while true; do
+                read -rp "    Trojan gRPC #${_trojan_grpc_idx} 监听端口 [默认 12445]: " trojan_grpc_port_input
+                trojan_grpc_port_input=$(_mihomoconf_trim "${trojan_grpc_port_input:-12445}")
+                if _is_valid_port "$trojan_grpc_port_input"; then
+                    if _mihomoconf_port_in_list "$trojan_grpc_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${trojan_grpc_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$trojan_grpc_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${trojan_grpc_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    TROJAN_GRPC_PORTS+=("$trojan_grpc_port_input")
+                    NEW_PORTS+=("$trojan_grpc_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local _trojan_grpc_service_name_input _trojan_grpc_tls_input _trojan_grpc_host_input
+        local i _user_rows _u_name _u_pass _trojan_grpc_user_total=0
+        for i in "${!TROJAN_GRPC_PORTS[@]}"; do
+            read -rp "    Trojan gRPC #$((i + 1)) gRPC Service Name [默认 trojan-grpc]: " _trojan_grpc_service_name_input
+            _trojan_grpc_service_name_input=$(_mihomoconf_trim "${_trojan_grpc_service_name_input:-trojan-grpc}")
+            TROJAN_GRPC_SERVICE_NAMES+=("$_trojan_grpc_service_name_input")
+
+            read -rp "    Trojan gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [Y/n]: " _trojan_grpc_tls_input
+            _trojan_grpc_tls_input=$(_mihomoconf_trim "${_trojan_grpc_tls_input:-Y}")
+            if [[ "$_trojan_grpc_tls_input" =~ ^[Nn]$ ]]; then
+                TROJAN_GRPC_TLS_OPTS+=("false")
+            else
+                TROJAN_GRPC_TLS_OPTS+=("true")
+            fi
+
+            read -rp "    Trojan gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _trojan_grpc_host_input
+            TROJAN_GRPC_HOSTS+=("$(_mihomoconf_trim "${_trojan_grpc_host_input:-}")")
+
+            TROJAN_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "trojan_grpc_relay")")
+
+            _user_rows=$(_mihomoconf_collect_users_input "Trojan gRPC #$((i + 1))")
+            while IFS=$'\t' read -r _u_name _u_pass; do
+                [[ -z "${_u_name:-}" || -z "${_u_pass:-}" ]] && continue
+                TROJAN_GRPC_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_pass}")
+                _trojan_grpc_user_total=$((_trojan_grpc_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "Trojan gRPC 已生成 ${#TROJAN_GRPC_PORTS[@]} 个入站，共 ${_trojan_grpc_user_total} 个 user"
+    fi
+
     # ---- HY2 配置 ----
     if [[ "$ENABLE_HY2" == "y" ]]; then
         printf "  ${BOLD}HY2 配置${PLAIN}\n"
@@ -8660,13 +9336,25 @@ _mihomoconf_setup() {
         _info "Socks5 已生成 ${#SOCKS_PORTS[@]} 个入站，共 ${_socks_user_total} 个 user"
     fi
 
-    # ---- TLS 证书检查 (AnyTLS / HY2 / Tuic 共用) ----
+    # ---- TLS 证书检查 (AnyTLS / HY2 / Tuic / TLS-enabled VMess/VLESS/Trojan 共用) ----
+    local _any_tls_enabled="n"
     if [[ "$ENABLE_ANYTLS" == "y" || "$ENABLE_HY2" == "y" || "$ENABLE_TUIC" == "y" ]]; then
+        _any_tls_enabled="y"
+    fi
+    local _opt
+    for _opt in "${VMESS_WS_TLS_OPTS[@]:-}" "${VMESS_GRPC_TLS_OPTS[@]:-}" "${VLESS_WS_TLS_OPTS[@]:-}" "${VLESS_GRPC_TLS_OPTS[@]:-}" "${TROJAN_TLS_OPTS[@]:-}" "${TROJAN_WS_TLS_OPTS[@]:-}" "${TROJAN_GRPC_TLS_OPTS[@]:-}"; do
+        if [[ "$_opt" == "true" ]]; then
+            _any_tls_enabled="y"
+            break
+        fi
+    done
+
+    if [[ "$_any_tls_enabled" == "y" ]]; then
         mkdir -p "$SSL_DIR"
         if [[ -f "${SSL_DIR}/cert.crt" && -f "${SSL_DIR}/cert.key" ]]; then
             _info "已检测到 TLS 证书: ${SSL_DIR}/"
         else
-            _warn "AnyTLS/HY2/Tuic 需要 TLS 证书才能正常运行!"
+            _warn "AnyTLS/HY2/Tuic/TLS-enabled 节点需要 TLS 证书才能正常运行!"
             _warn "请将证书文件放到以下路径:"
             printf "    证书: ${YELLOW}${SSL_DIR}/cert.crt${PLAIN}\n"
             printf "    私钥: ${YELLOW}${SSL_DIR}/cert.key${PLAIN}\n"
@@ -8828,6 +9516,13 @@ MIHOMOCONF_VLESS_WS_EOF
         uuid: "${_u_uuid}"
 MIHOMOCONF_VLESS_WS_USER_EOF
                 done
+                if [[ "$_vless_ws_tls" == "true" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_WS_TLS_EOF
+    tls: true
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_VLESS_WS_TLS_EOF
+                fi
                 cat >> "$_target_file" <<MIHOMOCONF_VLESS_WS_TRANS_EOF
     transport:
       type: ws
@@ -8839,6 +9534,277 @@ MIHOMOCONF_VLESS_WS_TRANS_EOF
         Host: "${_vless_ws_host}"
 MIHOMOCONF_VLESS_WS_HOST_EOF
                 fi
+            done
+        fi
+        if [[ "$ENABLE_VMESS" == "y" ]]; then
+            for i in "${!VMESS_PORTS[@]}"; do
+                local _vmess_port="${VMESS_PORTS[$i]}"
+                local _vmess_tag="${VMESS_TAGS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_VMESS_EOF
+  - name: vmess-in-${_vmess_port}
+    tag: "${_vmess_tag}"
+    type: vmess
+    port: ${_vmess_port}
+    listen: "::"
+    # vpsgo-vmess-type: tcp
+    users:
+MIHOMOCONF_VMESS_EOF
+                for _row in "${VMESS_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    cat >> "$_target_file" <<MIHOMOCONF_VMESS_USER_EOF
+      - username: "${_u_name}"
+        uuid: "${_u_uuid}"
+        alterId: 0
+MIHOMOCONF_VMESS_USER_EOF
+                done
+            done
+        fi
+        if [[ "$ENABLE_VMESS_WS" == "y" ]]; then
+            for i in "${!VMESS_WS_PORTS[@]}"; do
+                local _vmess_ws_port="${VMESS_WS_PORTS[$i]}"
+                local _vmess_ws_tag="${VMESS_WS_TAGS[$i]}"
+                local _vmess_ws_path="${VMESS_WS_PATHS[$i]}"
+                local _vmess_ws_tls="${VMESS_WS_TLS_OPTS[$i]}"
+                local _vmess_ws_host="${VMESS_WS_HOSTS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_VMESS_WS_EOF
+  - name: vmess-ws-in-${_vmess_ws_port}
+    tag: "${_vmess_ws_tag}"
+    type: vmess
+    port: ${_vmess_ws_port}
+    listen: "::"
+    # vpsgo-vmess-type: ws
+    # vpsgo-vmess-ws-path: ${_vmess_ws_path}
+    # vpsgo-vmess-ws-tls: ${_vmess_ws_tls}
+    # vpsgo-vmess-ws-host: ${_vmess_ws_host}
+    users:
+MIHOMOCONF_VMESS_WS_EOF
+                for _row in "${VMESS_WS_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    cat >> "$_target_file" <<MIHOMOCONF_VMESS_WS_USER_EOF
+      - username: "${_u_name}"
+        uuid: "${_u_uuid}"
+        alterId: 0
+MIHOMOCONF_VMESS_WS_USER_EOF
+                done
+                if [[ "$_vmess_ws_tls" == "true" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_VMESS_WS_TLS_EOF
+    tls: true
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_VMESS_WS_TLS_EOF
+                fi
+                cat >> "$_target_file" <<MIHOMOCONF_VMESS_WS_TRANS_EOF
+    transport:
+      type: ws
+      path: ${_vmess_ws_path}
+MIHOMOCONF_VMESS_WS_TRANS_EOF
+                if [[ -n "$_vmess_ws_host" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_VMESS_WS_HOST_EOF
+      headers:
+        Host: "${_vmess_ws_host}"
+MIHOMOCONF_VMESS_WS_HOST_EOF
+                fi
+            done
+        fi
+        if [[ "$ENABLE_VMESS_GRPC" == "y" ]]; then
+            for i in "${!VMESS_GRPC_PORTS[@]}"; do
+                local _vmess_grpc_port="${VMESS_GRPC_PORTS[$i]}"
+                local _vmess_grpc_tag="${VMESS_GRPC_TAGS[$i]}"
+                local _vmess_grpc_service_name="${VMESS_GRPC_SERVICE_NAMES[$i]}"
+                local _vmess_grpc_tls="${VMESS_GRPC_TLS_OPTS[$i]}"
+                local _vmess_grpc_host="${VMESS_GRPC_HOSTS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_VMESS_GRPC_EOF
+  - name: vmess-grpc-in-${_vmess_grpc_port}
+    tag: "${_vmess_grpc_tag}"
+    type: vmess
+    port: ${_vmess_grpc_port}
+    listen: "::"
+    # vpsgo-vmess-type: grpc
+    # vpsgo-vmess-grpc-service-name: ${_vmess_grpc_service_name}
+    # vpsgo-vmess-grpc-tls: ${_vmess_grpc_tls}
+    # vpsgo-vmess-grpc-host: ${_vmess_grpc_host}
+    users:
+MIHOMOCONF_VMESS_GRPC_EOF
+                for _row in "${VMESS_GRPC_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    cat >> "$_target_file" <<MIHOMOCONF_VMESS_GRPC_USER_EOF
+      - username: "${_u_name}"
+        uuid: "${_u_uuid}"
+        alterId: 0
+MIHOMOCONF_VMESS_GRPC_USER_EOF
+                done
+                if [[ "$_vmess_grpc_tls" == "true" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_VMESS_GRPC_TLS_EOF
+    tls: true
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_VMESS_GRPC_TLS_EOF
+                fi
+                cat >> "$_target_file" <<MIHOMOCONF_VMESS_GRPC_TRANS_EOF
+    transport:
+      type: grpc
+      grpc-opts:
+        grpc-service-name: "${_vmess_grpc_service_name}"
+MIHOMOCONF_VMESS_GRPC_TRANS_EOF
+            done
+        fi
+        if [[ "$ENABLE_VLESS_GRPC" == "y" ]]; then
+            for i in "${!VLESS_GRPC_PORTS[@]}"; do
+                local _vless_grpc_port="${VLESS_GRPC_PORTS[$i]}"
+                local _vless_grpc_tag="${VLESS_GRPC_TAGS[$i]}"
+                local _vless_grpc_service_name="${VLESS_GRPC_SERVICE_NAMES[$i]}"
+                local _vless_grpc_tls="${VLESS_GRPC_TLS_OPTS[$i]}"
+                local _vless_grpc_host="${VLESS_GRPC_HOSTS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_EOF
+  - name: vless-grpc-in-${_vless_grpc_port}
+    tag: "${_vless_grpc_tag}"
+    type: vless
+    port: ${_vless_grpc_port}
+    listen: "::"
+    # vpsgo-vless-type: grpc
+    # vpsgo-vless-grpc-service-name: ${_vless_grpc_service_name}
+    # vpsgo-vless-grpc-tls: ${_vless_grpc_tls}
+    # vpsgo-vless-grpc-host: ${_vless_grpc_host}
+    users:
+MIHOMOCONF_VLESS_GRPC_EOF
+                for _row in "${VLESS_GRPC_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_USER_EOF
+      - username: "${_u_name}"
+        uuid: "${_u_uuid}"
+MIHOMOCONF_VLESS_GRPC_USER_EOF
+                done
+                if [[ "$_vless_grpc_tls" == "true" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_TLS_EOF
+    tls: true
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_VLESS_GRPC_TLS_EOF
+                fi
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_TRANS_EOF
+    transport:
+      type: grpc
+      grpc-opts:
+        grpc-service-name: "${_vless_grpc_service_name}"
+MIHOMOCONF_VLESS_GRPC_TRANS_EOF
+            done
+        fi
+        if [[ "$ENABLE_TROJAN" == "y" ]]; then
+            for i in "${!TROJAN_PORTS[@]}"; do
+                local _trojan_port="${TROJAN_PORTS[$i]}"
+                local _trojan_tag="${TROJAN_TAGS[$i]}"
+                local _trojan_tls="${TROJAN_TLS_OPTS[$i]}"
+                local _trojan_host="${TROJAN_HOSTS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_TROJAN_EOF
+  - name: trojan-in-${_trojan_port}
+    tag: "${_trojan_tag}"
+    type: trojan
+    port: ${_trojan_port}
+    listen: "::"
+    # vpsgo-trojan-type: tcp
+    # vpsgo-trojan-tls: ${_trojan_tls}
+    # vpsgo-trojan-host: ${_trojan_host}
+    users:
+MIHOMOCONF_TROJAN_EOF
+                for _row in "${TROJAN_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    printf "      \"%s\": \"%s\"\n" "$_u_name" "$_u_pass" >> "$_target_file"
+                done
+                if [[ "$_trojan_tls" == "true" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_TROJAN_TLS_EOF
+    tls: true
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_TROJAN_TLS_EOF
+                fi
+            done
+        fi
+        if [[ "$ENABLE_TROJAN_WS" == "y" ]]; then
+            for i in "${!TROJAN_WS_PORTS[@]}"; do
+                local _trojan_ws_port="${TROJAN_WS_PORTS[$i]}"
+                local _trojan_ws_tag="${TROJAN_WS_TAGS[$i]}"
+                local _trojan_ws_path="${TROJAN_WS_PATHS[$i]}"
+                local _trojan_ws_tls="${TROJAN_WS_TLS_OPTS[$i]}"
+                local _trojan_ws_host="${TROJAN_WS_HOSTS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_TROJAN_WS_EOF
+  - name: trojan-ws-in-${_trojan_ws_port}
+    tag: "${_trojan_ws_tag}"
+    type: trojan
+    port: ${_trojan_ws_port}
+    listen: "::"
+    # vpsgo-trojan-type: ws
+    # vpsgo-trojan-ws-path: ${_trojan_ws_path}
+    # vpsgo-trojan-ws-tls: ${_trojan_ws_tls}
+    # vpsgo-trojan-ws-host: ${_trojan_ws_host}
+    users:
+MIHOMOCONF_TROJAN_WS_EOF
+                for _row in "${TROJAN_WS_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    printf "      \"%s\": \"%s\"\n" "$_u_name" "$_u_pass" >> "$_target_file"
+                done
+                if [[ "$_trojan_ws_tls" == "true" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_TROJAN_WS_TLS_EOF
+    tls: true
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_TROJAN_WS_TLS_EOF
+                fi
+                cat >> "$_target_file" <<MIHOMOCONF_TROJAN_TRANS_EOF
+    transport:
+      type: ws
+      path: ${_trojan_ws_path}
+MIHOMOCONF_TROJAN_TRANS_EOF
+                if [[ -n "$_trojan_ws_host" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_TROJAN_WS_HOST_EOF
+      headers:
+        Host: "${_trojan_ws_host}"
+MIHOMOCONF_TROJAN_WS_HOST_EOF
+                fi
+            done
+        fi
+        if [[ "$ENABLE_TROJAN_GRPC" == "y" ]]; then
+            for i in "${!TROJAN_GRPC_PORTS[@]}"; do
+                local _trojan_grpc_port="${TROJAN_GRPC_PORTS[$i]}"
+                local _trojan_grpc_tag="${TROJAN_GRPC_TAGS[$i]}"
+                local _trojan_grpc_service_name="${TROJAN_GRPC_SERVICE_NAMES[$i]}"
+                local _trojan_grpc_tls="${TROJAN_GRPC_TLS_OPTS[$i]}"
+                local _trojan_grpc_host="${TROJAN_GRPC_HOSTS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_TROJAN_GRPC_EOF
+  - name: trojan-grpc-in-${_trojan_grpc_port}
+    tag: "${_trojan_grpc_tag}"
+    type: trojan
+    port: ${_trojan_grpc_port}
+    listen: "::"
+    # vpsgo-trojan-type: grpc
+    # vpsgo-trojan-grpc-service-name: ${_trojan_grpc_service_name}
+    # vpsgo-trojan-grpc-tls: ${_trojan_grpc_tls}
+    # vpsgo-trojan-grpc-host: ${_trojan_grpc_host}
+    users:
+MIHOMOCONF_TROJAN_GRPC_EOF
+                for _row in "${TROJAN_GRPC_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    printf "      \"%s\": \"%s\"\n" "$_u_name" "$_u_pass" >> "$_target_file"
+                done
+                if [[ "$_trojan_grpc_tls" == "true" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_TROJAN_GRPC_TLS_EOF
+    tls: true
+    certificate: "${SSL_DIR}/cert.crt"
+    private-key: "${SSL_DIR}/cert.key"
+MIHOMOCONF_TROJAN_GRPC_TLS_EOF
+                fi
+                cat >> "$_target_file" <<MIHOMOCONF_TROJAN_GRPC_TRANS_EOF
+    transport:
+      type: grpc
+      grpc-opts:
+        grpc-service-name: "${_trojan_grpc_service_name}"
+MIHOMOCONF_TROJAN_GRPC_TRANS_EOF
             done
         fi
         if [[ "$ENABLE_HY2" == "y" ]]; then
@@ -8972,6 +9938,13 @@ MIHOMOCONF_HEADER
         [[ "$ANYTLS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "anytls" && _info "已移除旧的 AnyTLS 节点"
         [[ "$VLESS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless" && _info "已移除旧的 VLESS 节点"
         [[ "$VLESS_WS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless-ws" && _info "已移除旧的 VLESS WS 节点"
+        [[ "$VLESS_GRPC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless-grpc" && _info "已移除旧的 VLESS gRPC 节点"
+        [[ "$VMESS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vmess" && _info "已移除旧的 VMess TCP 节点"
+        [[ "$VMESS_WS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vmess-ws" && _info "已移除旧的 VMess WS 节点"
+        [[ "$VMESS_GRPC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vmess-grpc" && _info "已移除旧的 VMess gRPC 节点"
+        [[ "$TROJAN_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "trojan" && _info "已移除旧的 Trojan TCP 节点"
+        [[ "$TROJAN_WS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "trojan-ws" && _info "已移除旧的 Trojan WS 节点"
+        [[ "$TROJAN_GRPC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "trojan-grpc" && _info "已移除旧的 Trojan gRPC 节点"
         [[ "$HY2_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "hysteria2" && _info "已移除旧的 HY2 节点"
         [[ "$TUIC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "tuic" && _info "已移除旧的 Tuic 节点"
         [[ "$SOCKS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "socks" && _info "已移除旧的 Socks5 节点"
@@ -9015,11 +9988,11 @@ MIHOMOCONF_HEADER
             SS_EXPORT_UOT="0"
             _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
         else
-            read -rp "  SS 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer
-            if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
-                SS_EXPORT_UOT="0"
-            else
+            read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
+            if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
                 SS_EXPORT_UOT="1"
+            else
+                SS_EXPORT_UOT="0"
             fi
         fi
         [[ "$SS_EXPORT_UDP" == "1" ]] && _ss_udp_bool="true" || _ss_udp_bool="false"
@@ -9240,6 +10213,399 @@ MIHOMOCONF_VLESS_WS_YAML3
             done
             if [[ "$_vless_ws_user_idx" -eq 0 ]]; then
                 _warn "  VLESS WS 入站 ${_vless_ws_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # VMess TCP 输出
+    if [[ "$ENABLE_VMESS" == "y" ]]; then
+        printf "  ${BOLD}VMess TCP 连接信息 (%s 个)${PLAIN}\n" "${#VMESS_PORTS[@]}"
+        local i VMESS_LINK _vmess_port _vmess_tag _vmess_name _vmess_client_name
+        local _vmess_user_idx _u_uuid
+        local _row _li _u_name
+        for i in "${!VMESS_PORTS[@]}"; do
+            _vmess_port="${VMESS_PORTS[$i]}"
+            _vmess_tag="${VMESS_TAGS[$i]}"
+            _vmess_name=$(_mihomoconf_make_node_name "VMess-TCP" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vmess_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_vmess_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_vmess_port"
+            _vmess_user_idx=0
+            for _row in "${VMESS_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _vmess_user_idx=$((_vmess_user_idx + 1))
+                _vmess_client_name="${_vmess_name}-${_u_name}"
+                VMESS_LINK=$(_mihomoconf_gen_vmess_link "$SERVER_HOST" "$_vmess_port" "$_u_uuid" "$_vmess_client_name" "tcp" "" "false" "")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vmess_user_idx" "$_u_name"
+                printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
+                printf "  ${BOLD}VMess TCP 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$VMESS_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_VMESS_YAML
+    - name: "${_vmess_client_name}"
+      type: vmess
+      server: ${SERVER_HOST}
+      port: ${_vmess_port}
+      uuid: "${_u_uuid}"
+      alterId: 0
+      cipher: auto
+      udp: true
+MIHOMOCONF_VMESS_YAML
+            done
+            if [[ "$_vmess_user_idx" -eq 0 ]]; then
+                _warn "  VMess TCP 入站 ${_vmess_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # VMess WebSocket 输出
+    if [[ "$ENABLE_VMESS_WS" == "y" ]]; then
+        printf "  ${BOLD}VMess WebSocket 连接信息 (%s 个)${PLAIN}\n" "${#VMESS_WS_PORTS[@]}"
+        local i VMESS_WS_LINK _vmess_ws_port _vmess_ws_tag _vmess_ws_name _vmess_ws_client_name
+        local _vmess_ws_path _vmess_ws_tls _vmess_ws_host _vmess_ws_user_idx _u_uuid
+        local _row _li _u_name
+        for i in "${!VMESS_WS_PORTS[@]}"; do
+            _vmess_ws_port="${VMESS_WS_PORTS[$i]}"
+            _vmess_ws_tag="${VMESS_WS_TAGS[$i]}"
+            _vmess_ws_path="${VMESS_WS_PATHS[$i]}"
+            _vmess_ws_tls="${VMESS_WS_TLS_OPTS[$i]}"
+            _vmess_ws_host="${VMESS_WS_HOSTS[$i]}"
+            _vmess_ws_name=$(_mihomoconf_make_node_name "VMess-WS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vmess_ws_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_vmess_ws_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_vmess_ws_port"
+            printf "      WS Path: ${GREEN}%s${PLAIN}\n" "$_vmess_ws_path"
+            printf "      WS TLS : ${GREEN}%s${PLAIN}\n" "$_vmess_ws_tls"
+            [[ -n "$_vmess_ws_host" ]] && printf "      WS Host: ${GREEN}%s${PLAIN}\n" "$_vmess_ws_host"
+            _vmess_ws_user_idx=0
+            for _row in "${VMESS_WS_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _vmess_ws_user_idx=$((_vmess_ws_user_idx + 1))
+                _vmess_ws_client_name="${_vmess_ws_name}-${_u_name}"
+                VMESS_WS_LINK=$(_mihomoconf_gen_vmess_link "$SERVER_HOST" "$_vmess_ws_port" "$_u_uuid" "$_vmess_ws_client_name" "ws" "$_vmess_ws_path" "$_vmess_ws_tls" "$_vmess_ws_host")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vmess_ws_user_idx" "$_u_name"
+                printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
+                printf "  ${BOLD}VMess WS 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$VMESS_WS_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_VMESS_WS_YAML
+    - name: "${_vmess_ws_client_name}"
+      type: vmess
+      server: ${SERVER_HOST}
+      port: ${_vmess_ws_port}
+      uuid: "${_u_uuid}"
+      alterId: 0
+      cipher: auto
+      udp: true
+      tls: ${_vmess_ws_tls}
+MIHOMOCONF_VMESS_WS_YAML
+                if [[ "$_vmess_ws_tls" == "true" && -n "$_vmess_ws_host" ]]; then
+                    echo "      servername: ${_vmess_ws_host}"
+                fi
+                cat <<MIHOMOCONF_VMESS_WS_YAML2
+      network: ws
+      ws-opts:
+        path: ${_vmess_ws_path}
+MIHOMOCONF_VMESS_WS_YAML2
+                if [[ -n "$_vmess_ws_host" ]]; then
+                    cat <<MIHOMOCONF_VMESS_WS_YAML3
+        headers:
+          Host: ${_vmess_ws_host}
+MIHOMOCONF_VMESS_WS_YAML3
+                fi
+            done
+            if [[ "$_vmess_ws_user_idx" -eq 0 ]]; then
+                _warn "  VMess WS 入站 ${_vmess_ws_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # VMess gRPC 输出
+    if [[ "$ENABLE_VMESS_GRPC" == "y" ]]; then
+        printf "  ${BOLD}VMess gRPC 连接信息 (%s 个)${PLAIN}\n" "${#VMESS_GRPC_PORTS[@]}"
+        local i VMESS_GRPC_LINK _vmess_grpc_port _vmess_grpc_tag _vmess_grpc_name _vmess_grpc_client_name
+        local _vmess_grpc_service_name _vmess_grpc_tls _vmess_grpc_host _vmess_grpc_user_idx _u_uuid
+        local _row _li _u_name
+        for i in "${!VMESS_GRPC_PORTS[@]}"; do
+            _vmess_grpc_port="${VMESS_GRPC_PORTS[$i]}"
+            _vmess_grpc_tag="${VMESS_GRPC_TAGS[$i]}"
+            _vmess_grpc_service_name="${VMESS_GRPC_SERVICE_NAMES[$i]}"
+            _vmess_grpc_tls="${VMESS_GRPC_TLS_OPTS[$i]}"
+            _vmess_grpc_host="${VMESS_GRPC_HOSTS[$i]}"
+            _vmess_grpc_name=$(_mihomoconf_make_node_name "VMess-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vmess_grpc_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_vmess_grpc_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_vmess_grpc_port"
+            printf "      Service: ${GREEN}%s${PLAIN}\n" "$_vmess_grpc_service_name"
+            printf "      gRPC TLS: ${GREEN}%s${PLAIN}\n" "$_vmess_grpc_tls"
+            [[ -n "$_vmess_grpc_host" ]] && printf "      gRPC Host: ${GREEN}%s${PLAIN}\n" "$_vmess_grpc_host"
+            _vmess_grpc_user_idx=0
+            for _row in "${VMESS_GRPC_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _vmess_grpc_user_idx=$((_vmess_grpc_user_idx + 1))
+                _vmess_grpc_client_name="${_vmess_grpc_name}-${_u_name}"
+                VMESS_GRPC_LINK=$(_mihomoconf_gen_vmess_link "$SERVER_HOST" "$_vmess_grpc_port" "$_u_uuid" "$_vmess_grpc_client_name" "grpc" "$_vmess_grpc_service_name" "$_vmess_grpc_tls" "$_vmess_grpc_host")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vmess_grpc_user_idx" "$_u_name"
+                printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
+                printf "  ${BOLD}VMess gRPC 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$VMESS_GRPC_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_VMESS_GRPC_YAML
+    - name: "${_vmess_grpc_client_name}"
+      type: vmess
+      server: ${SERVER_HOST}
+      port: ${_vmess_grpc_port}
+      uuid: "${_u_uuid}"
+      alterId: 0
+      cipher: auto
+      udp: true
+      tls: ${_vmess_grpc_tls}
+MIHOMOCONF_VMESS_GRPC_YAML
+                if [[ "$_vmess_grpc_tls" == "true" && -n "$_vmess_grpc_host" ]]; then
+                    echo "      servername: ${_vmess_grpc_host}"
+                fi
+                cat <<MIHOMOCONF_VMESS_GRPC_YAML2
+      network: grpc
+      grpc-opts:
+        grpc-service-name: "${_vmess_grpc_service_name}"
+MIHOMOCONF_VMESS_GRPC_YAML2
+            done
+            if [[ "$_vmess_grpc_user_idx" -eq 0 ]]; then
+                _warn "  VMess gRPC 入站 ${_vmess_grpc_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # VLESS gRPC 输出
+    if [[ "$ENABLE_VLESS_GRPC" == "y" ]]; then
+        printf "  ${BOLD}VLESS gRPC 连接信息 (%s 个)${PLAIN}\n" "${#VLESS_GRPC_PORTS[@]}"
+        local i VLESS_GRPC_LINK _vless_grpc_port _vless_grpc_tag _vless_grpc_name _vless_grpc_client_name
+        local _vless_grpc_service_name _vless_grpc_tls _vless_grpc_host _vless_grpc_user_idx _u_uuid
+        local _row _li _u_name
+        for i in "${!VLESS_GRPC_PORTS[@]}"; do
+            _vless_grpc_port="${VLESS_GRPC_PORTS[$i]}"
+            _vless_grpc_tag="${VLESS_GRPC_TAGS[$i]}"
+            _vless_grpc_service_name="${VLESS_GRPC_SERVICE_NAMES[$i]}"
+            _vless_grpc_tls="${VLESS_GRPC_TLS_OPTS[$i]}"
+            _vless_grpc_host="${VLESS_GRPC_HOSTS[$i]}"
+            _vless_grpc_name=$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vless_grpc_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_vless_grpc_port"
+            printf "      Service: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_service_name"
+            printf "      gRPC TLS: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tls"
+            [[ -n "$_vless_grpc_host" ]] && printf "      gRPC Host: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_host"
+            _vless_grpc_user_idx=0
+            for _row in "${VLESS_GRPC_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _vless_grpc_user_idx=$((_vless_grpc_user_idx + 1))
+                _vless_grpc_client_name="${_vless_grpc_name}-${_u_name}"
+                VLESS_GRPC_LINK=$(_mihomoconf_gen_vless_grpc_link "$SERVER_HOST" "$_vless_grpc_port" "$_u_uuid" "$_vless_grpc_client_name" "$_vless_grpc_service_name" "$_vless_grpc_tls" "$_vless_grpc_host")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_user_idx" "$_u_name"
+                printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
+                printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$VLESS_GRPC_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_VLESS_GRPC_YAML
+    - name: "${_vless_grpc_client_name}"
+      type: vless
+      server: ${SERVER_HOST}
+      port: ${_vless_grpc_port}
+      uuid: "${_u_uuid}"
+      udp: true
+      tls: ${_vless_grpc_tls}
+MIHOMOCONF_VLESS_GRPC_YAML
+                if [[ "$_vless_grpc_tls" == "true" && -n "$_vless_grpc_host" ]]; then
+                    echo "      servername: ${_vless_grpc_host}"
+                fi
+                cat <<MIHOMOCONF_VLESS_GRPC_YAML2
+      network: grpc
+      grpc-opts:
+        grpc-service-name: "${_vless_grpc_service_name}"
+MIHOMOCONF_VLESS_GRPC_YAML2
+            done
+            if [[ "$_vless_grpc_user_idx" -eq 0 ]]; then
+                _warn "  VLESS gRPC 入站 ${_vless_grpc_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # Trojan TCP 输出
+    if [[ "$ENABLE_TROJAN" == "y" ]]; then
+        printf "  ${BOLD}Trojan TCP 连接信息 (%s 个)${PLAIN}\n" "${#TROJAN_PORTS[@]}"
+        local i TROJAN_LINK _trojan_port _trojan_tag _trojan_name _trojan_client_name
+        local _trojan_tls _trojan_host _trojan_user_idx _u_pass
+        local _row _li _u_name
+        for i in "${!TROJAN_PORTS[@]}"; do
+            _trojan_port="${TROJAN_PORTS[$i]}"
+            _trojan_tag="${TROJAN_TAGS[$i]}"
+            _trojan_tls="${TROJAN_TLS_OPTS[$i]}"
+            _trojan_host="${TROJAN_HOSTS[$i]}"
+            _trojan_name=$(_mihomoconf_make_node_name "Trojan-TCP" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_trojan_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_trojan_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_trojan_port"
+            printf "      TLS    : ${GREEN}%s${PLAIN}\n" "$_trojan_tls"
+            [[ -n "$_trojan_host" ]] && printf "      SNI/Host: ${GREEN}%s${PLAIN}\n" "$_trojan_host"
+            _trojan_user_idx=0
+            for _row in "${TROJAN_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _trojan_user_idx=$((_trojan_user_idx + 1))
+                _trojan_client_name="${_trojan_name}-${_u_name}"
+                TROJAN_LINK=$(_mihomoconf_gen_trojan_link "$SERVER_HOST" "$_trojan_port" "$_u_pass" "$_trojan_client_name" "tcp" "" "$_trojan_tls" "$_trojan_host")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_trojan_user_idx" "$_u_name"
+                printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
+                printf "  ${BOLD}Trojan TCP 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$TROJAN_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_TROJAN_YAML
+    - name: "${_trojan_client_name}"
+      type: trojan
+      server: ${SERVER_HOST}
+      port: ${_trojan_port}
+      password: "${_u_pass}"
+      udp: true
+      sni: "${_trojan_host}"
+      skip-cert-verify: false
+MIHOMOCONF_TROJAN_YAML
+            done
+            if [[ "$_trojan_user_idx" -eq 0 ]]; then
+                _warn "  Trojan TCP 入站 ${_trojan_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # Trojan WebSocket 输出
+    if [[ "$ENABLE_TROJAN_WS" == "y" ]]; then
+        printf "  ${BOLD}Trojan WebSocket 连接信息 (%s 个)${PLAIN}\n" "${#TROJAN_WS_PORTS[@]}"
+        local i TROJAN_WS_LINK _trojan_ws_port _trojan_ws_tag _trojan_ws_name _trojan_ws_client_name
+        local _trojan_ws_path _trojan_ws_tls _trojan_ws_host _trojan_ws_user_idx _u_pass
+        local _row _li _u_name
+        for i in "${!TROJAN_WS_PORTS[@]}"; do
+            _trojan_ws_port="${TROJAN_WS_PORTS[$i]}"
+            _trojan_ws_tag="${TROJAN_WS_TAGS[$i]}"
+            _trojan_ws_path="${TROJAN_WS_PATHS[$i]}"
+            _trojan_ws_tls="${TROJAN_WS_TLS_OPTS[$i]}"
+            _trojan_ws_host="${TROJAN_WS_HOSTS[$i]}"
+            _trojan_ws_name=$(_mihomoconf_make_node_name "Trojan-WS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_trojan_ws_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_trojan_ws_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_trojan_ws_port"
+            printf "      WS Path: ${GREEN}%s${PLAIN}\n" "$_trojan_ws_path"
+            printf "      WS TLS : ${GREEN}%s${PLAIN}\n" "$_trojan_ws_tls"
+            [[ -n "$_trojan_ws_host" ]] && printf "      WS Host: ${GREEN}%s${PLAIN}\n" "$_trojan_ws_host"
+            _trojan_ws_user_idx=0
+            for _row in "${TROJAN_WS_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _trojan_ws_user_idx=$((_trojan_ws_user_idx + 1))
+                _trojan_ws_client_name="${_trojan_ws_name}-${_u_name}"
+                TROJAN_WS_LINK=$(_mihomoconf_gen_trojan_link "$SERVER_HOST" "$_trojan_ws_port" "$_u_pass" "$_trojan_ws_client_name" "ws" "$_trojan_ws_path" "$_trojan_ws_tls" "$_trojan_ws_host")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_trojan_ws_user_idx" "$_u_name"
+                printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
+                printf "  ${BOLD}Trojan WS 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$TROJAN_WS_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_TROJAN_WS_YAML
+    - name: "${_trojan_ws_client_name}"
+      type: trojan
+      server: ${SERVER_HOST}
+      port: ${_trojan_ws_port}
+      password: "${_u_pass}"
+      udp: true
+      tls: ${_trojan_ws_tls}
+MIHOMOCONF_TROJAN_WS_YAML
+                if [[ "$_trojan_ws_tls" == "true" && -n "$_trojan_ws_host" ]]; then
+                    echo "      servername: ${_trojan_ws_host}"
+                fi
+                cat <<MIHOMOCONF_TROJAN_WS_YAML2
+      network: ws
+      ws-opts:
+        path: ${_trojan_ws_path}
+MIHOMOCONF_TROJAN_WS_YAML2
+                if [[ -n "$_trojan_ws_host" ]]; then
+                    cat <<MIHOMOCONF_TROJAN_WS_YAML3
+        headers:
+          Host: ${_trojan_ws_host}
+MIHOMOCONF_TROJAN_WS_YAML3
+                fi
+            done
+            if [[ "$_trojan_ws_user_idx" -eq 0 ]]; then
+                _warn "  Trojan WS 入站 ${_trojan_ws_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # Trojan gRPC 输出
+    if [[ "$ENABLE_TROJAN_GRPC" == "y" ]]; then
+        printf "  ${BOLD}Trojan gRPC 连接信息 (%s 个)${PLAIN}\n" "${#TROJAN_GRPC_PORTS[@]}"
+        local i TROJAN_GRPC_LINK _trojan_grpc_port _trojan_grpc_tag _trojan_grpc_name _trojan_grpc_client_name
+        local _trojan_grpc_service_name _trojan_grpc_tls _trojan_grpc_host _trojan_grpc_user_idx _u_pass
+        local _row _li _u_name
+        for i in "${!TROJAN_GRPC_PORTS[@]}"; do
+            _trojan_grpc_port="${TROJAN_GRPC_PORTS[$i]}"
+            _trojan_grpc_tag="${TROJAN_GRPC_TAGS[$i]}"
+            _trojan_grpc_service_name="${TROJAN_GRPC_SERVICE_NAMES[$i]}"
+            _trojan_grpc_tls="${TROJAN_GRPC_TLS_OPTS[$i]}"
+            _trojan_grpc_host="${TROJAN_GRPC_HOSTS[$i]}"
+            _trojan_grpc_name=$(_mihomoconf_make_node_name "Trojan-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_trojan_grpc_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_trojan_grpc_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_trojan_grpc_port"
+            printf "      Service: ${GREEN}%s${PLAIN}\n" "$_trojan_grpc_service_name"
+            printf "      gRPC TLS: ${GREEN}%s${PLAIN}\n" "$_trojan_grpc_tls"
+            [[ -n "$_trojan_grpc_host" ]] && printf "      gRPC Host: ${GREEN}%s${PLAIN}\n" "$_trojan_grpc_host"
+            _trojan_grpc_user_idx=0
+            for _row in "${TROJAN_GRPC_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_pass <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _trojan_grpc_user_idx=$((_trojan_grpc_user_idx + 1))
+                _trojan_grpc_client_name="${_trojan_grpc_name}-${_u_name}"
+                TROJAN_GRPC_LINK=$(_mihomoconf_gen_trojan_link "$SERVER_HOST" "$_trojan_grpc_port" "$_u_pass" "$_trojan_grpc_client_name" "grpc" "$_trojan_grpc_service_name" "$_trojan_grpc_tls" "$_trojan_grpc_host")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_trojan_grpc_user_idx" "$_u_name"
+                printf "      密码   : ${GREEN}%s${PLAIN}\n" "$_u_pass"
+                printf "  ${BOLD}Trojan gRPC 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$TROJAN_GRPC_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_TROJAN_GRPC_YAML
+    - name: "${_trojan_grpc_client_name}"
+      type: trojan
+      server: ${SERVER_HOST}
+      port: ${_trojan_grpc_port}
+      password: "${_u_pass}"
+      udp: true
+      tls: ${_trojan_grpc_tls}
+MIHOMOCONF_TROJAN_GRPC_YAML
+                if [[ "$_trojan_grpc_tls" == "true" && -n "$_trojan_grpc_host" ]]; then
+                    echo "      servername: ${_trojan_grpc_host}"
+                fi
+                cat <<MIHOMOCONF_TROJAN_GRPC_YAML2
+      network: grpc
+      grpc-opts:
+        grpc-service-name: "${_trojan_grpc_service_name}"
+MIHOMOCONF_TROJAN_GRPC_YAML2
+            done
+            if [[ "$_trojan_grpc_user_idx" -eq 0 ]]; then
+                _warn "  Trojan gRPC 入站 ${_trojan_grpc_tag} 未配置 user，已跳过导出"
             fi
         done
     fi
@@ -10048,12 +11414,12 @@ _mihomo_read_config() {
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure hy2_congestion_control
     local vless_public_key vless_short_id vless_flow vless_client_fingerprint
     local tuic_congestion_control tuic_alpn tuic_udp_relay_mode
-    local vless_type vless_ws_path vless_ws_tls vless_ws_host
+    local vless_type vless_ws_path vless_ws_tls vless_ws_host vless_grpc_service_name
     local p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport
     local p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive
     local p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding
-    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="1" SS_EXPORT_ASKED="0"
-    local SS_EXPORT_UDP_BOOL="true" SS_EXPORT_UOT_BOOL="true"
+    local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0" SS_EXPORT_ASKED="0"
+    local SS_EXPORT_UDP_BOOL="true" SS_EXPORT_UOT_BOOL="false"
     local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
     local GEO_LOOKUP_IP=""
     local OUTPUT_LINK_ONLY="0" output_mode_answer
@@ -10118,7 +11484,7 @@ _mihomo_read_config() {
         hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
         vless_public_key vless_short_id vless_flow vless_client_fingerprint \
         tuic_congestion_control tuic_alpn tuic_udp_relay_mode hy2_congestion_control \
-        vless_type vless_ws_path vless_ws_tls vless_ws_host; do
+        vless_type vless_ws_path vless_ws_tls vless_ws_host vless_grpc_service_name; do
         [[ -z "${name:-}" ]] && continue
         total_count=$((total_count + 1))
         listener_total=$((listener_total + 1))
@@ -10138,11 +11504,11 @@ _mihomo_read_config() {
                         SS_EXPORT_UOT="0"
                         _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
                     else
-                        read -rp "  SS 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer < /dev/tty
-                        if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
-                            SS_EXPORT_UOT="0"
-                        else
+                        read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer < /dev/tty
+                        if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
                             SS_EXPORT_UOT="1"
+                        else
+                            SS_EXPORT_UOT="0"
                         fi
                     fi
                     [[ "$SS_EXPORT_UDP" == "1" ]] && SS_EXPORT_UDP_BOOL="true" || SS_EXPORT_UDP_BOOL="false"
@@ -10334,6 +11700,356 @@ MIHOMO_VLESS_WS_YAML3
                     fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$vless_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            vless-grpc)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: VLESS gRPC 字段不完整"
+                    continue
+                fi
+                local vless_found=0 vless_link vless_name vless_user vless_uuid
+                while IFS=$'\x1f' read -r vless_user vless_uuid; do
+                    [[ -z "${vless_user:-}" || -z "${vless_uuid:-}" ]] && continue
+                    vless_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    vless_name="$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
+                    vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$vless_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[VLESS gRPC] %s${PLAIN}\n" "$vless_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$vless_user"
+                        printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vless_uuid"
+                        printf "    gRPC Service: ${GREEN}%s${PLAIN}\n" "$vless_grpc_service_name"
+                        printf "    gRPC TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        [[ -n "$vless_ws_host" ]] && printf "    gRPC Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_VLESS_GRPC_YAML
+    proxies:
+      - name: "${vless_name}"
+        type: vless
+        server: ${server_ip}
+        port: ${port}
+        uuid: "${vless_uuid}"
+        udp: true
+        tls: ${vless_ws_tls}
+MIHOMO_VLESS_GRPC_YAML
+                        if [[ "$vless_ws_tls" == "true" && -n "$vless_ws_host" ]]; then
+                            echo "        servername: ${vless_ws_host}"
+                        fi
+                        cat <<MIHOMO_VLESS_GRPC_YAML2
+        network: grpc
+        grpc-opts:
+          grpc-service-name: ${vless_grpc_service_name}
+MIHOMO_VLESS_GRPC_YAML2
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$vless_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            vmess)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: VMess TCP 字段不完整"
+                    continue
+                fi
+                local vmess_found=0 vmess_link vmess_name vmess_user vmess_uuid
+                while IFS=$'\x1f' read -r vmess_user vmess_uuid; do
+                    [[ -z "${vmess_user:-}" || -z "${vmess_uuid:-}" ]] && continue
+                    vmess_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    vmess_name="$(_mihomoconf_make_node_name "VMess" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vmess_user}"
+                    vmess_link=$(_mihomoconf_gen_vmess_link "$server_ip" "$port" "$vmess_uuid" "$vmess_name" "tcp" "" "false" "")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$vmess_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[VMess TCP] %s${PLAIN}\n" "$vmess_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$vmess_user"
+                        printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vmess_uuid"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$vmess_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_VMESS_YAML
+    proxies:
+      - name: "${vmess_name}"
+        type: vmess
+        server: ${server_ip}
+        port: ${port}
+        uuid: "${vmess_uuid}"
+        alterId: 0
+        cipher: auto
+        udp: true
+MIHOMO_VMESS_YAML
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$vmess_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            vmess-ws)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: VMess WS 字段不完整"
+                    continue
+                fi
+                local vmess_found=0 vmess_link vmess_name vmess_user vmess_uuid
+                while IFS=$'\x1f' read -r vmess_user vmess_uuid; do
+                    [[ -z "${vmess_user:-}" || -z "${vmess_uuid:-}" ]] && continue
+                    vmess_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    vmess_name="$(_mihomoconf_make_node_name "VMess-WS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vmess_user}"
+                    vmess_link=$(_mihomoconf_gen_vmess_link "$server_ip" "$port" "$vmess_uuid" "$vmess_name" "ws" "$vless_ws_path" "$vless_ws_tls" "$vless_ws_host")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$vmess_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[VMess WS] %s${PLAIN}\n" "$vmess_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$vmess_user"
+                        printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vmess_uuid"
+                        printf "    WS Path: ${GREEN}%s${PLAIN}\n" "$vless_ws_path"
+                        printf "    WS TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        [[ -n "$vless_ws_host" ]] && printf "    WS Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$vmess_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_VMESS_WS_YAML
+    proxies:
+      - name: "${vmess_name}"
+        type: vmess
+        server: ${server_ip}
+        port: ${port}
+        uuid: "${vmess_uuid}"
+        alterId: 0
+        cipher: auto
+        udp: true
+        tls: ${vless_ws_tls}
+MIHOMO_VMESS_WS_YAML
+                        if [[ "$vless_ws_tls" == "true" && -n "$vless_ws_host" ]]; then
+                            echo "        servername: ${vless_ws_host}"
+                        fi
+                        cat <<MIHOMO_VMESS_WS_YAML2
+        network: ws
+        ws-opts:
+          path: ${vless_ws_path}
+MIHOMO_VMESS_WS_YAML2
+                        if [[ -n "$vless_ws_host" ]]; then
+                            cat <<MIHOMO_VMESS_WS_YAML3
+          headers:
+            Host: ${vless_ws_host}
+MIHOMO_VMESS_WS_YAML3
+                        fi
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$vmess_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            vmess-grpc)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: VMess gRPC 字段不完整"
+                    continue
+                fi
+                local vmess_found=0 vmess_link vmess_name vmess_user vmess_uuid
+                while IFS=$'\x1f' read -r vmess_user vmess_uuid; do
+                    [[ -z "${vmess_user:-}" || -z "${vmess_uuid:-}" ]] && continue
+                    vmess_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    vmess_name="$(_mihomoconf_make_node_name "VMess-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vmess_user}"
+                    vmess_link=$(_mihomoconf_gen_vmess_link "$server_ip" "$port" "$vmess_uuid" "$vmess_name" "grpc" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$vmess_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[VMess gRPC] %s${PLAIN}\n" "$vmess_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$vmess_user"
+                        printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vmess_uuid"
+                        printf "    gRPC Service: ${GREEN}%s${PLAIN}\n" "$vless_grpc_service_name"
+                        printf "    gRPC TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        [[ -n "$vless_ws_host" ]] && printf "    gRPC Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$vmess_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_VMESS_GRPC_YAML
+    proxies:
+      - name: "${vmess_name}"
+        type: vmess
+        server: ${server_ip}
+        port: ${port}
+        uuid: "${vmess_uuid}"
+        alterId: 0
+        cipher: auto
+        udp: true
+        tls: ${vless_ws_tls}
+MIHOMO_VMESS_GRPC_YAML
+                        if [[ "$vless_ws_tls" == "true" && -n "$vless_ws_host" ]]; then
+                            echo "        servername: ${vless_ws_host}"
+                        fi
+                        cat <<MIHOMO_VMESS_GRPC_YAML2
+        network: grpc
+        grpc-opts:
+          grpc-service-name: ${vless_grpc_service_name}
+MIHOMO_VMESS_GRPC_YAML2
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$vmess_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            trojan)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: Trojan TCP 字段不完整"
+                    continue
+                fi
+                local trojan_found=0 trojan_link trojan_name trojan_user trojan_pass
+                while IFS=$'\x1f' read -r trojan_user trojan_pass; do
+                    [[ -z "${trojan_user:-}" || -z "${trojan_pass:-}" ]] && continue
+                    trojan_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    trojan_name="$(_mihomoconf_make_node_name "Trojan" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${trojan_user}"
+                    trojan_link=$(_mihomoconf_gen_trojan_link "$server_ip" "$port" "$trojan_pass" "$trojan_name" "tcp" "" "$vless_ws_tls" "$vless_ws_host")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$trojan_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[Trojan TCP] %s${PLAIN}\n" "$trojan_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$trojan_user"
+                        printf "    密码: ${GREEN}%s${PLAIN}\n" "$trojan_pass"
+                        printf "    TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        [[ -n "$vless_ws_host" ]] && printf "    SNI/Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$trojan_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_TROJAN_YAML
+    proxies:
+      - name: "${trojan_name}"
+        type: trojan
+        server: ${server_ip}
+        port: ${port}
+        password: "${trojan_pass}"
+        udp: true
+        tls: ${vless_ws_tls}
+MIHOMO_TROJAN_YAML
+                        if [[ -n "$vless_ws_host" ]]; then
+                            echo "        sni: ${vless_ws_host}"
+                        fi
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$trojan_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            trojan-ws)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: Trojan WS 字段不完整"
+                    continue
+                fi
+                local trojan_found=0 trojan_link trojan_name trojan_user trojan_pass
+                while IFS=$'\x1f' read -r trojan_user trojan_pass; do
+                    [[ -z "${trojan_user:-}" || -z "${trojan_pass:-}" ]] && continue
+                    trojan_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    trojan_name="$(_mihomoconf_make_node_name "Trojan-WS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${trojan_user}"
+                    trojan_link=$(_mihomoconf_gen_trojan_link "$server_ip" "$port" "$trojan_pass" "$trojan_name" "ws" "$vless_ws_path" "$vless_ws_tls" "$vless_ws_host")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$trojan_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[Trojan WS] %s${PLAIN}\n" "$trojan_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$trojan_user"
+                        printf "    密码: ${GREEN}%s${PLAIN}\n" "$trojan_pass"
+                        printf "    WS Path: ${GREEN}%s${PLAIN}\n" "$vless_ws_path"
+                        printf "    WS TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        [[ -n "$vless_ws_host" ]] && printf "    WS Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$trojan_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_TROJAN_WS_YAML
+    proxies:
+      - name: "${trojan_name}"
+        type: trojan
+        server: ${server_ip}
+        port: ${port}
+        password: "${trojan_pass}"
+        udp: true
+        tls: ${vless_ws_tls}
+MIHOMO_TROJAN_WS_YAML
+                        if [[ -n "$vless_ws_host" ]]; then
+                            echo "        sni: ${vless_ws_host}"
+                        fi
+                        cat <<MIHOMO_TROJAN_WS_YAML2
+        network: ws
+        ws-opts:
+          path: ${vless_ws_path}
+MIHOMO_TROJAN_WS_YAML2
+                        if [[ -n "$vless_ws_host" ]]; then
+                            cat <<MIHOMO_TROJAN_WS_YAML3
+          headers:
+            Host: ${vless_ws_host}
+MIHOMO_TROJAN_WS_YAML3
+                        fi
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$trojan_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            trojan-grpc)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: Trojan gRPC 字段不完整"
+                    continue
+                fi
+                local trojan_found=0 trojan_link trojan_name trojan_user trojan_pass
+                while IFS=$'\x1f' read -r trojan_user trojan_pass; do
+                    [[ -z "${trojan_user:-}" || -z "${trojan_pass:-}" ]] && continue
+                    trojan_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    trojan_name="$(_mihomoconf_make_node_name "Trojan-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${trojan_user}"
+                    trojan_link=$(_mihomoconf_gen_trojan_link "$server_ip" "$port" "$trojan_pass" "$trojan_name" "grpc" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$trojan_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[Trojan gRPC] %s${PLAIN}\n" "$trojan_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$trojan_user"
+                        printf "    密码: ${GREEN}%s${PLAIN}\n" "$trojan_pass"
+                        printf "    gRPC Service: ${GREEN}%s${PLAIN}\n" "$vless_grpc_service_name"
+                        printf "    gRPC TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        [[ -n "$vless_ws_host" ]] && printf "    gRPC Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$trojan_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_TROJAN_GRPC_YAML
+    proxies:
+      - name: "${trojan_name}"
+        type: trojan
+        server: ${server_ip}
+        port: ${port}
+        password: "${trojan_pass}"
+        udp: true
+        tls: ${vless_ws_tls}
+MIHOMO_TROJAN_GRPC_YAML
+                        if [[ -n "$vless_ws_host" ]]; then
+                            echo "        sni: ${vless_ws_host}"
+                        fi
+                        cat <<MIHOMO_TROJAN_GRPC_YAML2
+        network: grpc
+        grpc-opts:
+          grpc-service-name: ${vless_grpc_service_name}
+MIHOMO_TROJAN_GRPC_YAML2
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$trojan_found" -eq 0 ]]; then
                     _warn "跳过 ${name}: 未配置可用 user"
                 fi
                 ;;
@@ -14659,7 +16375,7 @@ EOF
                 local idx li user_count l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
                 local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
-                local l_vless_type l_vless_ws_path l_vless_ws_tls l_vless_ws_host
+                local l_vless_type l_vless_ws_path l_vless_ws_tls l_vless_ws_host l_vless_grpc_service_name
                 local u_name u_pass
                 local -a add_created_users=() add_created_uuids=() add_created_passwords=()
                 local -a add_listener_tags=() add_listener_names=() add_listener_types=() add_listener_ciphers=()
@@ -14671,10 +16387,10 @@ EOF
                     l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag \
                     l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint \
                     l_tuic_congestion_control l_tuic_alpn l_tuic_udp_relay_mode l_hy2_congestion_control \
-                    l_vless_type l_vless_ws_path l_vless_ws_tls l_vless_ws_host; do
+                    l_vless_type l_vless_ws_path l_vless_ws_tls l_vless_ws_host l_vless_grpc_service_name; do
                     [[ -z "${l_name:-}" ]] && continue
                     case "$l_type" in
-                        anytls|hysteria2|hy2|tuic|socks|vless|vless-ws) ;;
+                        anytls|hysteria2|hy2|tuic|socks|vless|vless-ws|vless-grpc|vmess|vmess-ws|vmess-grpc|trojan|trojan-ws|trojan-grpc) ;;
                         *) continue ;;
                     esac
                     l_listener_tag="${l_listener_tag:-$l_name}"
@@ -14692,7 +16408,7 @@ EOF
                         "$idx" "$l_name" "$l_type" "${l_port:-N/A}" "$user_count"
                 done < <(_mihomoconf_read_listener_rows "$config_file")
                 if (( ${#add_listener_tags[@]} == 0 )); then
-                    _warn "未找到支持 users 的入站节点 (AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS)"
+                    _warn "未找到支持 users 的入站节点 (AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VMess/Trojan 系列)"
                     _press_any_key
                     continue
                 fi
@@ -14769,12 +16485,12 @@ EOF
                     if [[ "$add_listener_type" == "tuic" ]]; then
                         add_uuid=$(_mihomoconf_gen_uuid)
                         _mihomoconf_add_tuic_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "$add_password"
-                    elif [[ "$add_listener_type" == "socks" ]]; then
+                    elif [[ "$add_listener_type" == "socks" || "$add_listener_type" == "trojan" || "$add_listener_type" == "trojan-ws" || "$add_listener_type" == "trojan-grpc" ]]; then
                         _mihomoconf_add_socks_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_password"
                     elif [[ "$add_listener_type" == "vless" ]]; then
                         add_uuid=$(_mihomoconf_gen_uuid)
                         _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "xtls-rprx-vision"
-                    elif [[ "$add_listener_type" == "vless-ws" ]]; then
+                    elif [[ "$add_listener_type" == "vless-ws" || "$add_listener_type" == "vless-grpc" || "$add_listener_type" == "vmess" || "$add_listener_type" == "vmess-ws" || "$add_listener_type" == "vmess-grpc" ]]; then
                         add_uuid=$(_mihomoconf_gen_uuid)
                         _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" ""
                     else
@@ -14784,7 +16500,7 @@ EOF
                     if [[ "$add_result" -ne 0 ]]; then
                         case "$add_result" in
                             2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
-                            3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS）" ;;
+                            3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VMess/Trojan 系列）" ;;
                             *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
                         esac
                         _press_any_key
@@ -14837,12 +16553,12 @@ EOF
                         if [[ "$add_listener_type" == "tuic" ]]; then
                             add_uuid=$(_mihomoconf_gen_uuid)
                             _mihomoconf_add_tuic_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "$add_password"
-                        elif [[ "$add_listener_type" == "socks" ]]; then
+                        elif [[ "$add_listener_type" == "socks" || "$add_listener_type" == "trojan" || "$add_listener_type" == "trojan-ws" || "$add_listener_type" == "trojan-grpc" ]]; then
                             _mihomoconf_add_socks_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_password"
                         elif [[ "$add_listener_type" == "vless" ]]; then
                             add_uuid=$(_mihomoconf_gen_uuid)
                             _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "xtls-rprx-vision"
-                        elif [[ "$add_listener_type" == "vless-ws" ]]; then
+                        elif [[ "$add_listener_type" == "vless-ws" || "$add_listener_type" == "vless-grpc" || "$add_listener_type" == "vmess" || "$add_listener_type" == "vmess-ws" || "$add_listener_type" == "vmess-grpc" ]]; then
                             add_uuid=$(_mihomoconf_gen_uuid)
                             _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" ""
                         else
@@ -14852,7 +16568,7 @@ EOF
                         if [[ "$add_result" -ne 0 ]]; then
                             case "$add_result" in
                                 2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
-                                3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS）" ;;
+                                3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VMess/Trojan 系列）" ;;
                                 *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
                             esac
                             _press_any_key
@@ -17739,14 +19455,14 @@ _snell_port_conflict_with_mihomo() {
     local type name port cipher password user_id user_pass sni
     local hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag
     local vless_public_key vless_short_id vless_flow vless_client_fingerprint
-    local vless_type vless_ws_path vless_ws_tls vless_ws_host
+    local vless_type vless_ws_path vless_ws_tls vless_ws_host vless_grpc_service_name
 
     [[ -f "$config_file" ]] || return 1
     while IFS=$'\x1f' read -r type name port cipher password user_id user_pass sni \
         hy2_up hy2_down hy2_ignore hy2_obfs hy2_obfs_password hy2_masquerade hy2_mport hy2_insecure listener_tag \
         vless_public_key vless_short_id vless_flow vless_client_fingerprint \
         tuic_congestion_control tuic_alpn tuic_udp_relay_mode hy2_congestion_control \
-        vless_type vless_ws_path vless_ws_tls vless_ws_host; do
+        vless_type vless_ws_path vless_ws_tls vless_ws_host vless_grpc_service_name; do
         [[ -z "${port:-}" ]] && continue
         if [[ "$port" == "$target_port" ]]; then
             return 0
@@ -20945,7 +22661,7 @@ _ssrust_configure() {
     local password_input password_value current_password_compatible
     local mode_pick mode_default mode_value
     local listen_input listen_addr host_default host_input client_host
-    local uri_link udp_bool ss_export_uot_answer ss_export_udp="1" ss_export_uot="1" ss_export_uot_bool="true"
+    local uri_link udp_bool ss_export_uot_answer ss_export_udp="1" ss_export_uot="0" ss_export_uot_bool="false"
 
     current_port=$(_ssrust_conf_get_value "server_port" 2>/dev/null || true)
     _is_valid_port "${current_port:-}" || current_port="8388"
@@ -21071,10 +22787,10 @@ _ssrust_configure() {
         ss_export_uot="0"
         ss_export_uot_bool="false"
     else
-        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer
-        if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
-            ss_export_uot="0"
-            ss_export_uot_bool="false"
+        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
+        if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+            ss_export_uot="1"
+            ss_export_uot_bool="true"
         fi
     fi
     uri_link=$(_ssrust_gen_ss_uri_link "$client_host" "$listen_port" "$method_value" "$password_value" "SS-Rust" "$ss_export_udp" "$ss_export_uot")
@@ -21164,7 +22880,7 @@ _ssrust_export_node_config() {
 
     local listen_port method password mode server
     local host_default host_input client_host node_name node_name_input
-    local uri_link udp_bool network_json_line ss_export_uot_answer ss_export_udp="1" ss_export_uot="1" ss_export_uot_bool="true"
+    local uri_link udp_bool network_json_line ss_export_uot_answer ss_export_udp="1" ss_export_uot="0" ss_export_uot_bool="false"
     local q_name q_server q_method q_password
     local safe_host export_dir base_name
     local txt_file mihomo_file singbox_file
@@ -21210,10 +22926,10 @@ _ssrust_export_node_config() {
         ss_export_uot="0"
         ss_export_uot_bool="false"
     else
-        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [Y/n]: " ss_export_uot_answer
-        if [[ "$ss_export_uot_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
-            ss_export_uot="0"
-            ss_export_uot_bool="false"
+        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
+        if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+            ss_export_uot="1"
+            ss_export_uot_bool="true"
         fi
     fi
     uri_link=$(_ssrust_gen_ss_uri_link "$client_host" "$listen_port" "$method" "$password" "$node_name" "$ss_export_udp" "$ss_export_uot")
