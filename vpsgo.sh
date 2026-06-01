@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="4.15"
+VERSION="4.16"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -5169,6 +5169,324 @@ _mihomoconf_gen_reality_keypair() {
     printf '%s\t%s\n' "$private_key" "$public_key"
 }
 
+# 检测单个 Reality 域名是否符合要求 (TLS 1.3, H2, X25519MLKEM768)
+# 参数: $1 域名
+# 返回值: 输出 OK / OK_NO_PQ / H2_FAIL / TLS13_FAIL, 并返回 0 (符合所有) 或 1 (仅符合 TLS1.3/H2) 或 2 (完全不符合)
+_mihomoconf_check_reality_domain() {
+    local domain="$1"
+    local has_python3=0
+    local has_h2=0
+    local has_tls13=0
+    
+    if command -v python3 >/dev/null 2>&1; then
+        has_python3=1
+    fi
+    
+    # 1. 检测 HTTP/2 (使用 GET 且跟随重定向保证兼容性)
+    local http_ver
+    http_ver=$(curl -sL -o /dev/null -w "%{http_version}\n" --connect-timeout 3 "https://${domain}" 2>/dev/null)
+    if [[ "$?" -eq 0 && "$http_ver" == "2" ]]; then
+        has_h2=1
+    fi
+    
+    if [[ "$has_h2" -ne 1 ]]; then
+        printf 'H2_FAIL\n'
+        return 2
+    fi
+    
+    # 2. 检测 TLS 1.3
+    if curl -Iv "https://${domain}" 2>&1 | grep -E -q "TLSv1.3|SSL connection using TLSv1.3"; then
+        has_tls13=1
+    fi
+    
+    if [[ "$has_tls13" -ne 1 ]]; then
+        printf 'TLS13_FAIL\n'
+        return 2
+    fi
+    
+    # 3. 检测 X25519MLKEM768
+    if [[ "$has_python3" -eq 1 ]]; then
+        local py_tmp
+        py_tmp=$(mktemp) || return 2
+        cat << 'EOF' > "$py_tmp"
+import socket, struct, os, sys
+def build_client_hello(hostname):
+    session_id = os.urandom(32)
+    host_bytes = hostname.encode('utf-8')
+    sni_entry = b'\x00' + struct.pack('>H', len(host_bytes)) + host_bytes
+    sni_data = struct.pack('>H', len(sni_entry)) + sni_entry
+    ext_sni = b'\x00\x00' + struct.pack('>H', len(sni_data)) + sni_data
+    ext_supported_versions = b'\x00\x2b\x00\x05\x04\x03\x04\x03\x03'
+    ext_supported_groups = b'\x00\x0a\x00\x08\x00\x06\x11\xec\x00\x1d\x00\x17'
+    fake_key_share_pq = os.urandom(32) + b'\x01' * 1184
+    entry_pq = b'\x11\xec' + struct.pack('>H', len(fake_key_share_pq)) + fake_key_share_pq
+    fake_key_share_classic = os.urandom(32)
+    entry_classic = b'\x00\x1d' + struct.pack('>H', len(fake_key_share_classic)) + fake_key_share_classic
+    key_shares_payload = entry_pq + entry_classic
+    key_share_data = struct.pack('>H', len(key_shares_payload)) + key_shares_payload
+    ext_key_share = b'\x00\x33' + struct.pack('>H', len(key_share_data)) + key_share_data
+    alpn_data = b'\x02h2\x08http/1.1'
+    ext_alpn = b'\x00\x10' + struct.pack('>H', len(alpn_data) + 2) + struct.pack('>H', len(alpn_data)) + alpn_data
+    sig_algs = b'\x08\x04\x04\x03\x08\x05\x08\x06\x04\x01\x05\x01'
+    ext_sig_algs = b'\x00\x0d' + struct.pack('>H', len(sig_algs) + 2) + struct.pack('>H', len(sig_algs)) + sig_algs
+    ext_ec_point_formats = b'\x00\x0b\x00\x02\x01\x00'
+    ext_status_request = b'\x00\x05\x00\x05\x01\x00\x00\x00\x00'
+    extensions = ext_sni + ext_supported_versions + ext_supported_groups + ext_key_share + ext_alpn + ext_sig_algs + ext_ec_point_formats + ext_status_request
+    extensions_payload = struct.pack('>H', len(extensions)) + extensions
+    cipher_suites = b'\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30'
+    cipher_payload = struct.pack('>H', len(cipher_suites)) + cipher_suites
+    ch_body = b'\x03\x03' + os.urandom(32) + b'\x20' + session_id + cipher_payload + b'\x01\x00' + extensions_payload
+    handshake = b'\x01' + struct.pack('>I', len(ch_body))[1:] + ch_body
+    return b'\x16\x03\x01' + struct.pack('>H', len(handshake)) + handshake
+
+def parse_server_hello(data):
+    if len(data) < 5: return False, "Data too short"
+    record_type = data[0]
+    if record_type != 0x16:
+        if record_type == 0x15:
+            alert_level = data[5] if len(data) > 5 else 0
+            alert_desc = data[6] if len(data) > 6 else 0
+            return False, f"TLS Alert: level={alert_level}, desc={alert_desc}"
+        return False, f"Unexpected record type: {record_type}"
+    if len(data) < 9: return False, "Handshake data too short"
+    hs_type = data[5]
+    if hs_type != 0x02: return False, f"Unexpected handshake type: {hs_type}"
+    idx = 43
+    if len(data) < idx: return False, "Server Hello body too short"
+    session_id_len = data[idx]
+    idx += 1 + session_id_len
+    if len(data) < idx + 2: return False, "Server Hello missing cipher suite"
+    idx += 2
+    idx += 1
+    if len(data) < idx + 2: return False, "Server Hello missing extensions length"
+    ext_len = struct.unpack('>H', data[idx:idx+2])[0]
+    idx += 2
+    end_idx = idx + ext_len
+    if len(data) < end_idx: return False, "Server Hello extensions truncated"
+    supported_version_ok, key_share_group_ok, negotiated_group = False, False, None
+    while idx < end_idx:
+        if idx + 4 > end_idx: break
+        ext_type = data[idx:idx+2]
+        ext_data_len = struct.unpack('>H', data[idx+2:idx+4])[0]
+        idx += 4
+        ext_payload = data[idx:idx+ext_data_len]
+        idx += ext_data_len
+        if ext_type == b'\x00\x2b':
+            if ext_payload == b'\x03\x04': supported_version_ok = True
+        elif ext_type == b'\x00\x33':
+            if len(ext_payload) >= 2:
+                negotiated_group = ext_payload[0:2]
+                if negotiated_group == b'\x11\xec': key_share_group_ok = True
+    if not supported_version_ok: return False, "TLS 1.3 was not negotiated"
+    if not key_share_group_ok:
+        group_hex = negotiated_group.hex() if negotiated_group else "None"
+        return False, f"X25519MLKEM768 (0x11ec) key share not negotiated (negotiated: {group_hex})"
+    return True, "X25519MLKEM768 negotiated successfully"
+
+try:
+    domain = sys.argv[1]
+    payload = build_client_hello(domain)
+    s = socket.create_connection((domain, 443), timeout=3)
+    s.sendall(payload)
+    resp = s.recv(4096)
+    s.close()
+    ok, msg = parse_server_hello(resp)
+    if ok:
+        print("SUCCESS")
+        sys.exit(0)
+    else:
+        print(f"FAILED: {msg}")
+        sys.exit(1)
+except Exception as e:
+    print(f"ERROR: {e}")
+    sys.exit(2)
+EOF
+        
+        local py_res py_exit
+        py_res=$(python3 "$py_tmp" "$domain" 2>/dev/null)
+        py_exit=$?
+        rm -f "$py_tmp"
+        
+        if [[ "$py_exit" -eq 0 ]]; then
+            printf 'OK\n'
+            return 0
+        else
+            printf 'OK_NO_PQ\n'
+            return 1
+        fi
+    else
+        printf 'OK_NO_PQ\n' # 无 python3，默认返回 OK_NO_PQ (TLS 1.3 / H2 可用)
+        return 1
+    fi
+}
+
+# 自动测试各大厂的延迟与兼容性并选择最佳域名
+_mihomoconf_test_reality_domains_auto() {
+    local domains=(
+        "a0.awsstatic.com"
+        "acctcdn.msftauth.net"
+        "amd.com"
+        "aws.amazon.com"
+        "aws.com"
+        "c.marsflag.com"
+        "catalog.gamepass.com"
+        "cdn.icloud-content.com"
+        "cdn.bizible.com"
+        "cdn.bizibly.com"
+        "cdnssl.clicktale.net"
+        "ce.mf.marsflag.com"
+        "d.oracleinfinity.io"
+        "d1.awsstatic.com"
+        "digitalassets.tesla.com"
+        "downloadmirror.intel.com"
+        "ds-aksb-a.akamaihd.net"
+        "electronics.sony.com"
+        "github.gallerycdn.vsassets.io"
+        "gray-config-prod.api.arc-cdn.net"
+        "gray-config-prod.api.cdn.arcpublishing.com"
+        "gray-wowt-prod.gtv-cdn.com"
+        "gsp-ssl.ls.apple.com"
+        "intelcorp.scene7.com"
+        "location-services-prd.tesla.com"
+        "ms-python.gallerycdn.vsassets.io"
+        "munchkin.marketo.net"
+        "prod.pa.cdn.uis.awsstatic.com"
+        "prod.us-east-1.ui.gcr-chat.marketing.aws.dev"
+        "publisher.liveperson.net"
+        "res-1.cdn.office.net"
+        "s.go-mpulse.net"
+        "s0.awsstatic.com"
+        "s7mbrstream.scene7.com"
+        "services.digitaleast.mobi"
+        "snap.licdn.com"
+        "static.cloud.coveo.com"
+        "statici.icloud.com"
+        "store-images.s-microsoft.com"
+        "vscjava.gallerycdn.vsassets.io"
+        "www.aws.com"
+        "www.icloud.com"
+        "yaho.com"
+        "www.xbox.com"
+        "gfn.nvidia.com"
+    )
+    
+    _info "正在自动测试各大厂 Reality 伪造域名的延迟与兼容性 (TLS 1.3, H2, X25519MLKEM768)..."
+    _separator
+    
+    local best_domain_pq=""
+    local best_latency_pq=999999
+    
+    local best_domain_nopq=""
+    local best_latency_nopq=999999
+    
+    local d
+    for d in "${domains[@]}"; do
+        printf "  - 检测 %-46s : " "$d"
+        
+        # 1. 检测兼容性
+        local check_res
+        check_res=$(_mihomoconf_check_reality_domain "$d")
+        local exit_code=$?
+        
+        if [[ "$exit_code" -le 1 ]]; then
+            # 2. 测试延迟
+            local latency
+            latency=$(curl -o /dev/null -s -w "%{time_connect}\n" --connect-timeout 2 "https://${d}" 2>/dev/null)
+            if [[ "$?" -eq 0 && -n "$latency" && "$latency" != "0.000000" && "$latency" != "0.000" ]]; then
+                local latency_ms
+                latency_ms=$(awk "BEGIN {print int($latency * 1000)}")
+                
+                if [[ "$exit_code" -eq 0 ]]; then
+                    printf "${GREEN}符合所有要求${PLAIN} (TLS 1.3/H2/PQ), 延迟 ${GREEN}%s ms${PLAIN}\\n" "$latency_ms"
+                    if (( latency_ms < best_latency_pq )); then
+                        best_latency_pq=$latency_ms
+                        best_domain_pq="$d"
+                    fi
+                else
+                    printf "${YELLOW}符合基础要求${PLAIN} (TLS 1.3/H2, 不支持 PQ), 延迟 ${GREEN}%s ms${PLAIN}\\n" "$latency_ms"
+                    if (( latency_ms < best_latency_nopq )); then
+                        best_latency_nopq=$latency_ms
+                        best_domain_nopq="$d"
+                    fi
+                fi
+            else
+                printf "${RED}连接超时${PLAIN}\\n"
+            fi
+        elif [[ "$check_res" == "H2_FAIL" ]]; then
+            printf "${RED}不支持 HTTP/2 (H2)${PLAIN}\\n"
+        else
+            printf "${RED}不支持 TLS 1.3${PLAIN}\\n"
+        fi
+    done
+    
+    _separator
+    if [[ -n "$best_domain_pq" ]]; then
+        _info "已自动为您选择最佳且支持 PQ 算法的域名: ${GREEN}${best_domain_pq}${PLAIN} (延迟: ${GREEN}${best_latency_pq} ms${PLAIN})"
+        VLESS_REALITY_SERVER_NAME="$best_domain_pq"
+    elif [[ -n "$best_domain_nopq" ]]; then
+        _warn "未检测到支持 X25519MLKEM768 的域名！已自动为您选择满足 TLS 1.3 + H2 的低延迟域名: ${YELLOW}${best_domain_nopq}${PLAIN} (延迟: ${GREEN}${best_latency_nopq} ms${PLAIN})"
+        VLESS_REALITY_SERVER_NAME="$best_domain_nopq"
+    else
+        _error_no_exit "所有域名均未通过基本检测 (TLS 1.3 / H2) 或连接失败，请检查网络后重试，或选择手动输入域名"
+        VLESS_REALITY_SERVER_NAME=""
+    fi
+}
+
+# 手动输入并检测伪造域名
+_mihomoconf_test_reality_domain_manual() {
+    local input_domain
+    while true; do
+        read -rp "    请输入要使用的 Reality 伪造域名 (如 www.cloudflare.com): " input_domain
+        input_domain=$(_mihomoconf_trim "${input_domain:-}")
+        if [[ -z "$input_domain" ]]; then
+            _warn "域名不能为空"
+            continue
+        fi
+        
+        _info "正在对域名 ${input_domain} 进行兼容性检测..."
+        local check_res
+        check_res=$(_mihomoconf_check_reality_domain "$input_domain")
+        local exit_code=$?
+        
+        if [[ "$exit_code" -eq 0 ]]; then
+            _info "检测成功! 该域名支持 ${GREEN}TLS 1.3${PLAIN}, ${GREEN}HTTP/2 (H2)${PLAIN} 且支持 ${GREEN}X25519MLKEM768${PLAIN}。"
+            VLESS_REALITY_SERVER_NAME="$input_domain"
+            break
+        elif [[ "$exit_code" -eq 1 ]]; then
+            _warn "该域名支持 TLS 1.3 和 HTTP/2 (H2)，但不支持 X25519MLKEM768 (可能由于未开启 PQ 算法或防火墙拦截)！"
+            local force_use
+            read -rp "    该域名不符合 X25519MLKEM768 伪造推荐标准，强行使用可能会导致被识别阻断。是否强制使用？ [y/N]: " force_use
+            force_use=$(_mihomoconf_trim "${force_use:-n}")
+            if [[ "$force_use" == "y" || "$force_use" == "Y" ]]; then
+                _info "强制使用未完全符合推荐标准的域名: ${input_domain}"
+                VLESS_REALITY_SERVER_NAME="$input_domain"
+                break
+            else
+                _info "请重新输入域名..."
+            fi
+        else
+            local err_msg
+            if [[ "$check_res" == "H2_FAIL" ]]; then
+                err_msg="该域名不支持 HTTP/2 (H2) 协议"
+            else
+                err_msg="该域名不支持 TLS 1.3 协议"
+            fi
+            
+            _warn "${err_msg}！"
+            local force_use
+            read -rp "    该域名不符合 Reality 伪造推荐标准，强行使用可能会导致被识别阻断。是否强制使用？ [y/N]: " force_use
+            force_use=$(_mihomoconf_trim "${force_use:-n}")
+            if [[ "$force_use" == "y" || "$force_use" == "Y" ]]; then
+                _info "强制使用未通过基础检测的域名: ${input_domain}"
+                VLESS_REALITY_SERVER_NAME="$input_domain"
+                break
+            else
+                _info "请重新输入域名..."
+            fi
+        fi
+    done
+}
+
 _mihomoconf_gen_ss_password_for_cipher() {
     local cipher="${1:-}"
     case "$cipher" in
@@ -8003,13 +8321,34 @@ _mihomoconf_setup() {
             done
         done
 
-        if [[ -n "${ANYTLS_SNI:-}" ]]; then
-            read -rp "    伪造域名 [默认复用 AnyTLS: ${ANYTLS_SNI}]: " VLESS_REALITY_SERVER_NAME
-            VLESS_REALITY_SERVER_NAME=$(_mihomoconf_trim "${VLESS_REALITY_SERVER_NAME:-$ANYTLS_SNI}")
-        else
-            read -rp "    伪造域名 (必填，如 www.microsoft.com): " VLESS_REALITY_SERVER_NAME
-            VLESS_REALITY_SERVER_NAME=$(_mihomoconf_trim "${VLESS_REALITY_SERVER_NAME:-}")
-        fi
+        local choice_domain
+        while true; do
+            printf "    ${BOLD}Reality 伪造域名配置:${PLAIN}\n"
+            printf "      1) 自动测试并选择延迟最低的大厂域名 (符合 TLS 1.3 / H2 / X25519MLKEM768)\n"
+            printf "      2) 自选并手动输入域名 (支持自动检测)\n"
+            if [[ -n "${ANYTLS_SNI:-}" ]]; then
+                printf "      3) 复用 AnyTLS 域名 [${ANYTLS_SNI}] (不进行检测)\n"
+            fi
+            read -rp "    请选择操作 [默认 1]: " choice_domain
+            choice_domain=$(_mihomoconf_trim "${choice_domain:-1}")
+            
+            if [[ "$choice_domain" == "1" ]]; then
+                _mihomoconf_test_reality_domains_auto
+                if [[ -n "$VLESS_REALITY_SERVER_NAME" ]]; then
+                    break
+                fi
+            elif [[ "$choice_domain" == "2" ]]; then
+                _mihomoconf_test_reality_domain_manual
+                if [[ -n "$VLESS_REALITY_SERVER_NAME" ]]; then
+                    break
+                fi
+            elif [[ "$choice_domain" == "3" && -n "${ANYTLS_SNI:-}" ]]; then
+                VLESS_REALITY_SERVER_NAME="$ANYTLS_SNI"
+                break
+            else
+                _warn "输入无效，请重新选择"
+            fi
+        done
         if [[ -z "$VLESS_REALITY_SERVER_NAME" ]]; then
             _error_no_exit "VLESS Reality 伪造域名不能为空"
             _press_any_key
