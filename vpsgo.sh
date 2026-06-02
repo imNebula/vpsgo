@@ -8178,6 +8178,7 @@ _mihomoconf_setup() {
     local VLESS_REALITY_SERVER_NAME="" VLESS_FLOW="xtls-rprx-vision" VLESS_CLIENT_FINGERPRINT="chrome"
     local -a VLESS_WS_PORTS=() VLESS_WS_TAGS=() VLESS_WS_USER_ROWS=() VLESS_WS_PATHS=() VLESS_WS_TLS_OPTS=() VLESS_WS_HOSTS=()
     local -a VLESS_GRPC_PORTS=() VLESS_GRPC_TAGS=() VLESS_GRPC_USER_ROWS=() VLESS_GRPC_SERVICE_NAMES=() VLESS_GRPC_TLS_OPTS=() VLESS_GRPC_HOSTS=()
+    local _vless_grpc_user_total=0
 
     local -a TROJAN_PORTS=() TROJAN_TAGS=() TROJAN_USER_ROWS=() TROJAN_TLS_OPTS=() TROJAN_HOSTS=()
     local -a TROJAN_WS_PORTS=() TROJAN_WS_TAGS=() TROJAN_WS_USER_ROWS=() TROJAN_WS_PATHS=() TROJAN_WS_TLS_OPTS=() TROJAN_WS_HOSTS=()
@@ -8918,7 +8919,7 @@ _mihomoconf_setup() {
         done
 
         local _vless_grpc_service_name_input _vless_grpc_tls_input _vless_grpc_host_input
-        local i _user_rows _u_name _u_uuid _vless_grpc_user_total=0
+        local i _user_rows _u_name _u_uuid
         for i in "${!VLESS_GRPC_PORTS[@]}"; do
             read -rp "    VLESS gRPC #$((i + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_grpc_service_name_input
             _vless_grpc_service_name_input=$(_mihomoconf_trim "${_vless_grpc_service_name_input:-vless-grpc}")
