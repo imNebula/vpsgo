@@ -15440,61 +15440,6 @@ _mihomo_chain_proxy_manage() {
                         local rename_confirm custom_name_input
                         local ss_decoded kv k v
                         local -a _qarr
-                        # 预先检测 Surge Snell 行格式并转换
-                        if [[ "$in_link" =~ [Ss][Nn][Ee][Ll][Ll] ]] && [[ "$in_link" == *","* ]] && [[ "$in_link" != *"://"* ]]; then
-                            # 这可能是 Surge Snell 配置行
-                            local temp_line="$in_link"
-                            local surge_name=""
-                            if [[ "$temp_line" == *"="* ]]; then
-                                surge_name="${temp_line%%=*}"
-                                surge_name=$(_mihomoconf_trim "$surge_name")
-                                temp_line="${temp_line#*=}"
-                            fi
-                            temp_line=$(_mihomoconf_trim "$temp_line")
-                            local -a parts
-                            IFS=',' read -r -a parts <<< "$temp_line"
-                            local i
-                            for i in "${!parts[@]}"; do
-                                parts[$i]=$(_mihomoconf_trim "${parts[$i]}")
-                            done
-                            if [[ "${parts[0],,}" == "snell" ]]; then
-                                out_type="snell"
-                                out_server="${parts[1]:-}"
-                                out_port="${parts[2]:-}"
-                                out_snell_version="5"
-                                out_snell_reuse="true"
-                                local p_idx
-                                for (( p_idx=3; p_idx<${#parts[@]}; p_idx++ )); do
-                                    local p="${parts[$p_idx]}"
-                                    local pk="${p%%=*}"
-                                    local pv="${p#*=}"
-                                    pk=$(_mihomoconf_trim "$pk")
-                                    pv=$(_mihomoconf_trim "$pv")
-                                    case "${pk,,}" in
-                                        psk) out_pass="$pv" ;;
-                                        version) out_snell_version="$pv" ;;
-                                        reuse) out_snell_reuse="$pv" ;;
-                                        obfs) out_obfs="$pv" ;;
-                                        obfs-host|obfshost|host) out_sni="$pv" ;;
-                                    esac
-                                done
-                                if [[ -n "$out_server" && -n "$out_pass" ]] && _is_valid_port "$out_port"; then
-                                    if [[ -n "$surge_name" ]]; then
-                                        link_name="$surge_name"
-                                    fi
-                                    in_link="snell://${out_pass}@${out_server}:${out_port}?version=${out_snell_version}&reuse=${out_snell_reuse}"
-                                    if [[ -n "$out_obfs" ]]; then
-                                        in_link="${in_link}&obfs=${out_obfs}"
-                                    fi
-                                    if [[ -n "$out_sni" ]]; then
-                                        in_link="${in_link}&host=${out_sni}"
-                                    fi
-                                    if [[ -n "$link_name" ]]; then
-                                        in_link="${in_link}#$(_mihomoconf_urlencode "$link_name")"
-                                    fi
-                                fi
-                            fi
-                        fi
 
                         read -rp "  输入节点链接/配置 (支持 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls): " in_link
                         in_link=$(_mihomoconf_trim "${in_link:-}")
