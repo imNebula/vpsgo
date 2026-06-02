@@ -6309,12 +6309,14 @@ _mihomoconf_read_listener_rows() {
             }
         }
         /^[[:space:]]+tag:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+tag:[[:space:]]*/, "", line)
             tag=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-sni:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-sni:[[:space:]]*/, "", line)
             line=trim(line)
@@ -6323,6 +6325,7 @@ _mihomoconf_read_listener_rows() {
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-peer:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-peer:[[:space:]]*/, "", line)
             line=trim(line)
@@ -6331,6 +6334,7 @@ _mihomoconf_read_listener_rows() {
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-server-name:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-server-name:[[:space:]]*/, "", line)
             line=trim(line)
@@ -6339,168 +6343,196 @@ _mihomoconf_read_listener_rows() {
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-mport:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-mport:[[:space:]]*/, "", line)
             hy2_mport=trim(line)
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-insecure:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-insecure:[[:space:]]*/, "", line)
             hy2_insecure=trim(line)
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-hy2-congestion-control:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-hy2-congestion-control:[[:space:]]*/, "", line)
             hy2_congestion_control=trim(line)
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-reality-public-key:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-reality-public-key:[[:space:]]*/, "", line)
             vless_public_key=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-reality-short-id:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-reality-short-id:[[:space:]]*/, "", line)
             vless_short_id=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-vless-flow:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-flow:[[:space:]]*/, "", line)
             vless_flow=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-vless-client-fingerprint:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-client-fingerprint:[[:space:]]*/, "", line)
             vless_client_fingerprint=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*/, "", line)
             vless_type=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-path:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-path:[[:space:]]*/, "", line)
             vless_ws_path=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-tls:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-tls:[[:space:]]*/, "", line)
             vless_ws_tls=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-host:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-ws-host:[[:space:]]*/, "", line)
             vless_ws_host=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-service-name:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-service-name:[[:space:]]*/, "", line)
             vless_grpc_service_name=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-tls:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-tls:[[:space:]]*/, "", line)
             vless_ws_tls=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-host:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             gsub(/^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-grpc-host:[[:space:]]*/, "", line)
             vless_ws_host=unquote(trim(line))
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-tuic-congestion-control:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-tuic-congestion-control:[[:space:]]*/, "", line)
             tuic_congestion_control=trim(line)
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-tuic-alpn:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-tuic-alpn:[[:space:]]*/, "", line)
             tuic_alpn=trim(line)
             next
         }
         /^[[:space:]]+#[[:space:]]*vpsgo-tuic-udp-relay-mode:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-tuic-udp-relay-mode:[[:space:]]*/, "", line)
             tuic_udp_relay_mode=trim(line)
             next
         }
         /^[[:space:]]+type:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+type:[[:space:]]*/, "", line)
             type=unquote(trim(line))
             next
         }
         /^[[:space:]]+port:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+port:[[:space:]]*/, "", line)
             port=trim(line)
             next
         }
         /^[[:space:]]+cipher:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+cipher:[[:space:]]*/, "", line)
             cipher=trim(line)
             next
         }
         /^[[:space:]]+password:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+password:[[:space:]]*/, "", line)
             password=unquote(trim(line))
             next
         }
         /^[[:space:]]+up:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+up:[[:space:]]*/, "", line)
             hy2_up=trim(line)
             next
         }
         /^[[:space:]]+down:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+down:[[:space:]]*/, "", line)
             hy2_down=trim(line)
             next
         }
         /^[[:space:]]+ignore-client-bandwidth:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+ignore-client-bandwidth:[[:space:]]*/, "", line)
             hy2_ignore=trim(line)
             next
         }
         /^[[:space:]]+obfs:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+obfs:[[:space:]]*/, "", line)
             hy2_obfs=trim(line)
             next
         }
         /^[[:space:]]+obfs-password:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+obfs-password:[[:space:]]*/, "", line)
             hy2_obfs_password=unquote(trim(line))
             next
         }
         /^[[:space:]]+masquerade:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+masquerade:[[:space:]]*/, "", line)
             hy2_masquerade=unquote(trim(line))
             next
         }
         /^[[:space:]]+users:[[:space:]]*$/ {
+            if (lindent($0) != item_indent + 2) next
             in_users=1
             users_indent=lindent($0)
             next
@@ -6641,6 +6673,7 @@ _mihomoconf_read_users_by_tag() {
             users_indent=-1
             current_vless_username=""
             current_vless_uuid=""
+            item_indent=-1
         }
         BEGIN {
             in_listeners=0
@@ -6656,6 +6689,7 @@ _mihomoconf_read_users_by_tag() {
         !in_listeners { next }
         /^[[:space:]]*-[[:space:]]*name:/ {
             reset_listener()
+            item_indent=lindent($0)
             line=$0
             sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line)
             name=unquote(trim(line))
@@ -6664,6 +6698,7 @@ _mihomoconf_read_users_by_tag() {
             next
         }
         /^[[:space:]]+tag:/ {
+            if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+tag:[[:space:]]*/, "", line)
             tag=unquote(trim(line))
@@ -6671,6 +6706,7 @@ _mihomoconf_read_users_by_tag() {
             next
         }
         /^[[:space:]]+users:[[:space:]]*$/ {
+            if (lindent($0) != item_indent + 2) next
             in_users=matched ? 1 : 0
             users_indent=lindent($0)
             next
@@ -6894,23 +6930,29 @@ _mihomoconf_add_or_update_listener_user() {
             item_name=""
             item_tag=""
             item_type=""
+            item_indent=-1
         }
         function push_line(line, raw) {
             line_count++
             item_lines[line_count]=line
             if (line ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/) {
+                item_indent=lindent(line)
                 raw=line
                 sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", raw)
                 item_name=unquote(trim(raw))
                 if (item_tag == "") item_tag=item_name
             } else if (line ~ /^[[:space:]]+tag:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
-                item_tag=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
+                    item_tag=unquote(trim(raw))
+                }
             } else if (line ~ /^[[:space:]]+type:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
-                item_type=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
+                    item_type=unquote(trim(raw))
+                }
             }
         }
         function print_item(   i) {
@@ -7102,23 +7144,29 @@ _mihomoconf_add_tuic_listener_user() {
             item_name=""
             item_tag=""
             item_type=""
+            item_indent=-1
         }
         function push_line(line, raw) {
             line_count++
             item_lines[line_count]=line
             if (line ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/) {
+                item_indent=lindent(line)
                 raw=line
                 sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", raw)
                 item_name=unquote(trim(raw))
                 if (item_tag == "") item_tag=item_name
             } else if (line ~ /^[[:space:]]+tag:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
-                item_tag=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
+                    item_tag=unquote(trim(raw))
+                }
             } else if (line ~ /^[[:space:]]+type:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
-                item_type=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
+                    item_type=unquote(trim(raw))
+                }
             }
         }
         function print_item(   i) {
@@ -7281,23 +7329,29 @@ _mihomoconf_add_socks_listener_user() {
             item_name=""
             item_tag=""
             item_type=""
+            item_indent=-1
         }
         function push_line(line, raw) {
             line_count++
             item_lines[line_count]=line
             if (line ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/) {
+                item_indent=lindent(line)
                 raw=line
                 sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", raw)
                 item_name=unquote(trim(raw))
                 if (item_tag == "") item_tag=item_name
             } else if (line ~ /^[[:space:]]+tag:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
-                item_tag=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
+                    item_tag=unquote(trim(raw))
+                }
             } else if (line ~ /^[[:space:]]+type:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
-                item_type=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
+                    item_type=unquote(trim(raw))
+                }
             }
         }
         function print_item(   i) {
@@ -7473,23 +7527,29 @@ _mihomoconf_add_vless_listener_user() {
             item_name=""
             item_tag=""
             item_type=""
+            item_indent=-1
         }
         function push_line(line, raw) {
             line_count++
             item_lines[line_count]=line
             if (line ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/) {
+                item_indent=lindent(line)
                 raw=line
                 sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", raw)
                 item_name=unquote(trim(raw))
                 if (item_tag == "") item_tag=item_name
             } else if (line ~ /^[[:space:]]+tag:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
-                item_tag=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+tag:[[:space:]]*/, "", raw)
+                    item_tag=unquote(trim(raw))
+                }
             } else if (line ~ /^[[:space:]]+type:[[:space:]]*/) {
-                raw=line
-                sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
-                item_type=unquote(trim(raw))
+                if (lindent(line) == item_indent + 2) {
+                    raw=line
+                    sub(/^[[:space:]]+type:[[:space:]]*/, "", raw)
+                    item_type=unquote(trim(raw))
+                }
             }
         }
         function print_item(   i) {
@@ -13303,31 +13363,35 @@ EOF
     port: ${port}
     uuid: "${q_vless_uuid}"
     udp: true
-    tls: true
 EOF
-            if [[ -n "$q_sni" ]]; then
-                printf '    servername: "%s"\n' "$q_sni" >> "$tmp_block"
-            fi
-            if [[ -n "$q_vless_flow" ]]; then
-                printf '    flow: "%s"\n' "$q_vless_flow" >> "$tmp_block"
+            if [[ "$q_transport_tls" == "0" ]]; then
+                echo "    tls: false" >> "$tmp_block"
+            else
+                echo "    tls: true" >> "$tmp_block"
+                if [[ -n "$q_sni" ]]; then
+                    printf '    servername: "%s"\n' "$q_sni" >> "$tmp_block"
+                fi
+                if [[ -n "$q_vless_flow" ]]; then
+                    printf '    flow: "%s"\n' "$q_vless_flow" >> "$tmp_block"
+                fi
+                if [[ -n "$q_vless_client_fingerprint" ]]; then
+                    printf '    client-fingerprint: "%s"\n' "$q_vless_client_fingerprint" >> "$tmp_block"
+                fi
+                if [[ "$insecure" == "1" ]]; then
+                    echo "    skip-cert-verify: true" >> "$tmp_block"
+                fi
+                if [[ -n "$q_vless_public_key" || -n "$q_vless_short_id" ]]; then
+                    echo "    reality-opts:" >> "$tmp_block"
+                    if [[ -n "$q_vless_public_key" ]]; then
+                        printf '      public-key: "%s"\n' "$q_vless_public_key" >> "$tmp_block"
+                    fi
+                    if [[ -n "$q_vless_short_id" ]]; then
+                        printf '      short-id: "%s"\n' "$q_vless_short_id" >> "$tmp_block"
+                    fi
+                fi
             fi
             if [[ -n "$q_vless_packet_encoding" ]]; then
                 printf '    packet-encoding: "%s"\n' "$q_vless_packet_encoding" >> "$tmp_block"
-            fi
-            if [[ -n "$q_vless_client_fingerprint" ]]; then
-                printf '    client-fingerprint: "%s"\n' "$q_vless_client_fingerprint" >> "$tmp_block"
-            fi
-            if [[ "$insecure" == "1" ]]; then
-                echo "    skip-cert-verify: true" >> "$tmp_block"
-            fi
-            if [[ -n "$q_vless_public_key" || -n "$q_vless_short_id" ]]; then
-                echo "    reality-opts:" >> "$tmp_block"
-                if [[ -n "$q_vless_public_key" ]]; then
-                    printf '      public-key: "%s"\n' "$q_vless_public_key" >> "$tmp_block"
-                fi
-                if [[ -n "$q_vless_short_id" ]]; then
-                    printf '      short-id: "%s"\n' "$q_vless_short_id" >> "$tmp_block"
-                fi
             fi
             if [[ "$q_transport_network" == "ws" ]]; then
                 echo "    network: ws" >> "$tmp_block"
@@ -15099,13 +15163,20 @@ _mihomochain_upsert_proxy_block() {
         }
         function flush_item() {
             if (!in_item) return
+            while (substr(item_buf, length(item_buf)) == "\n") {
+                item_buf = substr(item_buf, 1, length(item_buf) - 1)
+            }
             if (item_name == target) {
                 if (!replaced) {
+                    if (printed_count > 0) printf "\n"
                     printf "%s", new_block
                     replaced=1
+                    printed_count++
                 }
             } else {
-                printf "%s", item_buf
+                if (printed_count > 0) printf "\n"
+                printf "%s\n", item_buf
+                printed_count++
             }
             item_buf=""
             item_name=""
@@ -15116,6 +15187,7 @@ _mihomochain_upsert_proxy_block() {
             in_item=0
             has_proxies=0
             replaced=0
+            printed_count=0
             item_buf=""
             item_name=""
             new_block=""
@@ -15123,14 +15195,21 @@ _mihomochain_upsert_proxy_block() {
                 new_block = new_block line "\n"
             }
             close(blockf)
+            while (substr(new_block, length(new_block)) == "\n") {
+                new_block = substr(new_block, 1, length(new_block) - 1)
+            }
+            new_block = new_block "\n"
         }
         /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
             if (in_proxies) {
                 flush_item()
                 if (!replaced) {
+                    if (printed_count > 0) printf "\n"
                     printf "%s", new_block
                     replaced=1
+                    printed_count++
                 }
+                printf "\n"
             }
             in_proxies = ($0 ~ /^proxies:[[:space:]]*$/)
             if (in_proxies) has_proxies=1
@@ -15150,17 +15229,27 @@ _mihomochain_upsert_proxy_block() {
             item_name=unquote(trim(line))
             next
         }
-        in_item {
+        in_item && /^[[:space:]]{3,}/ {
             item_buf=item_buf $0 "\n"
             next
         }
-        { print }
+        in_item {
+            flush_item()
+        }
+        /^[[:space:]]*$/ {
+            next
+        }
+        /^[[:space:]]*#/ {
+            next
+        }
         END {
             if (in_proxies) {
                 flush_item()
                 if (!replaced) {
+                    if (printed_count > 0) printf "\n"
                     printf "%s", new_block
                     replaced=1
+                    printed_count++
                 }
             }
             if (!has_proxies) {
@@ -15190,8 +15279,13 @@ _mihomochain_remove_proxy_by_name() {
         }
         function flush_item() {
             if (!in_item) return
+            while (substr(item_buf, length(item_buf)) == "\n") {
+                item_buf = substr(item_buf, 1, length(item_buf) - 1)
+            }
             if (item_name != target) {
-                printf "%s", item_buf
+                if (printed_count > 0) printf "\n"
+                printf "%s\n", item_buf
+                printed_count++
             }
             item_buf=""
             item_name=""
@@ -15200,12 +15294,14 @@ _mihomochain_remove_proxy_by_name() {
         BEGIN {
             in_proxies=0
             in_item=0
+            printed_count=0
             item_buf=""
             item_name=""
         }
         /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
             if (in_proxies) {
                 flush_item()
+                printf "\n"
             }
             in_proxies = ($0 ~ /^proxies:[[:space:]]*$/)
             print
@@ -15224,11 +15320,19 @@ _mihomochain_remove_proxy_by_name() {
             item_name=unquote(trim(line))
             next
         }
-        in_item {
+        in_item && /^[[:space:]]{3,}/ {
             item_buf=item_buf $0 "\n"
             next
         }
-        { print }
+        in_item {
+            flush_item()
+        }
+        /^[[:space:]]*$/ {
+            next
+        }
+        /^[[:space:]]*#/ {
+            next
+        }
         END {
             if (in_proxies) {
                 flush_item()
@@ -15644,7 +15748,7 @@ _mihomo_chain_proxy_manage() {
                                             sid|short-id|short_id) out_vless_short_id="$v" ;;
                                             packet-encoding|packetEncoding) out_vless_packet_encoding="$v" ;;
                                             path) out_transport_path="$v" ;;
-                                            serviceName) out_transport_path="$v" ;;
+                                            serviceName|servicename) out_transport_path="$v" ;;
                                             insecure)
                                                 if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then
                                                     out_insecure="1"
@@ -15658,10 +15762,10 @@ _mihomo_chain_proxy_manage() {
                                         continue
                                     fi
                                     out_transport_network="${out_vless_network:-tcp}"
-                                    if [[ "$out_vless_security" == "tls" || "$out_vless_security" == "reality" ]]; then
-                                        out_transport_tls="1"
-                                    else
+                                    if [[ "$out_vless_security" == "none" ]]; then
                                         out_transport_tls="0"
+                                    else
+                                        out_transport_tls="1"
                                     fi
                                 fi
                                 ;;
@@ -15702,7 +15806,7 @@ _mihomo_chain_proxy_manage() {
                                             peer|sni|servername) out_sni="$v" ;;
                                             type|network) out_transport_network="$v" ;;
                                             path) out_transport_path="$v" ;;
-                                            serviceName) out_transport_path="$v" ;;
+                                            serviceName|servicename) out_transport_path="$v" ;;
                                             host) out_transport_host="$v" ;;
                                             insecure)
                                                 if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then

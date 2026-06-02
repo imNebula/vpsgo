@@ -1,0 +1,25 @@
+listeners:
+  - name: ss-direct-443
+    tag: "ss_relay_9e60db34"
+    type: shadowsocks
+    port: 443
+    listen: "::"
+    cipher: chacha20-ietf-poly1305
+    password: "change-me"
+    udp: true
+
+  - name: vless-grpc-in-22787
+    tag: "vless_grpc_relay"
+    type: vless
+    port: 22787
+    listen: "::"
+    # vpsgo-vless-type: grpc
+    # vpsgo-vless-grpc-service-name: testservice
+    # vpsgo-vless-grpc-tls: false
+    users:
+      - username: "testuser"
+        uuid: "12345678-1234-1234-1234-123456789abc"
+    transport:
+      type: grpc
+      grpc-opts:
+        grpc-service-name: "testservice"
