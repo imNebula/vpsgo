@@ -11611,7 +11611,7 @@ _mihomo_read_config() {
     local vless_type vless_ws_path vless_ws_tls vless_ws_host vless_grpc_service_name
     local p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport
     local p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive
-    local p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding
+    local p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding p_vless_encryption
     local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0" SS_EXPORT_ASKED="0"
     local SS_EXPORT_UDP_BOOL="true" SS_EXPORT_UOT_BOOL="false"
     local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
@@ -12406,7 +12406,7 @@ MIHOMO_SOCKS_YAML
     if [[ "$EXPORT_PROXIES" == "1" ]]; then
         while IFS=$'\x1f' read -r p_name p_type p_server p_port p_cipher p_user p_pass p_sni p_insecure p_obfs p_obfs_password p_mport \
             p_wg_ip p_wg_ipv6 p_wg_private_key p_wg_public_key p_wg_allowed_ips p_wg_preshared_key p_wg_reserved p_wg_mtu p_wg_keepalive \
-            p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding; do
+            p_vless_uuid p_vless_flow p_vless_public_key p_vless_short_id p_vless_client_fingerprint p_vless_packet_encoding p_vless_encryption; do
             [[ -z "${p_name:-}" ]] && continue
             proxy_total=$((proxy_total + 1))
             total_count=$((total_count + 1))
@@ -12592,17 +12592,17 @@ _mihomochain_read_proxy_rows() {
         function reset_item() {
             name=type=server=port=cipher=username=password=sni=insecure=obfs=obfs_password=mport=""
             wg_ip=wg_ipv6=wg_private_key=wg_public_key=wg_allowed_ips=wg_preshared_key=wg_reserved=wg_mtu=wg_keepalive=""
-            vless_uuid=vless_flow=vless_public_key=vless_short_id=vless_client_fingerprint=vless_packet_encoding=""
+            vless_uuid=vless_flow=vless_public_key=vless_short_id=vless_client_fingerprint=vless_packet_encoding=vless_encryption=""
             in_reality=0
             reality_indent=-1
         }
         function emit() {
             if (name == "") return
             if (insecure == "") insecure="0"
-            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
+            printf "%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n", \
                 name, type, server, port, cipher, username, password, sni, insecure, obfs, obfs_password, mport, \
                 wg_ip, wg_ipv6, wg_private_key, wg_public_key, wg_allowed_ips, wg_preshared_key, wg_reserved, wg_mtu, wg_keepalive, \
-                vless_uuid, vless_flow, vless_public_key, vless_short_id, vless_client_fingerprint, vless_packet_encoding
+                vless_uuid, vless_flow, vless_public_key, vless_short_id, vless_client_fingerprint, vless_packet_encoding, vless_encryption
         }
         BEGIN {
             in_proxies=0
@@ -12687,6 +12687,12 @@ _mihomochain_read_proxy_rows() {
             line=$0
             sub(/^    packet-encoding:[[:space:]]*/, "", line)
             vless_packet_encoding=unquote(trim(line))
+            next
+        }
+        /^    encryption:/ {
+            line=$0
+            sub(/^    encryption:[[:space:]]*/, "", line)
+            vless_encryption=unquote(trim(line))
             next
         }
         /^    client-fingerprint:/ {
@@ -12805,10 +12811,10 @@ _mihomochain_outbound_exists() {
     local tag="$1"
     local name type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
     while IFS=$'\x1f' read -r name type server port cipher username password sni insecure obfs obfs_password mport \
         wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
         [[ "$name" == "$tag" ]] && return 0
     done < <(_mihomochain_read_proxy_rows)
     return 1
@@ -12829,10 +12835,10 @@ _mihomochain_outbound_name_by_tag() {
     local tag="$1"
     local name type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
     while IFS=$'\x1f' read -r name type server port cipher username password sni insecure obfs obfs_password mport \
         wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
         if [[ "$name" == "$tag" ]]; then
             printf '%s' "$name"
             return 0
@@ -12846,10 +12852,10 @@ _mihomochain_outbound_tag_by_name() {
     local name="$1"
     local n type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
     while IFS=$'\x1f' read -r n type server port cipher username password sni insecure obfs obfs_password mport \
         wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
         if [[ "$n" == "$name" ]]; then
             printf '%s' "$n"
             return 0
@@ -12918,10 +12924,10 @@ _mihomochain_list_outbounds() {
     local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}"
     local shown=0 name type server port cipher username password sni insecure obfs obfs_password mport show_name
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
     while IFS=$'\x1f' read -r name type server port cipher username password sni insecure obfs obfs_password mport \
         wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
         [[ -z "${name:-}" ]] && continue
         [[ "$name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
         shown=1
@@ -13337,11 +13343,12 @@ _mihomochain_add_or_update_outbound() {
     local hy2_congestion_control="${29:-brutal}" ss_udp="${30:-1}" ss_uot="${31:-0}"
     local transport_network="${32:-}" transport_path="${33:-}" transport_host="${34:-}" transport_tls="${35:-}"
     local snell_version="${36:-5}" snell_reuse="${37:-true}"
+    local vless_encryption="${38:-}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
     local name q_name q_server q_cipher q_user q_pass q_sni q_obfs q_obfs_password q_mport q_hy2_congestion_control
     local q_wg_ip q_wg_ipv6 q_wg_private_key q_wg_public_key q_wg_allowed_ips q_wg_preshared_key q_wg_reserved
     local q_vless_uuid q_vless_flow q_vless_public_key q_vless_short_id q_vless_client_fingerprint q_vless_packet_encoding
-    local q_transport_network q_transport_path q_transport_host q_transport_tls q_snell_version q_snell_reuse
+    local q_transport_network q_transport_path q_transport_host q_transport_tls q_snell_version q_snell_reuse q_vless_encryption
     local tmp_block
 
     name="${out_name:-$tag}"
@@ -13374,6 +13381,7 @@ _mihomochain_add_or_update_outbound() {
     q_transport_tls=$(_mihomochain_yaml_quote "$transport_tls")
     q_snell_version=$(_mihomochain_yaml_quote "$snell_version")
     q_snell_reuse=$(_mihomochain_yaml_quote "$snell_reuse")
+    q_vless_encryption=$(_mihomochain_yaml_quote "$vless_encryption")
 
     tmp_block=$(mktemp)
     case "$type" in
@@ -13456,6 +13464,9 @@ EOF
     cipher: auto
     udp: true
 EOF
+            if [[ -n "$q_vless_encryption" ]]; then
+                printf '    encryption: "%s"\n' "$q_vless_encryption" >> "$tmp_block"
+            fi
             if [[ "$q_transport_tls" == "0" ]]; then
                 echo "    tls: false" >> "$tmp_block"
             else
@@ -14273,14 +14284,14 @@ _mihomorule_pick_outbound() {
     local config_file="$1" _name_var="$2" _show_var="$3"
     local idx=0 pick oi row_out_name row_out_show type server port cipher username password sni insecure obfs obfs_password mport
     local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+    local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
     local -a outbound_names=() outbound_show_names=()
 
     printf "  ${BOLD}可用出口节点:${PLAIN}\n"
     _separator
     while IFS=$'\x1f' read -r row_out_name type server port cipher username password sni insecure obfs obfs_password mport \
         wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+        vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
         [[ -z "${row_out_name:-}" ]] && continue
         [[ "$row_out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
         [[ "$row_out_name" == "vpsgo-ipv4-direct" ]] && continue
@@ -15582,7 +15593,7 @@ _mihomo_chain_proxy_manage() {
                 local out_ss_udp out_ss_uot out_hy2_cc
                 local out_wg_ip out_wg_ipv6 out_wg_private_key out_wg_public_key out_wg_allowed_ips
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
-                local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding
+                local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding out_vless_encryption
                 local out_transport_network out_transport_path out_transport_host out_transport_tls out_snell_version out_snell_reuse
                 read -rp "  选择 [1-2]: " import_mode
                 import_mode=$(_mihomoconf_trim "${import_mode:-}")
@@ -15624,6 +15635,7 @@ _mihomo_chain_proxy_manage() {
                 out_vless_short_id=""
                 out_vless_client_fingerprint="chrome"
                 out_vless_packet_encoding="xudp"
+                out_vless_encryption=""
                 out_transport_network=""
                 out_transport_path=""
                 out_transport_host=""
@@ -15839,6 +15851,7 @@ _mihomo_chain_proxy_manage() {
                                             pbk|public-key|public_key) out_vless_public_key="$v" ;;
                                             sid|short-id|short_id) out_vless_short_id="$v" ;;
                                             packet-encoding|packetEncoding) out_vless_packet_encoding="$v" ;;
+                                            encryption) out_vless_encryption="$v" ;;
                                             path) out_transport_path="$v" ;;
                                             serviceName|servicename) out_transport_path="$v" ;;
                                             insecure)
@@ -16413,7 +16426,8 @@ _mihomo_chain_proxy_manage() {
                                 read -rp "  client-fingerprint [默认 chrome]: " out_vless_client_fingerprint
                                 out_vless_client_fingerprint=$(_mihomoconf_trim "${out_vless_client_fingerprint:-chrome}")
                                 read -rp "  packet-encoding [默认 xudp]: " out_vless_packet_encoding
-                                out_vless_packet_encoding=$(_mihomoconf_trim "${out_vless_packet_encoding:-xudp}")
+                                read -rp "  vless encryption [可留空, 如 mlkem768...]: " out_vless_encryption
+                                out_vless_encryption=$(_mihomoconf_trim "${out_vless_encryption:-}")
                                 read -rp "  reality public-key [可留空]: " out_vless_public_key
                                 out_vless_public_key=$(_mihomoconf_trim "${out_vless_public_key:-}")
                                 read -rp "  reality short-id [可留空]: " out_vless_short_id
@@ -16517,7 +16531,7 @@ _mihomo_chain_proxy_manage() {
 
                 if [[ "$out_name$out_server$out_cipher$out_user$out_pass$out_sni$out_obfs$out_obfs_pass$out_mport$out_hy2_cc"\
 "$out_wg_ip$out_wg_ipv6$out_wg_private_key$out_wg_public_key$out_wg_allowed_ips$out_wg_preshared_key$out_wg_reserved$out_wg_mtu$out_wg_keepalive"\
-"$out_vless_uuid$out_vless_flow$out_vless_public_key$out_vless_short_id$out_vless_client_fingerprint$out_vless_packet_encoding" == *"|"* ]]; then
+"$out_vless_uuid$out_vless_flow$out_vless_public_key$out_vless_short_id$out_vless_client_fingerprint$out_vless_packet_encoding$out_vless_encryption" == *"|"* ]]; then
                     _error_no_exit "字段中不能包含字符 |"
                     _press_any_key
                     continue
@@ -16536,7 +16550,7 @@ _mihomo_chain_proxy_manage() {
                     "${out_vless_client_fingerprint:-}" "${out_vless_packet_encoding:-}" \
                     "${out_hy2_cc:-brutal}" "${out_ss_udp:-1}" "${out_ss_uot:-0}" \
                     "${out_transport_network:-}" "${out_transport_path:-}" "${out_transport_host:-}" "${out_transport_tls:-}" \
-                    "${out_snell_version:-}" "${out_snell_reuse:-}"; then
+                    "${out_snell_version:-}" "${out_snell_reuse:-}" "${out_vless_encryption:-}"; then
                     _error_no_exit "保存出口节点失败"
                     _press_any_key
                     continue
@@ -16652,11 +16666,11 @@ EOF
                     "" "0" "" "" "" "$out_name" \
                     "${out_wg_ip:-}" "${out_wg_ipv6:-}" "${out_wg_private_key:-}" "${out_wg_public_key:-}" \
                     "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}" \
-                    "" "" "" "" \
-                    "" "" \
+                    "" "" "" \
+                    "" "" "" \
                     "brutal" "1" "0" \
                     "" "" "" "" \
-                    "" ""; then
+                    "" "" ""; then
                     _error_no_exit "保存出口节点失败"
                     _press_any_key
                     continue
@@ -16671,7 +16685,7 @@ EOF
                 local listener_name in_tag out_name out_show_name out_tag listener_input out_input
                 local li oi idx type server port cipher username password sni insecure obfs obfs_password mport
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
                 local l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
                 local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
@@ -16702,7 +16716,7 @@ EOF
                 idx=0
                 while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
                     wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
                     [[ -z "${out_name:-}" ]] && continue
                     [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
                     out_show_name=$(_mihomochain_display_name "$out_name")
@@ -16794,7 +16808,7 @@ EOF
                 local user_listener_tag user_listener_name user_name out_name out_show_name out_tag
                 local listener_pick user_pick out_pick li ui oi idx type server port cipher username password sni insecure obfs obfs_password mport
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
                 local l_type l_name l_port l_cipher l_password l_user_id l_user_pass l_sni
                 local l_hy2_up l_hy2_down l_hy2_ignore l_hy2_obfs l_hy2_obfs_password l_hy2_masquerade l_hy2_mport l_hy2_insecure l_listener_tag
                 local l_vless_public_key l_vless_short_id l_vless_flow l_vless_client_fingerprint
@@ -16895,7 +16909,7 @@ EOF
                 idx=0
                 while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
                     wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
                     [[ -z "${out_name:-}" ]] && continue
                     [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
                     out_show_name=$(_mihomochain_display_name "$out_name")
@@ -16969,11 +16983,11 @@ EOF
                 _separator
                 local rm_out_idx=0 type server port cipher username password sni insecure obfs obfs_password mport out_name out_show_name
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
-                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding
+                local vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption
                 local -a rm_out_names=() rm_out_show_names=() rm_out_tags=()
                 while IFS=$'\x1f' read -r out_name type server port cipher username password sni insecure obfs obfs_password mport \
                     wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive \
-                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding; do
+                    vless_uuid vless_flow vless_public_key vless_short_id vless_client_fingerprint vless_packet_encoding vless_encryption; do
                     [[ -z "${out_name:-}" ]] && continue
                     [[ "$out_name" == "$_MIHOMOCONF_IPV4_FORCE_PROXY_NAME" ]] && continue
                     out_show_name=$(_mihomochain_display_name "$out_name")
