@@ -1,17 +1,1 @@
-allow-lan: false
-mode: rule
-log-level: warning
-ipv6: true
-proxies:
-  - name: "wg"
-    type: wireguard
-    server: 162.159.192.1
-    port: 2480
-    ip: 172.16.0.2/32
-    ipv6: fd01:5ca1:ab1e:80fa:ab85:6eea:213f:f4a5/128
-    public-key: Cr8hWlKvtDt7nrvf+f0brNQQzabAqrjfBvas9pmowjo=
-    private-key: eCtXsJZ27+4PbhDkHnB923tkUn2Gj59wZw5wFA75MnU=
-    udp: true
-    reserved: [0, 0, 0]
-rules:
-  - MATCH,DIRECT
+allow-lan: falsemode: rulelog-level: warningipv6: trueproxies:  - name: "wg"    type: wireguard    server: 162.159.192.1    port: 2480    ip: 172.16.0.2/32    ipv6: fd01:5ca1:ab1e:80fa:ab85:6eea:213f:f4a5/128    public-key: Cr8hWlKvtDt7nrvf+f0brNQQzabAqrjfBvas9pmowjo=    private-key: eCtXsJZ27+4PbhDkHnB923tkUn2Gj59wZw5wFA75MnU=    udp: true    reserved: [0, 0, 0]rules:  - MATCH,DIRECT

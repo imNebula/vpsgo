@@ -5182,9 +5182,9 @@ _mihomoconf_check_reality_domain() {
         has_python3=1
     fi
     
-    # 1. 检测 HTTP/2 (使用 GET 且跟随重定向保证兼容性)
+    # 1. 检测 HTTP/2 (使用 GET 且不跟随重定向，避免重定向带来的 stream/protocol 错误)
     local http_ver
-    http_ver=$(curl -k -sL -o /dev/null -w "%{http_version}\n" --connect-timeout 3 "https://${domain}" 2>/dev/null)
+    http_ver=$(curl -k -s -o /dev/null -w "%{http_version}\n" --connect-timeout 3 "https://${domain}" 2>/dev/null)
     if [[ "$?" -eq 0 && "$http_ver" == "2" ]]; then
         has_h2=1
     fi
@@ -5194,8 +5194,8 @@ _mihomoconf_check_reality_domain() {
         return 2
     fi
     
-    # 2. 检测 TLS 1.3
-    if curl -k -Iv "https://${domain}" 2>&1 | grep -E -i -q "using TLSv? ?1\.3"; then
+    # 2. 检测 TLS 1.3 (使用 GET 且不跟随重定向，避免 HEAD 请求被 CDN 拦截)
+    if curl -k -s -o /dev/null --connect-timeout 3 -v "https://${domain}" 2>&1 | grep -E -i -q "using TLSv? ?1\.3|TLSv? ?1\.3 connection|TLSv? ?1\.3 \(IN\)|[Ss]erver ?[Hh]ello.*TLSv? ?1\.3|TLSv? ?1\.3.*[Ss]erver ?[Hh]ello"; then
         has_tls13=1
     fi
     
@@ -5436,12 +5436,8 @@ _mihomoconf_test_reality_domains_auto() {
 _mihomoconf_test_reality_domain_manual() {
     local input_domain
     while true; do
-        read -rp "    请输入要使用的 Reality 伪造域名 (如 www.cloudflare.com): " input_domain
-        input_domain=$(_mihomoconf_trim "${input_domain:-}")
-        if [[ -z "$input_domain" ]]; then
-            _warn "域名不能为空"
-            continue
-        fi
+        read -rp "    请输入要使用的 Reality 伪造域名 [默认 cdn.icloud-content.com]: " input_domain
+        input_domain=$(_mihomoconf_trim "${input_domain:-cdn.icloud-content.com}")
         
         _info "正在对域名 ${input_domain} 进行兼容性检测..."
         local check_res
@@ -8155,12 +8151,12 @@ _mihomoconf_setup() {
     local WRITE_MODE="new"
     local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n" ENABLE_TUIC="n" ENABLE_SOCKS="n" ENABLE_VLESS_WS="n"
     local ENABLE_VMESS="n" ENABLE_VMESS_WS="n" ENABLE_VMESS_GRPC="n"
-    local ENABLE_VLESS_GRPC="n"
+    local ENABLE_VLESS_GRPC="n" ENABLE_VLESS_PURE_GRPC="n"
     local ENABLE_TROJAN="n" ENABLE_TROJAN_WS="n" ENABLE_TROJAN_GRPC="n"
 
     local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0 TUIC_COUNT=0 SOCKS_COUNT=0 VLESS_WS_COUNT=0
     local VMESS_COUNT=0 VMESS_WS_COUNT=0 VMESS_GRPC_COUNT=0
-    local VLESS_GRPC_COUNT=0
+    local VLESS_GRPC_COUNT=0 VLESS_PURE_GRPC_COUNT=0
     local TROJAN_COUNT=0 TROJAN_WS_COUNT=0 TROJAN_GRPC_COUNT=0
 
     local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n" TUIC_REPLACE="n" SOCKS_REPLACE="n" VLESS_WS_REPLACE="n"
@@ -8263,16 +8259,18 @@ _mihomoconf_setup() {
                 esac
                 ;;
             3)
-                printf "    ${BOLD}配置第 $((VLESS_COUNT + VLESS_WS_COUNT + VLESS_GRPC_COUNT + 1)) 个 VLESS 节点类型:${PLAIN}\n"
+                printf "    ${BOLD}配置第 $((VLESS_COUNT + VLESS_WS_COUNT + VLESS_GRPC_COUNT + VLESS_PURE_GRPC_COUNT + 1)) 个 VLESS 节点类型:${PLAIN}\n"
                 printf "      1) VLESS Reality (XTLS Vision)\n"
                 printf "      2) VLESS WebSocket (CDN 回源)\n"
                 printf "      3) VLESS gRPC (CDN 回源)\n"
+                printf "      4) 纯 VLESS gRPC (无 TLS 直连)\n"
                 local vless_sub
-                read -rp "      选择 [1-3]（默认 1）: " vless_sub
+                read -rp "      选择 [1-4]（默认 1）: " vless_sub
                 case "${vless_sub:-1}" in
                     1) ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
                     2) ENABLE_VLESS_WS="y"; VLESS_WS_COUNT=$((VLESS_WS_COUNT + 1)) ;;
                     3) ENABLE_VLESS_GRPC="y"; VLESS_GRPC_COUNT=$((VLESS_GRPC_COUNT + 1)) ;;
+                    4) ENABLE_VLESS_PURE_GRPC="y"; VLESS_PURE_GRPC_COUNT=$((VLESS_PURE_GRPC_COUNT + 1)) ;;
                     *) _warn "未知 VLESS 类型，默认选择 VLESS Reality"; ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
                 esac
                 ;;
@@ -8297,7 +8295,7 @@ _mihomoconf_setup() {
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 ]]; then
+    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VLESS_PURE_GRPC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
@@ -8307,6 +8305,7 @@ _mihomoconf_setup() {
     _status_kv "VLESS Reality 数量" "${VLESS_COUNT}" "cyan" 10
     _status_kv "VLESS WS 数量" "${VLESS_WS_COUNT}" "cyan" 10
     _status_kv "VLESS gRPC 数量" "${VLESS_GRPC_COUNT}" "cyan" 10
+    _status_kv "纯 VLESS gRPC 数量" "${VLESS_PURE_GRPC_COUNT}" "cyan" 10
     _status_kv "VMess TCP 数量" "${VMESS_COUNT}" "cyan" 10
     _status_kv "VMess WS 数量" "${VMESS_WS_COUNT}" "cyan" 10
     _status_kv "VMess gRPC 数量" "${VMESS_GRPC_COUNT}" "cyan" 10
@@ -8419,7 +8418,7 @@ _mihomoconf_setup() {
         read -rp "  选择 [1/2]（默认 2）: " vmess_grpc_action
             [[ "${vmess_grpc_action:-2}" == "1" ]] && VMESS_GRPC_REPLACE="y"
         fi
-        if [[ "$ENABLE_VLESS_GRPC" == "y" ]] && _mihomoconf_has_listener_type "vless-grpc"; then
+        if [[ "$ENABLE_VLESS_GRPC" == "y" || "$ENABLE_VLESS_PURE_GRPC" == "y" ]] && _mihomoconf_has_listener_type "vless-grpc"; then
             _warn "配置中已存在 VLESS gRPC 节点:"
             _mihomoconf_list_listeners "vless-grpc"
             _separator
@@ -8946,6 +8945,54 @@ _mihomoconf_setup() {
             done <<< "$_user_rows"
         done
         _info "VLESS gRPC 已生成 ${#VLESS_GRPC_PORTS[@]} 个入站，共 ${_vless_grpc_user_total} 个 user"
+    fi
+
+    # ---- 纯 VLESS gRPC 配置 ----
+    if [[ "$ENABLE_VLESS_PURE_GRPC" == "y" ]]; then
+        printf "  ${BOLD}纯 VLESS gRPC 配置${PLAIN}\n"
+        _separator
+        local _vless_pgrpc_idx vless_pgrpc_port_input
+        for ((_vless_pgrpc_idx=1; _vless_pgrpc_idx<=VLESS_PURE_GRPC_COUNT; _vless_pgrpc_idx++)); do
+            while true; do
+                read -rp "    纯 VLESS gRPC #${_vless_pgrpc_idx} 监听端口 [默认 8443]: " vless_pgrpc_port_input
+                vless_pgrpc_port_input=$(_mihomoconf_trim "${vless_pgrpc_port_input:-8443}")
+                if _is_valid_port "$vless_pgrpc_port_input"; then
+                    if _mihomoconf_port_in_list "$vless_pgrpc_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${vless_pgrpc_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$vless_pgrpc_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${vless_pgrpc_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    VLESS_GRPC_PORTS+=("$vless_pgrpc_port_input")
+                    NEW_PORTS+=("$vless_pgrpc_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local _vless_pgrpc_service_name_input
+        local start_idx=$(( ${#VLESS_GRPC_PORTS[@]} - VLESS_PURE_GRPC_COUNT ))
+        local i
+        for ((i=start_idx; i<${#VLESS_GRPC_PORTS[@]}; i++)); do
+            read -rp "    纯 VLESS gRPC #$((i - start_idx + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_pgrpc_service_name_input
+            _vless_pgrpc_service_name_input=$(_mihomoconf_trim "${_vless_pgrpc_service_name_input:-vless-grpc}")
+            VLESS_GRPC_SERVICE_NAMES+=("$_vless_pgrpc_service_name_input")
+            VLESS_GRPC_TLS_OPTS+=("false")
+            VLESS_GRPC_HOSTS+=("")
+            VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
+
+            local _user_rows _u_name _u_uuid
+            _user_rows=$(_mihomoconf_collect_users_input "纯 VLESS gRPC #$((i - start_idx + 1))" "" "vless")
+            while IFS=$'\t' read -r _u_name _u_uuid; do
+                [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
+                VLESS_GRPC_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
+                _vless_grpc_user_total=$((_vless_grpc_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "纯 VLESS gRPC 已生成 ${VLESS_PURE_GRPC_COUNT} 个入站"
     fi
 
     # ---- Trojan TCP 配置 ----
@@ -9651,7 +9698,7 @@ MIHOMOCONF_VMESS_GRPC_TLS_EOF
 MIHOMOCONF_VMESS_GRPC_TRANS_EOF
             done
         fi
-        if [[ "$ENABLE_VLESS_GRPC" == "y" ]]; then
+        if [[ "$ENABLE_VLESS_GRPC" == "y" || "$ENABLE_VLESS_PURE_GRPC" == "y" ]]; then
             for i in "${!VLESS_GRPC_PORTS[@]}"; do
                 local _vless_grpc_port="${VLESS_GRPC_PORTS[$i]}"
                 local _vless_grpc_tag="${VLESS_GRPC_TAGS[$i]}"
@@ -10386,7 +10433,7 @@ MIHOMOCONF_VMESS_GRPC_YAML2
     fi
 
     # VLESS gRPC 输出
-    if [[ "$ENABLE_VLESS_GRPC" == "y" ]]; then
+    if [[ "$ENABLE_VLESS_GRPC" == "y" || "$ENABLE_VLESS_PURE_GRPC" == "y" ]]; then
         printf "  ${BOLD}VLESS gRPC 连接信息 (%s 个)${PLAIN}\n" "${#VLESS_GRPC_PORTS[@]}"
         local i VLESS_GRPC_LINK _vless_grpc_port _vless_grpc_tag _vless_grpc_name _vless_grpc_client_name
         local _vless_grpc_service_name _vless_grpc_tls _vless_grpc_host _vless_grpc_user_idx _u_uuid
