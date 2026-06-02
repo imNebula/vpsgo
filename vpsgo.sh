@@ -5169,6 +5169,20 @@ _mihomoconf_gen_reality_keypair() {
     printf '%s\t%s\n' "$private_key" "$public_key"
 }
 
+_mihomoconf_gen_vless_keys() {
+    local output decryption encryption
+
+    if ! command -v mihomo >/dev/null 2>&1; then
+        return 1
+    fi
+
+    output=$(mihomo generate vless-x25519 2>/dev/null) || return 1
+    decryption=$(printf '%s\n' "$output" | awk -F'"' '/^\[Server\] decryption:/ {print $2; exit}')
+    encryption=$(printf '%s\n' "$output" | awk -F'"' '/^\[Client\] encryption:/ {print $2; exit}')
+    [[ -n "$decryption" && -n "$encryption" ]] || return 1
+    printf '%s\t%s\n' "$decryption" "$encryption"
+}
+
 # 检测单个 Reality 域名是否符合要求 (TLS 1.3, H2, X25519MLKEM768)
 # 参数: $1 域名
 # 返回值: 输出 OK / OK_NO_PQ / H2_FAIL / TLS13_FAIL, 并返回 0 (符合所有) 或 1 (仅符合 TLS1.3/H2) 或 2 (完全不符合)
@@ -5642,12 +5656,16 @@ _mihomoconf_gen_vless_link() {
 }
 
 _mihomoconf_gen_vless_ws_link() {
-    local server="$1" port="$2" uuid="$3" name="$4" path="$5" tls="$6" host="$7"
+    local server="$1" port="$2" uuid="$3" name="$4" path="$5" tls="$6" host="$7" encryption="$8"
     local encoded_name query=""
     local -a params=()
 
     encoded_name=$(_mihomoconf_urlencode "${name}")
-    params+=("encryption=none")
+    if [[ -n "$encryption" && "$encryption" != "none" ]]; then
+        params+=("encryption=$(_mihomoconf_urlencode "$encryption")")
+    else
+        params+=("encryption=none")
+    fi
     params+=("type=ws")
     [[ -n "$path" ]] && params+=("path=$(_mihomoconf_urlencode "$path")")
     if [[ "$tls" == "true" ]]; then
@@ -5666,12 +5684,16 @@ _mihomoconf_gen_vless_ws_link() {
 }
 
 _mihomoconf_gen_vless_grpc_link() {
-    local server="$1" port="$2" uuid="$3" name="$4" serviceName="$5" tls="$6" host="$7"
+    local server="$1" port="$2" uuid="$3" name="$4" serviceName="$5" tls="$6" host="$7" encryption="$8"
     local encoded_name query=""
     local -a params=()
 
     encoded_name=$(_mihomoconf_urlencode "${name}")
-    params+=("encryption=none")
+    if [[ -n "$encryption" && "$encryption" != "none" ]]; then
+        params+=("encryption=$(_mihomoconf_urlencode "$encryption")")
+    else
+        params+=("encryption=none")
+    fi
     params+=("type=grpc")
     [[ -n "$serviceName" ]] && params+=("serviceName=$(_mihomoconf_urlencode "$serviceName")")
     if [[ "$tls" == "true" ]]; then
@@ -6367,6 +6389,13 @@ _mihomoconf_read_listener_rows() {
             if (lindent($0) != item_indent + 2) next
             line=$0
             sub(/^[[:space:]]+#[[:space:]]*vpsgo-reality-public-key:[[:space:]]*/, "", line)
+            vless_public_key=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-vless-encryption:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-vless-encryption:[[:space:]]*/, "", line)
             vless_public_key=unquote(trim(line))
             next
         }
@@ -8237,7 +8266,9 @@ _mihomoconf_setup() {
     local -a VLESS_PORTS=() VLESS_TAGS=() VLESS_USER_ROWS=() VLESS_PRIVATE_KEYS=() VLESS_PUBLIC_KEYS=() VLESS_SHORT_IDS=()
     local VLESS_REALITY_SERVER_NAME="" VLESS_FLOW="xtls-rprx-vision" VLESS_CLIENT_FINGERPRINT="chrome"
     local -a VLESS_WS_PORTS=() VLESS_WS_TAGS=() VLESS_WS_USER_ROWS=() VLESS_WS_PATHS=() VLESS_WS_TLS_OPTS=() VLESS_WS_HOSTS=()
+    local -a VLESS_WS_DECRYPTIONS=() VLESS_WS_ENCRYPTIONS=()
     local -a VLESS_GRPC_PORTS=() VLESS_GRPC_TAGS=() VLESS_GRPC_USER_ROWS=() VLESS_GRPC_SERVICE_NAMES=() VLESS_GRPC_TLS_OPTS=() VLESS_GRPC_HOSTS=()
+    local -a VLESS_GRPC_DECRYPTIONS=() VLESS_GRPC_ENCRYPTIONS=()
     local _vless_grpc_user_total=0
 
     local -a TROJAN_PORTS=() TROJAN_TAGS=() TROJAN_USER_ROWS=() TROJAN_TLS_OPTS=() TROJAN_HOSTS=()
@@ -8781,8 +8812,20 @@ _mihomoconf_setup() {
             _vless_ws_tls_input=$(_mihomoconf_trim "${_vless_ws_tls_input:-N}")
             if [[ "$_vless_ws_tls_input" =~ ^[Yy]$ ]]; then
                 VLESS_WS_TLS_OPTS+=("true")
+                VLESS_WS_DECRYPTIONS+=("none")
+                VLESS_WS_ENCRYPTIONS+=("none")
             else
                 VLESS_WS_TLS_OPTS+=("false")
+                local _ws_keys _ws_dec _ws_enc
+                if _ws_keys=$(_mihomoconf_gen_vless_keys); then
+                    IFS=$'\t' read -r _ws_dec _ws_enc <<< "$_ws_keys"
+                    VLESS_WS_DECRYPTIONS+=("$_ws_dec")
+                    VLESS_WS_ENCRYPTIONS+=("$_ws_enc")
+                else
+                    _warn "无法生成 VLESS Encryption 密钥，请确保已安装 mihomo 内核"
+                    VLESS_WS_DECRYPTIONS+=("none")
+                    VLESS_WS_ENCRYPTIONS+=("none")
+                fi
             fi
 
             read -rp "    VLESS WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_ws_host_input
@@ -8989,8 +9032,20 @@ _mihomoconf_setup() {
             _vless_grpc_tls_input=$(_mihomoconf_trim "${_vless_grpc_tls_input:-N}")
             if [[ "$_vless_grpc_tls_input" =~ ^[Yy]$ ]]; then
                 VLESS_GRPC_TLS_OPTS+=("true")
+                VLESS_GRPC_DECRYPTIONS+=("none")
+                VLESS_GRPC_ENCRYPTIONS+=("none")
             else
                 VLESS_GRPC_TLS_OPTS+=("false")
+                local _grpc_keys _grpc_dec _grpc_enc
+                if _grpc_keys=$(_mihomoconf_gen_vless_keys); then
+                    IFS=$'\t' read -r _grpc_dec _grpc_enc <<< "$_grpc_keys"
+                    VLESS_GRPC_DECRYPTIONS+=("$_grpc_dec")
+                    VLESS_GRPC_ENCRYPTIONS+=("$_grpc_enc")
+                else
+                    _warn "无法生成 VLESS Encryption 密钥，请确保已安装 mihomo 内核"
+                    VLESS_GRPC_DECRYPTIONS+=("none")
+                    VLESS_GRPC_ENCRYPTIONS+=("none")
+                fi
             fi
 
             read -rp "    VLESS gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_grpc_host_input
@@ -9043,6 +9098,16 @@ _mihomoconf_setup() {
             VLESS_GRPC_SERVICE_NAMES+=("$_vless_pgrpc_service_name_input")
             VLESS_GRPC_TLS_OPTS+=("false")
             VLESS_GRPC_HOSTS+=("")
+            local _grpc_keys _grpc_dec _grpc_enc
+            if _grpc_keys=$(_mihomoconf_gen_vless_keys); then
+                IFS=$'\t' read -r _grpc_dec _grpc_enc <<< "$_grpc_keys"
+                VLESS_GRPC_DECRYPTIONS+=("$_grpc_dec")
+                VLESS_GRPC_ENCRYPTIONS+=("$_grpc_enc")
+            else
+                _warn "无法生成 VLESS Encryption 密钥，请确保已安装 mihomo 内核"
+                VLESS_GRPC_DECRYPTIONS+=("none")
+                VLESS_GRPC_ENCRYPTIONS+=("none")
+            fi
             VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
 
             local _user_rows _u_name _u_uuid
@@ -9631,8 +9696,11 @@ MIHOMOCONF_VLESS_WS_USER_EOF
     private-key: "${SSL_DIR}/cert.key"
 MIHOMOCONF_VLESS_WS_TLS_EOF
                 else
+                    local _vless_ws_dec="${VLESS_WS_DECRYPTIONS[$i]:-none}"
+                    local _vless_ws_enc="${VLESS_WS_ENCRYPTIONS[$i]:-none}"
                     cat >> "$_target_file" <<MIHOMOCONF_VLESS_WS_DEC_EOF
-    decryption: none
+    decryption: "${_vless_ws_dec}"
+    # vpsgo-vless-encryption: ${_vless_ws_enc}
 MIHOMOCONF_VLESS_WS_DEC_EOF
                 fi
                 cat >> "$_target_file" <<MIHOMOCONF_VLESS_WS_TRANS_EOF
@@ -9797,8 +9865,11 @@ MIHOMOCONF_VLESS_GRPC_USER_EOF
     private-key: "${SSL_DIR}/cert.key"
 MIHOMOCONF_VLESS_GRPC_TLS_EOF
                 else
+                    local _vless_grpc_dec="${VLESS_GRPC_DECRYPTIONS[$i]:-none}"
+                    local _vless_grpc_enc="${VLESS_GRPC_ENCRYPTIONS[$i]:-none}"
                     cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_DEC_EOF
-    decryption: none
+    decryption: "${_vless_grpc_dec}"
+    # vpsgo-vless-encryption: ${_vless_grpc_enc}
 MIHOMOCONF_VLESS_GRPC_DEC_EOF
                 fi
                 cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_TRANS_EOF
@@ -10297,7 +10368,8 @@ MIHOMOCONF_VLESS_YAML
                 [[ "$_li" == "$i" ]] || continue
                 _vless_ws_user_idx=$((_vless_ws_user_idx + 1))
                 _vless_ws_client_name="${_vless_ws_name}-${_u_name}"
-                VLESS_WS_LINK=$(_mihomoconf_gen_vless_ws_link "$SERVER_HOST" "$_vless_ws_port" "$_u_uuid" "$_vless_ws_client_name" "$_vless_ws_path" "$_vless_ws_tls" "$_vless_ws_host")
+                local _vless_ws_enc="${VLESS_WS_ENCRYPTIONS[$i]:-none}"
+                VLESS_WS_LINK=$(_mihomoconf_gen_vless_ws_link "$SERVER_HOST" "$_vless_ws_port" "$_u_uuid" "$_vless_ws_client_name" "$_vless_ws_path" "$_vless_ws_tls" "$_vless_ws_host" "$_vless_ws_enc")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_ws_user_idx" "$_u_name"
                 printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
                 printf "  ${BOLD}VLESS WS 分享链接:${PLAIN}\n"
@@ -10313,6 +10385,7 @@ MIHOMOCONF_VLESS_YAML
         cipher: auto
         udp: true
         tls: ${_vless_ws_tls}
+        encryption: ${_vless_ws_enc}
 MIHOMOCONF_VLESS_WS_YAML
                 if [[ "$_vless_ws_tls" == "true" && -n "$_vless_ws_host" ]]; then
                     echo "        servername: ${_vless_ws_host}"
@@ -10530,7 +10603,8 @@ MIHOMOCONF_VMESS_GRPC_YAML2
                 [[ "$_li" == "$i" ]] || continue
                 _vless_grpc_user_idx=$((_vless_grpc_user_idx + 1))
                 _vless_grpc_client_name="${_vless_grpc_name}-${_u_name}"
-                VLESS_GRPC_LINK=$(_mihomoconf_gen_vless_grpc_link "$SERVER_HOST" "$_vless_grpc_port" "$_u_uuid" "$_vless_grpc_client_name" "$_vless_grpc_service_name" "$_vless_grpc_tls" "$_vless_grpc_host")
+                local _vless_grpc_enc="${VLESS_GRPC_ENCRYPTIONS[$i]:-none}"
+                VLESS_GRPC_LINK=$(_mihomoconf_gen_vless_grpc_link "$SERVER_HOST" "$_vless_grpc_port" "$_u_uuid" "$_vless_grpc_client_name" "$_vless_grpc_service_name" "$_vless_grpc_tls" "$_vless_grpc_host" "$_vless_grpc_enc")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_user_idx" "$_u_name"
                 printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
                 printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
@@ -10545,6 +10619,7 @@ MIHOMOCONF_VMESS_GRPC_YAML2
       cipher: auto
       udp: true
       tls: ${_vless_grpc_tls}
+      encryption: ${_vless_grpc_enc}
 MIHOMOCONF_VLESS_GRPC_YAML
                 if [[ "$_vless_grpc_tls" == "true" && -n "$_vless_grpc_host" ]]; then
                     echo "      servername: ${_vless_grpc_host}"
@@ -11779,7 +11854,7 @@ MIHOMO_VLESS_YAML
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
                     vless_name="$(_mihomoconf_make_node_name "VLESS-WS" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
-                    vless_link=$(_mihomoconf_gen_vless_ws_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_ws_path" "$vless_ws_tls" "$vless_ws_host")
+                    vless_link=$(_mihomoconf_gen_vless_ws_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_ws_path" "$vless_ws_tls" "$vless_ws_host" "$vless_public_key")
                     if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
                         printf "%s\n" "$vless_link"
                     else
@@ -11803,6 +11878,7 @@ MIHOMO_VLESS_YAML
         cipher: auto
         udp: true
         tls: ${vless_ws_tls}
+        encryption: ${vless_public_key:-none}
 MIHOMO_VLESS_WS_YAML
                         if [[ "$vless_ws_tls" == "true" && -n "$vless_ws_host" ]]; then
                             echo "        servername: ${vless_ws_host}"
@@ -11836,7 +11912,7 @@ MIHOMO_VLESS_WS_YAML3
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
                     vless_name="$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
-                    vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host")
+                    vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host" "$vless_public_key")
                     if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
                         printf "%s\n" "$vless_link"
                     else
@@ -11860,6 +11936,7 @@ MIHOMO_VLESS_WS_YAML3
         cipher: auto
         udp: true
         tls: ${vless_ws_tls}
+        encryption: ${vless_public_key:-none}
 MIHOMO_VLESS_GRPC_YAML
                         if [[ "$vless_ws_tls" == "true" && -n "$vless_ws_host" ]]; then
                             echo "        servername: ${vless_ws_host}"
