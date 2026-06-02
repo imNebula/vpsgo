@@ -1,1 +1,25 @@
-# mihomo 服务端配置allow-lan: falsemode: rulelog-level: infoipv6: truedns:  enable: true  ipv6: true  nameserver:    - systemlisteners:  - name: ss-direct-443    tag: "ss_relay_9e60db34"    type: shadowsocks    port: 443    listen: "::"    cipher: chacha20-ietf-poly1305    password: "change-me"    udp: truerules:  - MATCH,DIRECT# vpsgo-ipv4-google: off
+# mihomo 服务端配置
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: true
+
+dns:
+  enable: true
+  ipv6: true
+  nameserver:
+    - system
+
+listeners:
+  - name: ss-direct-443
+    tag: "ss_relay_9e60db34"
+    type: shadowsocks
+    port: 443
+    listen: "::"
+    cipher: chacha20-ietf-poly1305
+    password: "change-me"
+    udp: true
+
+rules:
+  - MATCH,DIRECT
+# vpsgo-ipv4-google: off

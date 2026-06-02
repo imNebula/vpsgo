@@ -13022,6 +13022,36 @@ _mihomochain_apply_ss_query_param() {
     return 0
 }
 
+_mihomochain_parse_json_field() {
+    local json="$1" field="$2"
+    if command -v jq >/dev/null 2>&1; then
+        echo -n "$json" | jq -r "if .[\"${field}\"] != null then .[\"${field}\"] else \"\" end" 2>/dev/null | tr -d '\r'
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import sys, json; val = json.loads(sys.argv[1]).get(sys.argv[2], ''); print(str(val).lower() if isinstance(val, bool) else val)" "$json" "$field" 2>/dev/null
+    elif command -v python >/dev/null 2>&1; then
+        python -c "import sys, json; val = json.loads(sys.argv[1]).get(sys.argv[2], ''); print(str(val).lower() if isinstance(val, bool) else val)" "$json" "$field" 2>/dev/null
+    else
+        # Fallback to simple sed/awk parser for flat JSON
+        echo "$json" | awk -v f="$field" -F',' '
+            {
+                for(i=1; i<=NF; i++) {
+                    if($i ~ "\"" f "\"") {
+                        val = $i
+                        sub(/^.*"'/ f '"[[:space:]]*:[[:space:]]*/, "", val)
+                        # clean up string quotes
+                        gsub(/^[[:space:]]*"/, "", val)
+                        gsub(/"[[:space:]]*$/, "", val)
+                        gsub(/^[[:space:]]+/, "", val)
+                        gsub(/[[:space:]]+$/, "", val)
+                        print val
+                        exit
+                    }
+                }
+            }
+        ' 2>/dev/null
+    fi
+}
+
 _mihomochain_extract_link_name() {
     local link="${1:-}" frag
     [[ "$link" == *#* ]] || return 1
@@ -13154,10 +13184,13 @@ _mihomochain_add_or_update_outbound() {
     local vless_uuid="${23:-}" vless_flow="${24:-xtls-rprx-vision}" vless_public_key="${25:-}"
     local vless_short_id="${26:-}" vless_client_fingerprint="${27:-chrome}" vless_packet_encoding="${28:-xudp}"
     local hy2_congestion_control="${29:-brutal}" ss_udp="${30:-1}" ss_uot="${31:-0}"
+    local transport_network="${32:-}" transport_path="${33:-}" transport_host="${34:-}" transport_tls="${35:-}"
+    local snell_version="${36:-5}" snell_reuse="${37:-true}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
     local name q_name q_server q_cipher q_user q_pass q_sni q_obfs q_obfs_password q_mport q_hy2_congestion_control
     local q_wg_ip q_wg_ipv6 q_wg_private_key q_wg_public_key q_wg_allowed_ips q_wg_preshared_key q_wg_reserved
     local q_vless_uuid q_vless_flow q_vless_public_key q_vless_short_id q_vless_client_fingerprint q_vless_packet_encoding
+    local q_transport_network q_transport_path q_transport_host q_transport_tls q_snell_version q_snell_reuse
     local tmp_block
 
     name="${out_name:-$tag}"
@@ -13184,6 +13217,12 @@ _mihomochain_add_or_update_outbound() {
     q_vless_short_id=$(_mihomochain_yaml_quote "$vless_short_id")
     q_vless_client_fingerprint=$(_mihomochain_yaml_quote "$vless_client_fingerprint")
     q_vless_packet_encoding=$(_mihomochain_yaml_quote "$vless_packet_encoding")
+    q_transport_network=$(_mihomochain_yaml_quote "$transport_network")
+    q_transport_path=$(_mihomochain_yaml_quote "$transport_path")
+    q_transport_host=$(_mihomochain_yaml_quote "$transport_host")
+    q_transport_tls=$(_mihomochain_yaml_quote "$transport_tls")
+    q_snell_version=$(_mihomochain_yaml_quote "$snell_version")
+    q_snell_reuse=$(_mihomochain_yaml_quote "$snell_reuse")
 
     tmp_block=$(mktemp)
     case "$type" in
@@ -13290,6 +13329,23 @@ EOF
                     printf '      short-id: "%s"\n' "$q_vless_short_id" >> "$tmp_block"
                 fi
             fi
+            if [[ "$q_transport_network" == "ws" ]]; then
+                echo "    network: ws" >> "$tmp_block"
+                echo "    ws-opts:" >> "$tmp_block"
+                if [[ -n "$q_transport_path" ]]; then
+                    printf '      path: "%s"\n' "$q_transport_path" >> "$tmp_block"
+                fi
+                if [[ -n "$q_transport_host" ]]; then
+                    echo "      headers:" >> "$tmp_block"
+                    printf '        Host: "%s"\n' "$q_transport_host" >> "$tmp_block"
+                fi
+            elif [[ "$q_transport_network" == "grpc" ]]; then
+                echo "    network: grpc" >> "$tmp_block"
+                if [[ -n "$q_transport_path" ]]; then
+                    echo "    grpc-opts:" >> "$tmp_block"
+                    printf '      grpc-service-name: "%s"\n' "$q_transport_path" >> "$tmp_block"
+                fi
+            fi
             ;;
         socks5|http)
             cat > "$tmp_block" <<EOF
@@ -13306,6 +13362,14 @@ EOF
             fi
             if [[ "$type" == "socks5" ]]; then
                 echo "    udp: true" >> "$tmp_block"
+            elif [[ "$type" == "http" && "$q_transport_tls" == "1" ]]; then
+                echo "    tls: true" >> "$tmp_block"
+                if [[ -n "$q_sni" ]]; then
+                    printf '    servername: "%s"\n' "$q_sni" >> "$tmp_block"
+                fi
+                if [[ "$insecure" == "1" ]]; then
+                    echo "    skip-cert-verify: true" >> "$tmp_block"
+                fi
             fi
             ;;
         wireguard|wg)
@@ -13383,6 +13447,123 @@ EOF
             fi
             if [[ -n "$q_vless_packet_encoding" ]]; then
                 printf '    udp-relay-mode: "%s"\n' "$q_vless_packet_encoding" >> "$tmp_block"
+            fi
+            ;;
+        vmess)
+            if [[ -z "$vless_uuid" ]]; then
+                rm -f "$tmp_block"
+                return 1
+            fi
+            cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: vmess
+    server: "${q_server}"
+    port: ${port}
+    uuid: "${q_vless_uuid}"
+    alterId: 0
+    cipher: auto
+    udp: true
+EOF
+            if [[ "$q_transport_tls" == "1" ]]; then
+                echo "    tls: true" >> "$tmp_block"
+                if [[ -n "$q_sni" ]]; then
+                    printf '    servername: "%s"\n' "$q_sni" >> "$tmp_block"
+                fi
+                if [[ "$insecure" == "1" ]]; then
+                    echo "    skip-cert-verify: true" >> "$tmp_block"
+                fi
+            fi
+            if [[ "$q_transport_network" == "ws" ]]; then
+                echo "    network: ws" >> "$tmp_block"
+                echo "    ws-opts:" >> "$tmp_block"
+                if [[ -n "$q_transport_path" ]]; then
+                    printf '      path: "%s"\n' "$q_transport_path" >> "$tmp_block"
+                fi
+                if [[ -n "$q_transport_host" ]]; then
+                    echo "      headers:" >> "$tmp_block"
+                    printf '        Host: "%s"\n' "$q_transport_host" >> "$tmp_block"
+                fi
+            elif [[ "$q_transport_network" == "grpc" ]]; then
+                echo "    network: grpc" >> "$tmp_block"
+                if [[ -n "$q_transport_path" ]]; then
+                    echo "    grpc-opts:" >> "$tmp_block"
+                    printf '      grpc-service-name: "%s"\n' "$q_transport_path" >> "$tmp_block"
+                fi
+            fi
+            ;;
+        trojan)
+            cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: trojan
+    server: "${q_server}"
+    port: ${port}
+    password: "${q_pass}"
+    udp: true
+EOF
+            if [[ "$q_transport_tls" != "0" ]]; then
+                echo "    tls: true" >> "$tmp_block"
+                if [[ -n "$q_sni" ]]; then
+                    printf '    sni: "%s"\n' "$q_sni" >> "$tmp_block"
+                fi
+                if [[ "$insecure" == "1" ]]; then
+                    echo "    skip-cert-verify: true" >> "$tmp_block"
+                fi
+            fi
+            if [[ "$q_transport_network" == "ws" ]]; then
+                echo "    network: ws" >> "$tmp_block"
+                echo "    ws-opts:" >> "$tmp_block"
+                if [[ -n "$q_transport_path" ]]; then
+                    printf '      path: "%s"\n' "$q_transport_path" >> "$tmp_block"
+                fi
+                if [[ -n "$q_transport_host" ]]; then
+                    echo "      headers:" >> "$tmp_block"
+                    printf '        Host: "%s"\n' "$q_transport_host" >> "$tmp_block"
+                fi
+            elif [[ "$q_transport_network" == "grpc" ]]; then
+                echo "    network: grpc" >> "$tmp_block"
+                if [[ -n "$q_transport_path" ]]; then
+                    echo "    grpc-opts:" >> "$tmp_block"
+                    printf '      grpc-service-name: "%s"\n' "$q_transport_path" >> "$tmp_block"
+                fi
+            fi
+            ;;
+        snell)
+            cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: snell
+    server: "${q_server}"
+    port: ${port}
+    psk: "${q_pass}"
+    version: ${q_snell_version:-5}
+    reuse: ${q_snell_reuse:-true}
+EOF
+            if [[ -n "$q_obfs" ]]; then
+                cat >> "$tmp_block" <<EOF
+    obfs-opts:
+      mode: ${q_obfs}
+EOF
+                if [[ -n "$q_sni" ]]; then
+                    printf '      host: "%s"\n' "$q_sni" >> "$tmp_block"
+                fi
+            fi
+            ;;
+        hysteria)
+            cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: hysteria
+    server: "${q_server}"
+    port: ${port}
+    auth-str: "${q_pass}"
+    udp: true
+EOF
+            if [[ -n "$q_sni" ]]; then
+                printf '    sni: "%s"\n' "$q_sni" >> "$tmp_block"
+            fi
+            if [[ "$insecure" == "1" ]]; then
+                echo "    skip-cert-verify: true" >> "$tmp_block"
+            fi
+            if [[ -n "$q_obfs" ]]; then
+                printf '    obfs: "%s"\n' "$q_obfs" >> "$tmp_block"
             fi
             ;;
         *)
@@ -15198,7 +15379,7 @@ _mihomo_chain_proxy_manage() {
             2)
                 printf "  ${BOLD}添加出口节点${PLAIN}\n"
                 _separator
-                _menu_pair "1" "通过链接导入" "ss:// socks5:// hy2:// anytls:// vless:// tuic:// wireguard://" "green" "2" "手动录入" "各协议详细参数配置" "green"
+                _menu_pair "1" "通过链接导入" "ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks/http/anytls" "green" "2" "手动录入" "各协议详细参数配置" "green"
                 _menu_item "3" "一键注册并自动导入 WARP 节点" "自动注册 Cloudflare WARP 账号并获取私钥/IP" "green"
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
@@ -15207,6 +15388,7 @@ _mihomo_chain_proxy_manage() {
                 local out_wg_ip out_wg_ipv6 out_wg_private_key out_wg_public_key out_wg_allowed_ips
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
                 local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding
+                local out_transport_network out_transport_path out_transport_host out_transport_tls out_snell_version out_snell_reuse
                 read -rp "  选择 [1-3]: " import_mode
                 import_mode=$(_mihomoconf_trim "${import_mode:-}")
                 case "$import_mode" in
@@ -15247,18 +15429,134 @@ _mihomo_chain_proxy_manage() {
                 out_vless_short_id=""
                 out_vless_client_fingerprint="chrome"
                 out_vless_packet_encoding="xudp"
+                out_transport_network=""
+                out_transport_path=""
+                out_transport_host=""
+                out_transport_tls=""
+                out_snell_version=""
+                out_snell_reuse=""
                 case "$import_mode" in
                     1)
                         local in_link link_body link_userinfo link_hostport link_query link_name
                         local rename_confirm custom_name_input
                         local ss_decoded kv k v
                         local -a _qarr
-                        read -rp "  输入链接 (ss:// / socks5:// / hy2:// / hysteria2:// / anytls:// / vless:// / wireguard://[Beta]): " in_link
+                        # 预先检测 Surge Snell 行格式并转换
+                        if [[ "$in_link" =~ [Ss][Nn][Ee][Ll][Ll] ]] && [[ "$in_link" == *","* ]] && [[ "$in_link" != *"://"* ]]; then
+                            # 这可能是 Surge Snell 配置行
+                            local temp_line="$in_link"
+                            local surge_name=""
+                            if [[ "$temp_line" == *"="* ]]; then
+                                surge_name="${temp_line%%=*}"
+                                surge_name=$(_mihomoconf_trim "$surge_name")
+                                temp_line="${temp_line#*=}"
+                            fi
+                            temp_line=$(_mihomoconf_trim "$temp_line")
+                            local -a parts
+                            IFS=',' read -r -a parts <<< "$temp_line"
+                            local i
+                            for i in "${!parts[@]}"; do
+                                parts[$i]=$(_mihomoconf_trim "${parts[$i]}")
+                            done
+                            if [[ "${parts[0],,}" == "snell" ]]; then
+                                out_type="snell"
+                                out_server="${parts[1]:-}"
+                                out_port="${parts[2]:-}"
+                                out_snell_version="5"
+                                out_snell_reuse="true"
+                                local p_idx
+                                for (( p_idx=3; p_idx<${#parts[@]}; p_idx++ )); do
+                                    local p="${parts[$p_idx]}"
+                                    local pk="${p%%=*}"
+                                    local pv="${p#*=}"
+                                    pk=$(_mihomoconf_trim "$pk")
+                                    pv=$(_mihomoconf_trim "$pv")
+                                    case "${pk,,}" in
+                                        psk) out_pass="$pv" ;;
+                                        version) out_snell_version="$pv" ;;
+                                        reuse) out_snell_reuse="$pv" ;;
+                                        obfs) out_obfs="$pv" ;;
+                                        obfs-host|obfshost|host) out_sni="$pv" ;;
+                                    esac
+                                done
+                                if [[ -n "$out_server" && -n "$out_pass" ]] && _is_valid_port "$out_port"; then
+                                    if [[ -n "$surge_name" ]]; then
+                                        link_name="$surge_name"
+                                    fi
+                                    in_link="snell://${out_pass}@${out_server}:${out_port}?version=${out_snell_version}&reuse=${out_snell_reuse}"
+                                    if [[ -n "$out_obfs" ]]; then
+                                        in_link="${in_link}&obfs=${out_obfs}"
+                                    fi
+                                    if [[ -n "$out_sni" ]]; then
+                                        in_link="${in_link}&host=${out_sni}"
+                                    fi
+                                    if [[ -n "$link_name" ]]; then
+                                        in_link="${in_link}#$(_mihomoconf_urlencode "$link_name")"
+                                    fi
+                                fi
+                            fi
+                        fi
+
+                        read -rp "  输入节点链接/配置 (支持 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls): " in_link
                         in_link=$(_mihomoconf_trim "${in_link:-}")
                         if [[ -z "$in_link" ]]; then
                             _error_no_exit "链接不能为空"
                             _press_any_key
                             continue
+                        fi
+                        # 如果是包含 Surge Snell 格式输入，进行二次转换
+                        if [[ "$in_link" =~ [Ss][Nn][Ee][Ll][Ll] ]] && [[ "$in_link" == *","* ]] && [[ "$in_link" != *"://"* ]]; then
+                            local temp_line="$in_link"
+                            local surge_name=""
+                            if [[ "$temp_line" == *"="* ]]; then
+                                surge_name="${temp_line%%=*}"
+                                surge_name=$(_mihomoconf_trim "$surge_name")
+                                temp_line="${temp_line#*=}"
+                            fi
+                            temp_line=$(_mihomoconf_trim "$temp_line")
+                            local -a parts
+                            IFS=',' read -r -a parts <<< "$temp_line"
+                            local i
+                            for i in "${!parts[@]}"; do
+                                parts[$i]=$(_mihomoconf_trim "${parts[$i]}")
+                            done
+                            if [[ "${parts[0],,}" == "snell" ]]; then
+                                out_type="snell"
+                                out_server="${parts[1]:-}"
+                                out_port="${parts[2]:-}"
+                                out_snell_version="5"
+                                out_snell_reuse="true"
+                                local p_idx
+                                for (( p_idx=3; p_idx<${#parts[@]}; p_idx++ )); do
+                                    local p="${parts[$p_idx]}"
+                                    local pk="${p%%=*}"
+                                    local pv="${p#*=}"
+                                    pk=$(_mihomoconf_trim "$pk")
+                                    pv=$(_mihomoconf_trim "$pv")
+                                    case "${pk,,}" in
+                                        psk) out_pass="$pv" ;;
+                                        version) out_snell_version="$pv" ;;
+                                        reuse) out_snell_reuse="$pv" ;;
+                                        obfs) out_obfs="$pv" ;;
+                                        obfs-host|obfshost|host) out_sni="$pv" ;;
+                                    esac
+                                done
+                                if [[ -n "$out_server" && -n "$out_pass" ]] && _is_valid_port "$out_port"; then
+                                    if [[ -n "$surge_name" ]]; then
+                                        link_name="$surge_name"
+                                    fi
+                                    in_link="snell://${out_pass}@${out_server}:${out_port}?version=${out_snell_version}&reuse=${out_snell_reuse}"
+                                    if [[ -n "$out_obfs" ]]; then
+                                        in_link="${in_link}&obfs=${out_obfs}"
+                                    fi
+                                    if [[ -n "$out_sni" ]]; then
+                                        in_link="${in_link}&host=${out_sni}"
+                                    fi
+                                    if [[ -n "$link_name" ]]; then
+                                        in_link="${in_link}#$(_mihomoconf_urlencode "$link_name")"
+                                    fi
+                                fi
+                            fi
                         fi
                         link_name=$(_mihomochain_extract_link_name "$in_link" 2>/dev/null || true)
                         case "$in_link" in
@@ -15314,6 +15612,205 @@ _mihomo_chain_proxy_manage() {
                                 out_cipher="${ss_decoded%%:*}"
                                 out_pass="${ss_decoded#*:}"
                                 [[ "$out_ss_udp" == "0" ]] && out_ss_uot="0"
+                                ;;
+                            vmess://*)
+                                link_body="${in_link#vmess://}"
+                                link_body="${link_body%%#*}"
+                                link_body=$(_mihomochain_base64url_decode "$link_body" 2>/dev/null || true)
+                                if [[ -z "$link_body" ]]; then
+                                    _error_no_exit "vmess 链接 Base64 解码失败"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_server=$(_mihomochain_parse_json_field "$link_body" "add")
+                                out_port=$(_mihomochain_parse_json_field "$link_body" "port")
+                                out_vless_uuid=$(_mihomochain_parse_json_field "$link_body" "id")
+                                local vmess_ps vmess_net vmess_path vmess_host vmess_tls vmess_sni vmess_verify_cert vmess_insecure
+                                vmess_ps=$(_mihomochain_parse_json_field "$link_body" "ps")
+                                vmess_net=$(_mihomochain_parse_json_field "$link_body" "net")
+                                vmess_path=$(_mihomochain_parse_json_field "$link_body" "path")
+                                vmess_host=$(_mihomochain_parse_json_field "$link_body" "host")
+                                vmess_tls=$(_mihomochain_parse_json_field "$link_body" "tls")
+                                vmess_sni=$(_mihomochain_parse_json_field "$link_body" "sni")
+                                vmess_verify_cert=$(_mihomochain_parse_json_field "$link_body" "verify_cert")
+                                vmess_insecure=$(_mihomochain_parse_json_field "$link_body" "insecure")
+                                if [[ -z "$out_server" || -z "$out_vless_uuid" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "vmess 链接解析失败，缺少必要字段(add/port/id)"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="vmess"
+                                if [[ -n "$vmess_ps" && -z "$link_name" ]]; then
+                                    link_name="$vmess_ps"
+                                fi
+                                out_transport_network="${vmess_net:-tcp}"
+                                out_transport_path="${vmess_path:-}"
+                                out_transport_host="${vmess_host:-}"
+                                if [[ "$vmess_tls" == "tls" || "$vmess_tls" == "1" || "$vmess_tls" == "true" ]]; then
+                                    out_transport_tls="1"
+                                else
+                                    out_transport_tls="0"
+                                fi
+                                if [[ "$vmess_verify_cert" == "false" || "$vmess_insecure" == "true" || "$vmess_insecure" == "1" ]]; then
+                                    out_insecure="1"
+                                fi
+                                out_sni="${vmess_sni:-$vmess_host}"
+                                ;;
+                            vless://*)
+                                link_body="${in_link#vless://}"
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                if [[ "$link_body" != *@* ]]; then
+                                    _error_no_exit "vless 链接格式错误"
+                                    _press_any_key
+                                    continue
+                                fi
+                                link_userinfo="${link_body%@*}"
+                                link_hostport="${link_body#*@}"
+                                link_hostport="${link_hostport%%/*}"
+                                out_server="${link_hostport%:*}"
+                                out_port="${link_hostport##*:}"
+                                out_vless_uuid=$(_mihomochain_urldecode "$link_userinfo")
+                                if [[ -z "$out_server" || -z "$out_vless_uuid" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "vless 链接解析失败"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="vless"
+                                if [[ -n "$link_query" ]]; then
+                                    local out_vless_security="" out_vless_network=""
+                                    IFS='&' read -r -a _qarr <<< "$link_query"
+                                    for kv in "${_qarr[@]}"; do
+                                        k="${kv%%=*}"
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        k=$(_mihomochain_urldecode "$k")
+                                        v=$(_mihomochain_urldecode "$v")
+                                        case "$k" in
+                                            sni|peer|servername) out_sni="$v" ;;
+                                            host) out_sni="$v"; out_transport_host="$v" ;;
+                                            security) out_vless_security="$v" ;;
+                                            type|network) out_vless_network="$v" ;;
+                                            flow) out_vless_flow="$v" ;;
+                                            fp|client-fingerprint|client_fingerprint) out_vless_client_fingerprint="$v" ;;
+                                            pbk|public-key|public_key) out_vless_public_key="$v" ;;
+                                            sid|short-id|short_id) out_vless_short_id="$v" ;;
+                                            packet-encoding|packetEncoding) out_vless_packet_encoding="$v" ;;
+                                            path) out_transport_path="$v" ;;
+                                            serviceName) out_transport_path="$v" ;;
+                                            insecure)
+                                                if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then
+                                                    out_insecure="1"
+                                                fi
+                                                ;;
+                                        esac
+                                    done
+                                    if [[ -n "$out_vless_security" && "$out_vless_security" != "reality" && "$out_vless_security" != "tls" && "$out_vless_security" != "none" ]]; then
+                                        _error_no_exit "暂不支持该 VLESS security=${out_vless_security}"
+                                        _press_any_key
+                                        continue
+                                    fi
+                                    out_transport_network="${out_vless_network:-tcp}"
+                                    if [[ "$out_vless_security" == "tls" || "$out_vless_security" == "reality" ]]; then
+                                        out_transport_tls="1"
+                                    else
+                                        out_transport_tls="0"
+                                    fi
+                                fi
+                                ;;
+                            trojan://*)
+                                link_body="${in_link#trojan://}"
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                if [[ "$link_body" != *@* ]]; then
+                                    _error_no_exit "trojan 链接格式错误"
+                                    _press_any_key
+                                    continue
+                                fi
+                                link_userinfo="${link_body%@*}"
+                                link_hostport="${link_body#*@}"
+                                link_hostport="${link_hostport%%/*}"
+                                out_server="${link_hostport%:*}"
+                                out_port="${link_hostport##*:}"
+                                out_pass=$(_mihomochain_urldecode "$link_userinfo")
+                                if [[ -z "$out_server" || -z "$out_pass" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "trojan 链接解析失败"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="trojan"
+                                out_transport_tls="1"
+                                if [[ -n "$link_query" ]]; then
+                                    IFS='&' read -r -a _qarr <<< "$link_query"
+                                    for kv in "${_qarr[@]}"; do
+                                        k="${kv%%=*}"
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        k=$(_mihomochain_urldecode "$k")
+                                        v=$(_mihomochain_urldecode "$v")
+                                        case "$k" in
+                                            peer|sni|servername) out_sni="$v" ;;
+                                            type|network) out_transport_network="$v" ;;
+                                            path) out_transport_path="$v" ;;
+                                            serviceName) out_transport_path="$v" ;;
+                                            host) out_transport_host="$v" ;;
+                                            insecure)
+                                                if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then
+                                                    out_insecure="1"
+                                                fi
+                                                ;;
+                                        esac
+                                    done
+                                fi
+                                ;;
+                            snell://*)
+                                link_body="${in_link#snell://}"
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                if [[ "$link_body" != *@* ]]; then
+                                    _error_no_exit "snell 链接格式错误"
+                                    _press_any_key
+                                    continue
+                                fi
+                                link_userinfo="${link_body%@*}"
+                                link_hostport="${link_body#*@}"
+                                link_hostport="${link_hostport%%/*}"
+                                out_server="${link_hostport%:*}"
+                                out_port="${link_hostport##*:}"
+                                out_pass=$(_mihomochain_urldecode "$link_userinfo")
+                                if [[ -z "$out_server" || -z "$out_pass" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "snell 链接解析失败"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="snell"
+                                out_snell_version="5"
+                                out_snell_reuse="true"
+                                if [[ -n "$link_query" ]]; then
+                                    IFS='&' read -r -a _qarr <<< "$link_query"
+                                    for kv in "${_qarr[@]}"; do
+                                        k="${kv%%=*}"
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        k=$(_mihomochain_urldecode "$k")
+                                        v=$(_mihomochain_urldecode "$v")
+                                        case "$k" in
+                                            version) out_snell_version="$v" ;;
+                                            reuse) out_snell_reuse="$v" ;;
+                                            obfs) out_obfs="$v" ;;
+                                            host|obfs-host|obfshost) out_sni="$v" ;;
+                                        esac
+                                    done
+                                fi
                                 ;;
                             anytls://*)
                                 link_body="${in_link#anytls://}"
@@ -15404,33 +15901,35 @@ _mihomo_chain_proxy_manage() {
                                     done
                                 fi
                                 ;;
-                            vless://*)
-                                link_body="${in_link#vless://}"
+                            hy://*|hysteria://*)
+                                if [[ "$in_link" == hy://* ]]; then
+                                    link_body="${in_link#hy://}"
+                                else
+                                    link_body="${in_link#hysteria://}"
+                                fi
                                 link_body="${link_body%%#*}"
                                 link_query=""
                                 if [[ "$link_body" == *\?* ]]; then
                                     link_query="${link_body#*\?}"
                                     link_body="${link_body%%\?*}"
                                 fi
-                                if [[ "$link_body" != *@* ]]; then
-                                    _error_no_exit "vless 链接格式错误"
-                                    _press_any_key
-                                    continue
+                                if [[ "$link_body" == *@* ]]; then
+                                    link_userinfo="${link_body%@*}"
+                                    link_hostport="${link_body#*@}"
+                                    out_pass=$(_mihomochain_urldecode "$link_userinfo")
+                                else
+                                    link_hostport="$link_body"
                                 fi
-                                link_userinfo="${link_body%@*}"
-                                link_hostport="${link_body#*@}"
                                 link_hostport="${link_hostport%%/*}"
                                 out_server="${link_hostport%:*}"
                                 out_port="${link_hostport##*:}"
-                                out_vless_uuid=$(_mihomochain_urldecode "$link_userinfo")
-                                if [[ -z "$out_server" || -z "$out_vless_uuid" ]] || ! _is_valid_port "$out_port"; then
-                                    _error_no_exit "vless 链接解析失败"
+                                if [[ -z "$out_server" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "hysteria 链接解析失败"
                                     _press_any_key
                                     continue
                                 fi
-                                out_type="vless"
+                                out_type="hysteria"
                                 if [[ -n "$link_query" ]]; then
-                                    local out_vless_security="" out_vless_network=""
                                     IFS='&' read -r -a _qarr <<< "$link_query"
                                     for kv in "${_qarr[@]}"; do
                                         k="${kv%%=*}"
@@ -15438,31 +15937,17 @@ _mihomo_chain_proxy_manage() {
                                         k=$(_mihomochain_urldecode "$k")
                                         v=$(_mihomochain_urldecode "$v")
                                         case "$k" in
-                                            sni|peer|servername|host) out_sni="$v" ;;
-                                            security) out_vless_security="$v" ;;
-                                            type|network) out_vless_network="$v" ;;
-                                            flow) out_vless_flow="$v" ;;
-                                            fp|client-fingerprint|client_fingerprint) out_vless_client_fingerprint="$v" ;;
-                                            pbk|public-key|public_key) out_vless_public_key="$v" ;;
-                                            sid|short-id|short_id) out_vless_short_id="$v" ;;
-                                            packet-encoding|packetEncoding) out_vless_packet_encoding="$v" ;;
+                                            auth) [[ -z "$out_pass" ]] && out_pass="$v" ;;
+                                            peer|sni) out_sni="$v" ;;
                                             insecure)
                                                 if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then
                                                     out_insecure="1"
                                                 fi
                                                 ;;
+                                            obfs) out_obfs="$v" ;;
+                                            obfs-password|obfs_password) out_obfs_pass="$v" ;;
                                         esac
                                     done
-                                    if [[ -n "$out_vless_security" && "$out_vless_security" != "reality" && "$out_vless_security" != "tls" && "$out_vless_security" != "none" ]]; then
-                                        _error_no_exit "暂不支持该 VLESS security=${out_vless_security}"
-                                        _press_any_key
-                                        continue
-                                    fi
-                                    if [[ -n "$out_vless_network" && "$out_vless_network" != "tcp" ]]; then
-                                        _error_no_exit "当前仅支持 VLESS TCP 出站导入"
-                                        _press_any_key
-                                        continue
-                                    fi
                                 fi
                                 ;;
                             socks5://*|socks://*)
@@ -15629,8 +16114,63 @@ _mihomo_chain_proxy_manage() {
                                     done
                                 fi
                                 ;;
+                            http://*|https://*)
+                                if [[ "$in_link" == http://* ]]; then
+                                    link_body="${in_link#http://}"
+                                    out_transport_tls="0"
+                                else
+                                    link_body="${in_link#https://}"
+                                    out_transport_tls="1"
+                                fi
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                out_user=""
+                                out_pass=""
+                                if [[ "$link_body" == *@* ]]; then
+                                    link_userinfo="${link_body%@*}"
+                                    link_hostport="${link_body#*@}"
+                                    if [[ "$link_userinfo" == *:* ]]; then
+                                        out_user=$(_mihomochain_urldecode "${link_userinfo%%:*}")
+                                        out_pass=$(_mihomochain_urldecode "${link_userinfo#*:}")
+                                    else
+                                        out_user=$(_mihomochain_urldecode "$link_userinfo")
+                                    fi
+                                else
+                                    link_hostport="$link_body"
+                                fi
+                                link_hostport="${link_hostport%%/*}"
+                                out_server="${link_hostport%:*}"
+                                out_port="${link_hostport##*:}"
+                                if [[ -z "$out_server" ]] || ! _is_valid_port "$out_port"; then
+                                    _error_no_exit "http(s) 链接解析失败"
+                                    _press_any_key
+                                    continue
+                                fi
+                                out_type="http"
+                                if [[ -n "$link_query" ]]; then
+                                    IFS='&' read -r -a _qarr <<< "$link_query"
+                                    for kv in "${_qarr[@]}"; do
+                                        k="${kv%%=*}"
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        k=$(_mihomochain_urldecode "$k")
+                                        v=$(_mihomochain_urldecode "$v")
+                                        case "$k" in
+                                            peer|sni|servername) out_sni="$v" ;;
+                                            insecure)
+                                                if [[ "$v" == "1" || "$v" =~ ^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])$ ]]; then
+                                                    out_insecure="1"
+                                                fi
+                                                ;;
+                                        esac
+                                    done
+                                fi
+                                ;;
                             *)
-                                _error_no_exit "暂不支持该链接类型，请使用 ss:// / socks5:// / hy2:// / hysteria2:// / anytls:// / vless:// / tuic:// / wireguard://(Beta)"
+                                _error_no_exit "暂不支持该链接类型，请使用 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls 协议链接"
                                 _press_any_key
                                 continue
                                 ;;
@@ -15946,7 +16486,9 @@ EOF
                     "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}" \
                     "${out_vless_uuid:-}" "${out_vless_flow:-}" "${out_vless_public_key:-}" "${out_vless_short_id:-}" \
                     "${out_vless_client_fingerprint:-}" "${out_vless_packet_encoding:-}" \
-                    "${out_hy2_cc:-brutal}" "${out_ss_udp:-1}" "${out_ss_uot:-0}"; then
+                    "${out_hy2_cc:-brutal}" "${out_ss_udp:-1}" "${out_ss_uot:-0}" \
+                    "${out_transport_network:-}" "${out_transport_path:-}" "${out_transport_host:-}" "${out_transport_tls:-}" \
+                    "${out_snell_version:-}" "${out_snell_reuse:-}"; then
                     _error_no_exit "保存出口节点失败"
                     _press_any_key
                     continue
