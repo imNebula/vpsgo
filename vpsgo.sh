@@ -9630,6 +9630,10 @@ MIHOMOCONF_VLESS_WS_USER_EOF
     certificate: "${SSL_DIR}/cert.crt"
     private-key: "${SSL_DIR}/cert.key"
 MIHOMOCONF_VLESS_WS_TLS_EOF
+                else
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_WS_DEC_EOF
+    decryption: none
+MIHOMOCONF_VLESS_WS_DEC_EOF
                 fi
                 cat >> "$_target_file" <<MIHOMOCONF_VLESS_WS_TRANS_EOF
     transport:
@@ -9792,6 +9796,10 @@ MIHOMOCONF_VLESS_GRPC_USER_EOF
     certificate: "${SSL_DIR}/cert.crt"
     private-key: "${SSL_DIR}/cert.key"
 MIHOMOCONF_VLESS_GRPC_TLS_EOF
+                else
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_DEC_EOF
+    decryption: none
+MIHOMOCONF_VLESS_GRPC_DEC_EOF
                 fi
                 cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_TRANS_EOF
     transport:
@@ -10243,6 +10251,7 @@ MIHOMOCONF_AT_YAML
         type: vless
         server: ${SERVER_HOST}
         port: ${_vless_port}
+        cipher: auto
         udp: true
         uuid: "${_u_uuid}"
         flow: ${VLESS_FLOW}
@@ -10301,6 +10310,7 @@ MIHOMOCONF_VLESS_YAML
         server: ${SERVER_HOST}
         port: ${_vless_ws_port}
         uuid: "${_u_uuid}"
+        cipher: auto
         udp: true
         tls: ${_vless_ws_tls}
 MIHOMOCONF_VLESS_WS_YAML
@@ -10532,6 +10542,7 @@ MIHOMOCONF_VMESS_GRPC_YAML2
       server: ${SERVER_HOST}
       port: ${_vless_grpc_port}
       uuid: "${_u_uuid}"
+      cipher: auto
       udp: true
       tls: ${_vless_grpc_tls}
 MIHOMOCONF_VLESS_GRPC_YAML
@@ -11565,7 +11576,7 @@ _mihomo_read_config() {
 
     if [[ "$OUTPUT_LINK_ONLY" != "1" ]]; then
         _info "配置文件: ${config_file}"
-        _info "支持导出 listeners(Shadowsocks / AnyTLS / VLESS Reality / VLESS WS / HY2 / Tuic) 与 proxies(SS / WireGuard Beta)"
+        _info "支持导出 listeners(Shadowsocks / AnyTLS / VLESS Reality / VLESS WS / VLESS gRPC / HY2 / Tuic) 与 proxies(SS / WireGuard Beta)"
     fi
     saved_host=$(_mihomoconf_get_saved_host "$config_file")
     if [[ -n "$saved_host" ]]; then
@@ -11738,6 +11749,7 @@ MIHOMO_ANYTLS_JSON
         type: vless
         server: ${server_ip}
         port: ${port}
+        cipher: auto
         udp: true
         uuid: "${vless_uuid}"
         flow: ${vless_flow_value}
@@ -11788,6 +11800,7 @@ MIHOMO_VLESS_YAML
         server: ${server_ip}
         port: ${port}
         uuid: "${vless_uuid}"
+        cipher: auto
         udp: true
         tls: ${vless_ws_tls}
 MIHOMO_VLESS_WS_YAML
@@ -11844,6 +11857,7 @@ MIHOMO_VLESS_WS_YAML3
         server: ${server_ip}
         port: ${port}
         uuid: "${vless_uuid}"
+        cipher: auto
         udp: true
         tls: ${vless_ws_tls}
 MIHOMO_VLESS_GRPC_YAML
@@ -13362,6 +13376,7 @@ EOF
     server: "${q_server}"
     port: ${port}
     uuid: "${q_vless_uuid}"
+    cipher: auto
     udp: true
 EOF
             if [[ "$q_transport_tls" == "0" ]]; then
