@@ -15355,14 +15355,14 @@ _mihomo_chain_proxy_manage() {
         _info "实时生效: 保存后将自动写入并重启 mihomo"
         _separator
         _menu_pair "1" "查看当前规则" "" "green" "2" "添加出口节点" "" "green"
-        _menu_pair "3" "绑定入站节点 -> 出口节点" "" "green" "4" "绑定入站用户 -> 出口节点" "" "green"
-        _menu_pair "5" "删除出口节点" "" "green" "6" "删除绑定规则" "" "green"
-        _menu_item "7" "新增入站用户" "" "green"
+        _menu_pair "3" "注册 Warp 出口" "" "green" "4" "绑定入站节点 -> 出口节点" "" "green"
+        _menu_pair "5" "绑定入站用户 -> 出口节点" "" "green" "6" "删除出口节点" "" "green"
+        _menu_pair "7" "删除绑定规则" "" "green" "8" "新增入站用户" "" "green"
         _menu_item "0" "返回上级菜单" "" "red"
         _separator
 
         local ch
-        read -rp "  选择 [0-7]: " ch
+        read -rp "  选择 [0-8]: " ch
         case "$ch" in
             1)
                 printf "  ${BOLD}当前规则:${PLAIN}\n"
@@ -15380,7 +15380,6 @@ _mihomo_chain_proxy_manage() {
                 printf "  ${BOLD}添加出口节点${PLAIN}\n"
                 _separator
                 _menu_pair "1" "通过链接导入" "ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks/http/anytls" "green" "2" "手动录入" "各协议详细参数配置" "green"
-                _menu_item "3" "一键注册并自动导入 WARP 节点" "自动注册 Cloudflare WARP 账号并获取私钥/IP" "green"
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
                 local out_sni out_insecure out_obfs out_obfs_pass out_mport
@@ -15389,15 +15388,15 @@ _mihomo_chain_proxy_manage() {
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
                 local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding
                 local out_transport_network out_transport_path out_transport_host out_transport_tls out_snell_version out_snell_reuse
-                read -rp "  选择 [1-3]: " import_mode
+                read -rp "  选择 [1-2]: " import_mode
                 import_mode=$(_mihomoconf_trim "${import_mode:-}")
                 case "$import_mode" in
-                    1|2|3) ;;
+                    1|2) ;;
                     *)
                         if [[ "$import_mode" == *"://"* ]]; then
-                            _error_no_exit "输入格式错误：这里请输入 1、2 或 3。若要通过链接导入，请先输入 1 再粘贴链接。"
+                            _error_no_exit "输入格式错误：这里请输入 1 或 2。若要通过链接导入，请先输入 1 再粘贴链接。"
                         else
-                            _error_no_exit "无效选项，请输入 1、2 或 3"
+                            _error_no_exit "无效选项，请输入 1 或 2"
                         fi
                         _press_any_key
                         continue
@@ -16357,98 +16356,6 @@ _mihomo_chain_proxy_manage() {
                                 ;;
                         esac
                         ;;
-                    3)
-                        # 安装依赖
-                        if command -v apk >/dev/null 2>&1; then
-                            apk update && apk add curl jq wireguard-tools
-                        elif command -v apt-get >/dev/null 2>&1; then
-                            sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools
-                        elif command -v dnf >/dev/null 2>&1; then
-                            sudo dnf install -y curl jq wireguard-tools
-                        elif command -v yum >/dev/null 2>&1; then
-                            sudo yum install -y curl jq wireguard-tools
-                        elif command -v pacman >/dev/null 2>&1; then
-                            sudo pacman -Sy --noconfirm curl jq wireguard-tools
-                        fi
-
-                        # 生成 WireGuard 密钥对
-                        PRIV_KEY=$(wg genkey)
-                        PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
-
-                        # 构造随机设备指纹
-                        INSTALL_ID=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 22)
-                        FCM_TOKEN="${INSTALL_ID}:APA91b$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 134)"
-                        TOS=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-
-                        # 组装 JSON 载荷
-                        PAYLOAD=$(cat <<EOF
-{
-  "key": "$PUB_KEY",
-  "install_id": "$INSTALL_ID",
-  "fcm_token": "$FCM_TOKEN",
-  "tos": "$TOS",
-  "model": "PC",
-  "serial_number": "$INSTALL_ID",
-  "locale": "zh_CN"
-}
-EOF
-)
-
-                        # 发送注册请求
-                        RESPONSE=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
-                          -H "Content-Type: application/json; charset=UTF-8" \
-                          -H "User-Agent: okhttp/3.12.1" \
-                          -H "CF-Client-Version: a-6.10-2158" \
-                          -d "$PAYLOAD")
-
-                        # 验证响应
-                        ID=$(echo "$RESPONSE" | jq -r '.id // empty')
-                        if [[ -z "$ID" ]]; then
-                            echo "❌ 错误：向 Cloudflare 注册失败。"
-                            echo "API 返回原始数据: $RESPONSE"
-                            _press_any_key
-                            continue
-                        fi
-
-                        # 提取 IP 地址
-                        PATH_V4=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v4 // empty' | cut -d'/' -f1)
-                        PATH_V6=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v6 // empty' | cut -d'/' -f1)
-                        CLIENT_ID_B64=$(echo "$RESPONSE" | jq -r '.config.client_id // empty')
-
-                        # 解析 Reserved 字段
-                        if [[ -z "$CLIENT_ID_B64" || "$CLIENT_ID_B64" == "null" ]]; then
-                            RESERVED="[0, 0, 0]"
-                        else
-                            HEX=$(echo -n "$CLIENT_ID_B64" | base64 -d 2>/dev/null | hexdump -ve '/1 "%02X "')
-                            if [[ -n "$HEX" ]]; then
-                                read -r h1 h2 h3 <<< "$HEX"
-                                r1=$((16#${h1:-00}))
-                                r2=$((16#${h2:-00}))
-                                r3=$((16#${h3:-00}))
-                                RESERVED="[$r1, $r2, $r3]"
-                            else
-                                RESERVED="[0, 0, 0]"
-                            fi
-                        fi
-
-                        _success "WARP 凭证生成成功！"
-
-                        out_name="WARP-WireGuard"
-                        out_type="wireguard"
-                        out_server="engage.cloudflareclient.com"
-                        out_port="2408"
-                        out_wg_ip="$PATH_V4"
-                        out_wg_ipv6="$PATH_V6"
-                        out_wg_private_key="$PRIV_KEY"
-                        out_wg_public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-                        out_wg_allowed_ips="0.0.0.0/0,::/0"
-                        out_wg_preshared_key=""
-                        out_wg_reserved="$RESERVED"
-                        _info "正在探测最佳 MTU..."
-                        out_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
-                        _success "MTU: ${out_wg_mtu}"
-                        out_wg_keepalive=""
-                        ;;
                 esac
 
                 if [[ -z "$out_name" ]]; then
@@ -16500,6 +16407,126 @@ EOF
                 _press_any_key
                 ;;
             3)
+                printf "  ${BOLD}注册 Warp 出口${PLAIN}\n"
+                _separator
+                # 安装依赖
+                if command -v apk >/dev/null 2>&1; then
+                    apk update && apk add curl jq wireguard-tools
+                elif command -v apt-get >/dev/null 2>&1; then
+                    sudo apt-get update && sudo apt-get install -y curl jq wireguard-tools
+                elif command -v dnf >/dev/null 2>&1; then
+                    sudo dnf install -y curl jq wireguard-tools
+                elif command -v yum >/dev/null 2>&1; then
+                    sudo yum install -y curl jq wireguard-tools
+                elif command -v pacman >/dev/null 2>&1; then
+                    sudo pacman -Sy --noconfirm curl jq wireguard-tools
+                fi
+
+                local PRIV_KEY PUB_KEY INSTALL_ID FCM_TOKEN TOS PAYLOAD RESPONSE ID PATH_V4 PATH_V6 CLIENT_ID_B64 HEX h1 h2 h3 r1 r2 r3 RESERVED
+                # 生成 WireGuard 密钥对
+                PRIV_KEY=$(wg genkey)
+                PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
+
+                # 构造随机设备指纹
+                INSTALL_ID=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 22)
+                FCM_TOKEN="${INSTALL_ID}:APA91b$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 134)"
+                TOS=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+                # 组装 JSON 载荷
+                PAYLOAD=$(cat <<EOF
+{
+  "key": "$PUB_KEY",
+  "install_id": "$INSTALL_ID",
+  "fcm_token": "$FCM_TOKEN",
+  "tos": "$TOS",
+  "model": "PC",
+  "serial_number": "$INSTALL_ID",
+  "locale": "zh_CN"
+}
+EOF
+)
+
+                # 发送注册请求
+                RESPONSE=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
+                  -H "Content-Type: application/json; charset=UTF-8" \
+                  -H "User-Agent: okhttp/3.12.1" \
+                  -H "CF-Client-Version: a-6.10-2158" \
+                  -d "$PAYLOAD")
+
+                # 验证响应
+                ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+                if [[ -z "$ID" ]]; then
+                    echo "❌ 错误：向 Cloudflare 注册失败。"
+                    echo "API 返回原始数据: $RESPONSE"
+                    _press_any_key
+                    continue
+                fi
+
+                # 提取 IP 地址
+                PATH_V4=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v4 // empty' | cut -d'/' -f1)
+                PATH_V6=$(echo "$RESPONSE" | jq -r '.config.interface.addresses.v6 // empty' | cut -d'/' -f1)
+                CLIENT_ID_B64=$(echo "$RESPONSE" | jq -r '.config.client_id // empty')
+
+                # 解析 Reserved 字段
+                if [[ -z "$CLIENT_ID_B64" || "$CLIENT_ID_B64" == "null" ]]; then
+                    RESERVED="[0, 0, 0]"
+                else
+                    HEX=$(echo -n "$CLIENT_ID_B64" | base64 -d 2>/dev/null | hexdump -ve '/1 "%02X "')
+                    if [[ -n "$HEX" ]]; then
+                        read -r h1 h2 h3 <<< "$HEX"
+                        r1=$((16#${h1:-00}))
+                        r2=$((16#${h2:-00}))
+                        r3=$((16#${h3:-00}))
+                        RESERVED="[$r1, $r2, $r3]"
+                    else
+                        RESERVED="[0, 0, 0]"
+                    fi
+                fi
+
+                _success "WARP 凭证生成成功！"
+
+                local out_name="WARP-WireGuard"
+                local out_type="wireguard"
+                local out_server="engage.cloudflareclient.com"
+                local out_port="2408"
+                local out_wg_ip="$PATH_V4"
+                local out_wg_ipv6="$PATH_V6"
+                local out_wg_private_key="$PRIV_KEY"
+                local out_wg_public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+                local out_wg_allowed_ips="0.0.0.0/0,::/0"
+                local out_wg_preshared_key=""
+                local out_wg_reserved="$RESERVED"
+                _info "正在探测最佳 MTU..."
+                local out_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
+                _success "MTU: ${out_wg_mtu}"
+                local out_wg_keepalive=""
+                local out_tag
+
+                if ! out_tag=$(_mihomochain_outbound_tag_by_name "$out_name" 2>/dev/null); then
+                    out_tag=$(_mihomochain_gen_outbound_tag)
+                fi
+                if ! _mihomochain_add_or_update_outbound \
+                    "$out_tag" "$out_type" "$out_server" "$out_port" \
+                    "" "" "" \
+                    "" "0" "" "" "" "$out_name" \
+                    "${out_wg_ip:-}" "${out_wg_ipv6:-}" "${out_wg_private_key:-}" "${out_wg_public_key:-}" \
+                    "${out_wg_allowed_ips:-}" "${out_wg_preshared_key:-}" "${out_wg_reserved:-}" "${out_wg_mtu:-}" "${out_wg_keepalive:-}" \
+                    "" "" "" "" \
+                    "" "" \
+                    "brutal" "1" "0" \
+                    "" "" "" "" \
+                    "" ""; then
+                    _error_no_exit "保存出口节点失败"
+                    _press_any_key
+                    continue
+                fi
+                _info "出站节点已保存: ${out_name} (${out_type})"
+                if ! _mihomochain_apply_and_restart; then
+                    _warn "自动应用或重启失败，请检查日志后重试"
+                fi
+                _press_any_key
+                ;;
+            4)
                 local listener_name in_tag out_name out_show_name out_tag listener_input out_input
                 local li oi idx type server port cipher username password sni insecure obfs obfs_password mport
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
@@ -16622,7 +16649,7 @@ EOF
                 fi
                 _press_any_key
                 ;;
-            4)
+            5)
                 local user_listener_tag user_listener_name user_name out_name out_show_name out_tag
                 local listener_pick user_pick out_pick li ui oi idx type server port cipher username password sni insecure obfs obfs_password mport
                 local wg_ip wg_ipv6 wg_private_key wg_public_key wg_allowed_ips wg_preshared_key wg_reserved wg_mtu wg_keepalive
@@ -16796,7 +16823,7 @@ EOF
                 fi
                 _press_any_key
                 ;;
-            5)
+            6)
                 printf "  ${BOLD}当前出口节点:${PLAIN}\n"
                 _separator
                 local rm_out_idx=0 type server port cipher username password sni insecure obfs obfs_password mport out_name out_show_name
@@ -16876,7 +16903,7 @@ EOF
                 fi
                 _press_any_key
                 ;;
-            6)
+            7)
                 printf "  ${BOLD}当前规则:${PLAIN}\n"
                 _separator
                 local rule_idx=0 kind rule_left out_name in_name in_user out_show_name
@@ -16957,7 +16984,7 @@ EOF
                 fi
                 _press_any_key
                 ;;
-            7)
+            8)
                 local add_listener_pick add_listener_tag add_listener_name add_listener_type
                 local add_listener_cipher
                 local add_mode add_username add_uuid add_password add_overwrite add_result add_action
