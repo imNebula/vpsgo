@@ -5384,7 +5384,7 @@ _mihomoconf_test_reality_domains_auto() {
         "gfn.nvidia.com"
     )
     
-    _info "正在自动测试各大厂 Reality 伪造域名的延迟与兼容性 (TLS 1.3, H2, X25519MLKEM768)..."
+    _info "正在自动测试 Reality 域名延迟与兼容性..."
     _separator
     
     local best_domain_pq=""
@@ -5411,13 +5411,13 @@ _mihomoconf_test_reality_domains_auto() {
                 latency_ms=$(awk "BEGIN {print int($latency * 1000)}")
                 
                 if [[ "$exit_code" -eq 0 ]]; then
-                    printf "${GREEN}符合所有要求${PLAIN} (TLS 1.3/H2/PQ), 延迟 ${GREEN}%s ms${PLAIN}\\n" "$latency_ms"
+                    printf "${GREEN}满足要求${PLAIN} (TLS 1.3/H2/PQ), 延迟 ${GREEN}%s ms${PLAIN}\\n" "$latency_ms"
                     if (( latency_ms < best_latency_pq )); then
                         best_latency_pq=$latency_ms
                         best_domain_pq="$d"
                     fi
                 else
-                    printf "${YELLOW}符合基础要求${PLAIN} (TLS 1.3/H2, 不支持 PQ), 延迟 ${GREEN}%s ms${PLAIN}\\n" "$latency_ms"
+                    printf "${YELLOW}基础满足${PLAIN} (无 PQ), 延迟 ${GREEN}%s ms${PLAIN}\\n" "$latency_ms"
                     if (( latency_ms < best_latency_nopq )); then
                         best_latency_nopq=$latency_ms
                         best_domain_nopq="$d"
@@ -5435,13 +5435,13 @@ _mihomoconf_test_reality_domains_auto() {
     
     _separator
     if [[ -n "$best_domain_pq" ]]; then
-        _info "已自动为您选择最佳且支持 PQ 算法的域名: ${GREEN}${best_domain_pq}${PLAIN} (延迟: ${GREEN}${best_latency_pq} ms${PLAIN})"
+        _info "已选定最佳 PQ 域名: ${GREEN}${best_domain_pq}${PLAIN} (${best_latency_pq} ms)"
         VLESS_REALITY_SERVER_NAME="$best_domain_pq"
     elif [[ -n "$best_domain_nopq" ]]; then
-        _warn "未检测到支持 X25519MLKEM768 的域名！已自动为您选择满足 TLS 1.3 + H2 的低延迟域名: ${YELLOW}${best_domain_nopq}${PLAIN} (延迟: ${GREEN}${best_latency_nopq} ms${PLAIN})"
+        _warn "未检测到 PQ 域名，已选定低延迟域名: ${YELLOW}${best_domain_nopq}${PLAIN} (${best_latency_nopq} ms)"
         VLESS_REALITY_SERVER_NAME="$best_domain_nopq"
     else
-        _error_no_exit "所有域名均未通过基本检测 (TLS 1.3 / H2) 或连接失败，请检查网络后重试，或选择手动输入域名"
+        _error_no_exit "所有域名检测均失败，请检查网络或手动输入域名"
         VLESS_REALITY_SERVER_NAME=""
     fi
 }
@@ -5450,48 +5450,44 @@ _mihomoconf_test_reality_domains_auto() {
 _mihomoconf_test_reality_domain_manual() {
     local input_domain
     while true; do
-        read -rp "    请输入要使用的 Reality 伪造域名 [默认 cdn.icloud-content.com]: " input_domain
+        read -rp "    请输入 Reality 伪造域名 [默认 cdn.icloud-content.com]: " input_domain
         input_domain=$(_mihomoconf_trim "${input_domain:-cdn.icloud-content.com}")
         
-        _info "正在对域名 ${input_domain} 进行兼容性检测..."
+        _info "正在检测域名 ${input_domain}..."
         local check_res
         check_res=$(_mihomoconf_check_reality_domain "$input_domain")
         local exit_code=$?
         
         if [[ "$exit_code" -eq 0 ]]; then
-            _info "检测成功! 该域名支持 ${GREEN}TLS 1.3${PLAIN}, ${GREEN}HTTP/2 (H2)${PLAIN} 且支持 ${GREEN}X25519MLKEM768${PLAIN}。"
+            _info "检测通过! 支持 TLS 1.3, H2 并兼容 X25519MLKEM768"
             VLESS_REALITY_SERVER_NAME="$input_domain"
             break
         elif [[ "$exit_code" -eq 1 ]]; then
-            _warn "该域名支持 TLS 1.3 和 HTTP/2 (H2)，但不支持 X25519MLKEM768 (可能由于未开启 PQ 算法或防火墙拦截)！"
+            _warn "该域名不支持 X25519MLKEM768 (无 PQ)"
             local force_use
-            read -rp "    该域名不符合 X25519MLKEM768 伪造推荐标准，强行使用可能会导致被识别阻断。是否强制使用？ [y/N]: " force_use
+            read -rp "    该域名不支持 PQ (存在安全隐患)，是否强制使用？[y/N]: " force_use
             force_use=$(_mihomoconf_trim "${force_use:-n}")
-            if [[ "$force_use" == "y" || "$force_use" == "Y" ]]; then
-                _info "强制使用未完全符合推荐标准的域名: ${input_domain}"
+            if [[ "$force_use" =~ ^[Yy]$ ]]; then
+                _info "强制使用域名: ${input_domain}"
                 VLESS_REALITY_SERVER_NAME="$input_domain"
                 break
             else
-                _info "请重新输入域名..."
+                _info "请重新输入"
             fi
         else
-            local err_msg
-            if [[ "$check_res" == "H2_FAIL" ]]; then
-                err_msg="该域名不支持 HTTP/2 (H2) 协议"
-            else
-                err_msg="该域名不支持 TLS 1.3 协议"
-            fi
+            local err_msg="该域名不支持 TLS 1.3"
+            [[ "$check_res" == "H2_FAIL" ]] && err_msg="该域名不支持 H2"
             
             _warn "${err_msg}！"
             local force_use
-            read -rp "    该域名不符合 Reality 伪造推荐标准，强行使用可能会导致被识别阻断。是否强制使用？ [y/N]: " force_use
+            read -rp "    该域名不符合基础标准，是否强制使用？[y/N]: " force_use
             force_use=$(_mihomoconf_trim "${force_use:-n}")
-            if [[ "$force_use" == "y" || "$force_use" == "Y" ]]; then
-                _info "强制使用未通过基础检测的域名: ${input_domain}"
+            if [[ "$force_use" =~ ^[Yy]$ ]]; then
+                _info "强制使用域名: ${input_domain}"
                 VLESS_REALITY_SERVER_NAME="$input_domain"
                 break
             else
-                _info "请重新输入域名..."
+                _info "请重新输入"
             fi
         fi
     done
@@ -5698,6 +5694,11 @@ _mihomoconf_gen_vless_grpc_link() {
     [[ -n "$serviceName" ]] && params+=("serviceName=$(_mihomoconf_urlencode "$serviceName")")
     if [[ "$tls" == "true" ]]; then
         params+=("security=tls")
+        [[ -n "$host" ]] && params+=("sni=$(_mihomoconf_urlencode "$host")")
+    elif [[ "$tls" == "reality" ]]; then
+        params+=("security=reality")
+        [[ -n "${9}" ]] && params+=("pbk=$(_mihomoconf_urlencode "${9}")")
+        [[ -n "${10}" ]] && params+=("sid=$(_mihomoconf_urlencode "${10}")")
         [[ -n "$host" ]] && params+=("sni=$(_mihomoconf_urlencode "$host")")
     else
         params+=("security=none")
@@ -8269,6 +8270,7 @@ _mihomoconf_setup() {
     local -a VLESS_WS_DECRYPTIONS=() VLESS_WS_ENCRYPTIONS=()
     local -a VLESS_GRPC_PORTS=() VLESS_GRPC_TAGS=() VLESS_GRPC_USER_ROWS=() VLESS_GRPC_SERVICE_NAMES=() VLESS_GRPC_TLS_OPTS=() VLESS_GRPC_HOSTS=()
     local -a VLESS_GRPC_DECRYPTIONS=() VLESS_GRPC_ENCRYPTIONS=()
+    local -a VLESS_GRPC_REALITY_PRIVATE_KEYS=() VLESS_GRPC_REALITY_PUBLIC_KEYS=() VLESS_GRPC_REALITY_SHORT_IDS=() VLESS_GRPC_REALITY_DSTS=() VLESS_GRPC_REALITY_SNIS=()
     local _vless_grpc_user_total=0
 
     local -a TROJAN_PORTS=() TROJAN_TAGS=() TROJAN_USER_ROWS=() TROJAN_TLS_OPTS=() TROJAN_HOSTS=()
@@ -8355,7 +8357,7 @@ _mihomoconf_setup() {
                 printf "      1) VLESS Reality (XTLS Vision)\n"
                 printf "      2) VLESS WebSocket (CDN 回源)\n"
                 printf "      3) VLESS gRPC (CDN 回源)\n"
-                printf "      4) 纯 VLESS gRPC (无 TLS 直连)\n"
+                printf "      4) VLESS gRPC Reality (防封锁强加密)\n"
                 local vless_sub
                 read -rp "      选择 [1-4]（默认 1）: " vless_sub
                 case "${vless_sub:-1}" in
@@ -8397,7 +8399,7 @@ _mihomoconf_setup() {
     _status_kv "VLESS Reality 数量" "${VLESS_COUNT}" "cyan" 10
     _status_kv "VLESS WS 数量" "${VLESS_WS_COUNT}" "cyan" 10
     _status_kv "VLESS gRPC 数量" "${VLESS_GRPC_COUNT}" "cyan" 10
-    _status_kv "纯 VLESS gRPC 数量" "${VLESS_PURE_GRPC_COUNT}" "cyan" 10
+    _status_kv "VLESS gRPC Reality 数量" "${VLESS_PURE_GRPC_COUNT}" "cyan" 10
     _status_kv "VMess TCP 数量" "${VMESS_COUNT}" "cyan" 10
     _status_kv "VMess WS 数量" "${VMESS_WS_COUNT}" "cyan" 10
     _status_kv "VMess gRPC 数量" "${VMESS_GRPC_COUNT}" "cyan" 10
@@ -8718,10 +8720,10 @@ _mihomoconf_setup() {
         local choice_domain
         while true; do
             printf "    ${BOLD}Reality 伪造域名配置:${PLAIN}\n"
-            printf "      1) 自动测试并选择延迟最低的大厂域名 (符合 TLS 1.3 / H2 / X25519MLKEM768)\n"
-            printf "      2) 自选并手动输入域名 (支持自动检测)\n"
+            printf "      1) 自动检测并选择低延迟推荐域名 (推荐)\n"
+            printf "      2) 手动输入自定义域名 (带自动检测)\n"
             if [[ -n "${ANYTLS_SNI:-}" ]]; then
-                printf "      3) 复用 AnyTLS 域名 [${ANYTLS_SNI}] (不进行检测)\n"
+                printf "      3) 复用 AnyTLS 域名 [${ANYTLS_SNI}]\n"
             fi
             read -rp "    请选择操作 [默认 1]: " choice_domain
             choice_domain=$(_mihomoconf_trim "${choice_domain:-1}")
@@ -9028,13 +9030,9 @@ _mihomoconf_setup() {
             _vless_grpc_service_name_input=$(_mihomoconf_trim "${_vless_grpc_service_name_input:-vless-grpc}")
             VLESS_GRPC_SERVICE_NAMES+=("$_vless_grpc_service_name_input")
 
-            read -rp "    VLESS gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [y/N]: " _vless_grpc_tls_input
-            _vless_grpc_tls_input=$(_mihomoconf_trim "${_vless_grpc_tls_input:-N}")
-            if [[ "$_vless_grpc_tls_input" =~ ^[Yy]$ ]]; then
-                VLESS_GRPC_TLS_OPTS+=("true")
-                VLESS_GRPC_DECRYPTIONS+=("none")
-                VLESS_GRPC_ENCRYPTIONS+=("none")
-            else
+            read -rp "    VLESS gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [Y/n]: " _vless_grpc_tls_input
+            _vless_grpc_tls_input=$(_mihomoconf_trim "${_vless_grpc_tls_input:-Y}")
+            if [[ "$_vless_grpc_tls_input" =~ ^[Nn]$ ]]; then
                 VLESS_GRPC_TLS_OPTS+=("false")
                 local _grpc_keys _grpc_dec _grpc_enc
                 if _grpc_keys=$(_mihomoconf_gen_vless_keys); then
@@ -9046,7 +9044,16 @@ _mihomoconf_setup() {
                     VLESS_GRPC_DECRYPTIONS+=("none")
                     VLESS_GRPC_ENCRYPTIONS+=("none")
                 fi
+            else
+                VLESS_GRPC_TLS_OPTS+=("true")
+                VLESS_GRPC_DECRYPTIONS+=("none")
+                VLESS_GRPC_ENCRYPTIONS+=("none")
             fi
+            VLESS_GRPC_REALITY_PRIVATE_KEYS+=("")
+            VLESS_GRPC_REALITY_PUBLIC_KEYS+=("")
+            VLESS_GRPC_REALITY_SHORT_IDS+=("")
+            VLESS_GRPC_REALITY_DSTS+=("")
+            VLESS_GRPC_REALITY_SNIS+=("")
 
             read -rp "    VLESS gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_grpc_host_input
             VLESS_GRPC_HOSTS+=("$(_mihomoconf_trim "${_vless_grpc_host_input:-}")")
@@ -9063,14 +9070,14 @@ _mihomoconf_setup() {
         _info "VLESS gRPC 已生成 ${#VLESS_GRPC_PORTS[@]} 个入站，共 ${_vless_grpc_user_total} 个 user"
     fi
 
-    # ---- 纯 VLESS gRPC 配置 ----
+    # ---- VLESS gRPC Reality 配置 ----
     if [[ "$ENABLE_VLESS_PURE_GRPC" == "y" ]]; then
-        printf "  ${BOLD}纯 VLESS gRPC 配置${PLAIN}\n"
+        printf "  ${BOLD}VLESS gRPC Reality 配置${PLAIN}\n"
         _separator
         local _vless_pgrpc_idx vless_pgrpc_port_input
         for ((_vless_pgrpc_idx=1; _vless_pgrpc_idx<=VLESS_PURE_GRPC_COUNT; _vless_pgrpc_idx++)); do
             while true; do
-                read -rp "    纯 VLESS gRPC #${_vless_pgrpc_idx} 监听端口 [默认 8443]: " vless_pgrpc_port_input
+                read -rp "    VLESS gRPC Reality #${_vless_pgrpc_idx} 监听端口 [默认 8443]: " vless_pgrpc_port_input
                 vless_pgrpc_port_input=$(_mihomoconf_trim "${vless_pgrpc_port_input:-8443}")
                 if _is_valid_port "$vless_pgrpc_port_input"; then
                     if _mihomoconf_port_in_list "$vless_pgrpc_port_input" "${NEW_PORTS[@]}"; then
@@ -9089,36 +9096,78 @@ _mihomoconf_setup() {
             done
         done
 
+        local choice_domain VLESS_GRPC_REALITY_SERVER_NAME=""
+        while true; do
+            printf "    ${BOLD}Reality 伪造域名配置:${PLAIN}\n"
+            printf "      1) 自动检测并选择低延迟推荐域名 (推荐)\n"
+            printf "      2) 手动输入自定义域名 (带自动检测)\n"
+            if [[ -n "${ANYTLS_SNI:-}" ]]; then
+                printf "      3) 复用 AnyTLS 域名 [${ANYTLS_SNI}]\n"
+            fi
+            read -rp "    请选择操作 [默认 1]: " choice_domain
+            choice_domain=$(_mihomoconf_trim "${choice_domain:-1}")
+            
+            if [[ "$choice_domain" == "1" ]]; then
+                _mihomoconf_test_reality_domains_auto
+                if [[ -n "$VLESS_REALITY_SERVER_NAME" ]]; then
+                    VLESS_GRPC_REALITY_SERVER_NAME="$VLESS_REALITY_SERVER_NAME"
+                    break
+                fi
+            elif [[ "$choice_domain" == "2" ]]; then
+                _mihomoconf_test_reality_domain_manual
+                if [[ -n "$VLESS_REALITY_SERVER_NAME" ]]; then
+                    VLESS_GRPC_REALITY_SERVER_NAME="$VLESS_REALITY_SERVER_NAME"
+                    break
+                fi
+            elif [[ "$choice_domain" == "3" && -n "${ANYTLS_SNI:-}" ]]; then
+                VLESS_GRPC_REALITY_SERVER_NAME="$ANYTLS_SNI"
+                break
+            else
+                _warn "输入无效，请重新选择"
+            fi
+        done
+        if [[ -z "$VLESS_GRPC_REALITY_SERVER_NAME" ]]; then
+            _error_no_exit "VLESS gRPC Reality 伪造域名不能为空"
+            _press_any_key
+            return
+        fi
+
         local _vless_pgrpc_service_name_input
         local start_idx=$(( ${#VLESS_GRPC_PORTS[@]} - VLESS_PURE_GRPC_COUNT ))
-        local i
+        local i _keypair _vless_private_key _vless_public_key _vless_short_id
         for ((i=start_idx; i<${#VLESS_GRPC_PORTS[@]}; i++)); do
-            read -rp "    纯 VLESS gRPC #$((i - start_idx + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_pgrpc_service_name_input
+            read -rp "    VLESS gRPC Reality #$((i - start_idx + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_pgrpc_service_name_input
             _vless_pgrpc_service_name_input=$(_mihomoconf_trim "${_vless_pgrpc_service_name_input:-vless-grpc}")
             VLESS_GRPC_SERVICE_NAMES+=("$_vless_pgrpc_service_name_input")
-            VLESS_GRPC_TLS_OPTS+=("false")
+            VLESS_GRPC_TLS_OPTS+=("reality")
             VLESS_GRPC_HOSTS+=("")
-            local _grpc_keys _grpc_dec _grpc_enc
-            if _grpc_keys=$(_mihomoconf_gen_vless_keys); then
-                IFS=$'\t' read -r _grpc_dec _grpc_enc <<< "$_grpc_keys"
-                VLESS_GRPC_DECRYPTIONS+=("$_grpc_dec")
-                VLESS_GRPC_ENCRYPTIONS+=("$_grpc_enc")
-            else
-                _warn "无法生成 VLESS Encryption 密钥，请确保已安装 mihomo 内核"
-                VLESS_GRPC_DECRYPTIONS+=("none")
-                VLESS_GRPC_ENCRYPTIONS+=("none")
+            VLESS_GRPC_DECRYPTIONS+=("none")
+            VLESS_GRPC_ENCRYPTIONS+=("none")
+
+            if ! _keypair=$(_mihomoconf_gen_reality_keypair); then
+                _error_no_exit "生成 Reality 密钥失败，请先安装支持 reality-keypair 的 mihomo 后重试"
+                _press_any_key
+                return
             fi
-            VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
+            IFS=$'\t' read -r _vless_private_key _vless_public_key <<< "$_keypair"
+            _vless_short_id=$(_mihomoconf_gen_reality_short_id)
+            VLESS_GRPC_REALITY_PRIVATE_KEYS+=("$_vless_private_key")
+            VLESS_GRPC_REALITY_PUBLIC_KEYS+=("$_vless_public_key")
+            VLESS_GRPC_REALITY_SHORT_IDS+=("$_vless_short_id")
+            VLESS_GRPC_REALITY_DSTS+=("${VLESS_GRPC_REALITY_SERVER_NAME}:443")
+            VLESS_GRPC_REALITY_SNIS+=("${VLESS_GRPC_REALITY_SERVER_NAME}")
+
+            VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_reality")")
 
             local _user_rows _u_name _u_uuid
-            _user_rows=$(_mihomoconf_collect_users_input "纯 VLESS gRPC #$((i - start_idx + 1))" "" "vless")
+            _user_rows=$(_mihomoconf_collect_users_input "VLESS gRPC Reality #$((i - start_idx + 1))" "" "vless")
             while IFS=$'\t' read -r _u_name _u_uuid; do
                 [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
                 VLESS_GRPC_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
                 _vless_grpc_user_total=$((_vless_grpc_user_total + 1))
             done <<< "$_user_rows"
         done
-        _info "纯 VLESS gRPC 已生成 ${VLESS_PURE_GRPC_COUNT} 个入站"
+        _info "VLESS gRPC Reality 已生成 ${VLESS_PURE_GRPC_COUNT} 个入站"
     fi
 
     # ---- Trojan TCP 配置 ----
@@ -9864,6 +9913,20 @@ MIHOMOCONF_VLESS_GRPC_USER_EOF
     certificate: "${SSL_DIR}/cert.crt"
     private-key: "${SSL_DIR}/cert.key"
 MIHOMOCONF_VLESS_GRPC_TLS_EOF
+                elif [[ "$_vless_grpc_tls" == "reality" ]]; then
+                    local _vless_grpc_reality_priv="${VLESS_GRPC_REALITY_PRIVATE_KEYS[$i]}"
+                    local _vless_grpc_reality_short="${VLESS_GRPC_REALITY_SHORT_IDS[$i]}"
+                    local _vless_grpc_reality_dst="${VLESS_GRPC_REALITY_DSTS[$i]}"
+                    local _vless_grpc_reality_sni="${VLESS_GRPC_REALITY_SNIS[$i]}"
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_REALITY_EOF
+    reality-config:
+      private-key: "${_vless_grpc_reality_priv}"
+      short-id:
+        - "${_vless_grpc_reality_short}"
+      dest: "${_vless_grpc_reality_dst}"
+      server-names:
+        - "${_vless_grpc_reality_sni}"
+MIHOMOCONF_VLESS_GRPC_REALITY_EOF
                 else
                     local _vless_grpc_dec="${VLESS_GRPC_DECRYPTIONS[$i]:-none}"
                     local _vless_grpc_enc="${VLESS_GRPC_ENCRYPTIONS[$i]:-none}"
@@ -10604,7 +10667,11 @@ MIHOMOCONF_VMESS_GRPC_YAML2
                 _vless_grpc_user_idx=$((_vless_grpc_user_idx + 1))
                 _vless_grpc_client_name="${_vless_grpc_name}-${_u_name}"
                 local _vless_grpc_enc="${VLESS_GRPC_ENCRYPTIONS[$i]:-none}"
-                VLESS_GRPC_LINK=$(_mihomoconf_gen_vless_grpc_link "$SERVER_HOST" "$_vless_grpc_port" "$_u_uuid" "$_vless_grpc_client_name" "$_vless_grpc_service_name" "$_vless_grpc_tls" "$_vless_grpc_host" "$_vless_grpc_enc")
+                local _vless_grpc_pbk="${VLESS_GRPC_REALITY_PUBLIC_KEYS[$i]:-}"
+                local _vless_grpc_sid="${VLESS_GRPC_REALITY_SHORT_IDS[$i]:-}"
+                local _vless_grpc_sni="${VLESS_GRPC_REALITY_SNIS[$i]:-}"
+                [[ -n "$_vless_grpc_sni" ]] && _vless_grpc_host="$_vless_grpc_sni"
+                VLESS_GRPC_LINK=$(_mihomoconf_gen_vless_grpc_link "$SERVER_HOST" "$_vless_grpc_port" "$_u_uuid" "$_vless_grpc_client_name" "$_vless_grpc_service_name" "$_vless_grpc_tls" "$_vless_grpc_host" "$_vless_grpc_enc" "$_vless_grpc_pbk" "$_vless_grpc_sid")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_user_idx" "$_u_name"
                 printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
                 printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
@@ -27828,6 +27895,246 @@ _ssh_force_key_login() {
     _press_any_key
 }
 
+_ssh_manage_keys() {
+    local auth_file="/root/.ssh/authorized_keys"
+
+    while true; do
+        _header "SSH 密钥管理"
+
+        if [ ! -f "$auth_file" ]; then
+            _info "当前没有授权密钥文件 (未创建 ${auth_file})"
+            local -a keys=()
+        else
+            local -a keys=()
+            local line count=0
+            while IFS= read -r line || [ -n "$line" ]; do
+                [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+                [[ "$line" =~ ^[[:space:]]*# ]] && continue
+                keys+=("$line")
+                ((count++))
+            done < "$auth_file"
+
+            if [ "$count" -eq 0 ]; then
+                _info "当前没有已导入的 SSH 密钥"
+            else
+                _info "检测到以下已导入的 SSH 密钥:"
+                _separator
+                local i=0
+                for line in "${keys[@]}"; do
+                    ((i++))
+                    local tmp_key
+                    tmp_key=$(mktemp) || continue
+                    echo "$line" > "$tmp_key"
+                    local key_info=""
+                    if command -v ssh-keygen >/dev/null 2>&1; then
+                        key_info=$(ssh-keygen -l -f "$tmp_key" 2>/dev/null)
+                    fi
+                    rm -f "$tmp_key"
+
+                    if [ -n "$key_info" ]; then
+                        printf "  ${GREEN}[%d]${PLAIN} %s\n" "$i" "$key_info"
+                    else
+                        local parts=($line)
+                        local type="${parts[0]}"
+                        local comment=""
+                        local key_data=""
+                        if [[ "$type" == *=* ]]; then
+                            type="${parts[1]}"
+                            key_data="${parts[2]}"
+                            comment="${parts[*]:3}"
+                        else
+                            key_data="${parts[1]}"
+                            comment="${parts[*]:2}"
+                        fi
+                        local short_key=""
+                        if [ -n "$key_data" ]; then
+                            if [ "${#key_data}" -gt 30 ]; then
+                                short_key="${key_data:0:15}...${key_data: -15}"
+                            else
+                                short_key="$key_data"
+                            fi
+                        fi
+                        printf "  ${GREEN}[%d]${PLAIN} %s %s %s\n" "$i" "$type" "$short_key" "$comment"
+                    fi
+                done
+                _separator
+            fi
+        fi
+
+        echo ""
+        _menu_pair "1" "删除指定密钥" "选择编号进行删除" "green" "2" "添加/导入密钥" "手动粘贴公钥" "green"
+        _menu_item "0" "返回上级菜单" "" "red"
+        _separator
+
+        local choice
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-2]: " choice
+        case "$choice" in
+            1)
+                if [ ! -f "$auth_file" ] || [ "${#keys[@]}" -eq 0 ]; then
+                    _error_no_exit "当前没有可删除的密钥"
+                    _press_any_key
+                    continue
+                fi
+
+                local del_idx
+                read -rp "  请输入要删除的密钥编号 (支持多个，用空格分隔，例如 '1' 或 '1 3'): " del_idx
+                if [ -z "$del_idx" ]; then
+                    continue
+                fi
+
+                local -a to_delete=()
+                local idx valid=1
+                for idx in $del_idx; do
+                    if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -lt 1 ] || [ "$idx" -gt "${#keys[@]}" ]; then
+                        _error_no_exit "无效的密钥编号: $idx"
+                        valid=0
+                        break
+                    fi
+                    local actual_idx=$((idx - 1))
+                    local dup=0
+                    local d
+                    for d in "${to_delete[@]}"; do
+                        if [ "$d" -eq "$actual_idx" ]; then
+                            dup=1
+                            break
+                        fi
+                    done
+                    [ "$dup" -eq 0 ] && to_delete+=("$actual_idx")
+                done
+
+                [ "$valid" -eq 0 ] && { _press_any_key; continue; }
+                [ "${#to_delete[@]}" -eq 0 ] && continue
+
+                local total_after=$(( ${#keys[@]} - ${#to_delete[@]} ))
+                local confirm
+                if [ "$total_after" -eq 0 ]; then
+                    local password_disabled=0
+                    if grep -Eq "^[[:space:]]*PasswordAuthentication[[:space:]]+no" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null; then
+                        password_disabled=1
+                    fi
+
+                    _warn "警告: 您正在删除所有的 SSH 密钥！"
+                    if [ "$password_disabled" -eq 1 ]; then
+                        _warn "检测到当前已禁用密码登录，若清空密钥，您可能会被锁在系统之外！"
+                    fi
+                    read -rp "  确认要清空所有密钥吗？输入 'y' 确认: " confirm
+                    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                        _info "已取消删除"
+                        _press_any_key
+                        continue
+                    fi
+                else
+                    _warn "您选择删除 ${#to_delete[@]} 个密钥，剩余 $total_after 个密钥。"
+                    read -rp "  确认删除吗？[y/N]: " confirm
+                    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                        _info "已取消删除"
+                        _press_any_key
+                        continue
+                    fi
+                fi
+
+                local tmp_file
+                tmp_file=$(mktemp) || {
+                    _error_no_exit "创建临时文件失败"
+                    _press_any_key
+                    continue
+                }
+
+                local line_in_file
+                local key_idx=0
+                while IFS= read -r line_in_file || [ -n "$line_in_file" ]; do
+                    if [[ "$line_in_file" =~ ^[[:space:]]*$ ]] || [[ "$line_in_file" =~ ^[[:space:]]*# ]]; then
+                        echo "$line_in_file" >> "$tmp_file"
+                    else
+                        local delete_this=0
+                        local d
+                        for d in "${to_delete[@]}"; do
+                            if [ "$d" -eq "$key_idx" ]; then
+                                delete_this=1
+                                break
+                            fi
+                        done
+                        if [ "$delete_this" -eq 0 ]; then
+                            echo "$line_in_file" >> "$tmp_file"
+                        fi
+                        ((key_idx++))
+                    fi
+                done < "$auth_file"
+
+                local backup="${auth_file}.bak.$(date +%Y%m%d%H%M%S)"
+                if cp "$auth_file" "$backup" 2>/dev/null; then
+                    _info "已备份 SSH 授权文件至: ${backup}"
+                else
+                    _warn "备份失败，已跳过备份"
+                fi
+
+                if cat "$tmp_file" > "$auth_file"; then
+                    chmod 600 "$auth_file"
+                    _success "已成功删除选中的密钥。"
+                else
+                    _error_no_exit "更新授权文件失败！"
+                fi
+                rm -f "$tmp_file"
+                _press_any_key
+                ;;
+            2)
+                _header "添加/导入 SSH 密钥"
+                _info "请输入或粘贴您的 SSH 公钥 (以 ssh-rsa, ssh-ed25519 等开头):"
+                local new_key
+                read -rp "  公钥: " new_key
+                new_key=$(echo "$new_key" | tr -d '\r\n')
+                if [ -z "$new_key" ]; then
+                    _info "已取消"
+                    _press_any_key
+                    continue
+                fi
+
+                local tmp_key
+                tmp_key=$(mktemp) || {
+                    _error_no_exit "创建临时文件失败"
+                    _press_any_key
+                    continue
+                }
+                echo "$new_key" > "$tmp_key"
+                local valid_key=1
+                if command -v ssh-keygen >/dev/null 2>&1; then
+                    if ! ssh-keygen -l -f "$tmp_key" >/dev/null 2>&1; then
+                        valid_key=0
+                    fi
+                else
+                    if [[ ! "$new_key" =~ ssh-(rsa|ed25519|dss)|ecdsa- ]]; then
+                        valid_key=0
+                    fi
+                fi
+                rm -f "$tmp_key"
+
+                if [ "$valid_key" -eq 0 ]; then
+                    _error_no_exit "无效的 SSH 公钥格式！请确保复制了完整的公钥内容。"
+                    _press_any_key
+                    continue
+                fi
+
+                local auth_dir
+                auth_dir=$(dirname "$auth_file")
+                mkdir -p "$auth_dir"
+                chmod 700 "$auth_dir"
+
+                if [ -f "$auth_file" ] && grep -Fqx "$new_key" "$auth_file"; then
+                    _warn "该密钥已存在于授权文件中，无需重复添加。"
+                else
+                    [ -f "$auth_file" ] && [ -n "$(tail -c 1 "$auth_file" 2>/dev/null)" ] && echo "" >> "$auth_file"
+                    echo "$new_key" >> "$auth_file"
+                    chmod 600 "$auth_file"
+                    _success "密钥已成功添加！"
+                fi
+                _press_any_key
+                ;;
+            0) return ;;
+            *) _error_no_exit "无效选项: ${choice}"; sleep 1 ;;
+        esac
+    done
+}
+
 # --- 1Panel iptables 代理链 ---
 
 _onepanel_iptables_chain_exists() {
@@ -30578,9 +30885,9 @@ _system_opt_menu_screen() {
     _header "系统相关"
     _menu_pair "1" "日志轮转" "限制 Docker 日志" "green" "2" "Swap 管理" "创建/删除 Swap" "green"
     _menu_pair "3" "Root SSH" "允许 root 登录" "green" "4" "SSH 密钥登录" "禁用密码登录" "green"
-    _menu_pair "5" "SSH 端口" "快速修改 sshd 监听端口" "green" "6" "1Panel NAT 链" "挂载转发链" "green"
-    _menu_pair "7" "环境诊断" "KVM/LXC 时钟及特权诊断" "green" "8" "LXC 容器(支持HE隧道)" "管理容器与 HE 隧道" "green"
-    _menu_item "9" "宿主机 HE 隧道" "为宿主机配置与绑定 HE IPv6 隧道" "green"
+    _menu_pair "5" "SSH 端口" "快速修改 sshd 监听端口" "green" "6" "SSH 密钥管理" "添加/删除/查看 SSH 密钥" "green"
+    _menu_pair "7" "1Panel NAT 链" "挂载转发链" "green" "8" "环境诊断" "KVM/LXC 时钟及特权诊断" "green"
+    _menu_pair "9" "LXC 容器(支持HE)" "管理容器与 HE 隧道" "green" "10" "宿主机 HE 隧道" "配置绑定 HE IPv6 隧道" "green"
     _separator
     _menu_item "0" "返回主菜单" "" "red"
     _separator
@@ -30590,17 +30897,18 @@ _system_opt_menu() {
     while true; do
         _ui_print_screen _system_opt_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-9]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-10]: " ch
         case "$ch" in
             1) _dockerlog_setup ;;
             2) _swap_setup ;;
             3) _rootssh_enable ;;
             4) _ssh_force_key_login ;;
             5) _ssh_change_port ;;
-            6) _onepanel_apply_iptables_chains ;;
-            7) _virt_container_diagnose ;;
-            8) _he_ipv6_lxc_menu ;;
-            9) _he_host_tunnel_menu ;;
+            6) _ssh_manage_keys ;;
+            7) _onepanel_apply_iptables_chains ;;
+            8) _virt_container_diagnose ;;
+            9) _he_ipv6_lxc_menu ;;
+            10) _he_host_tunnel_menu ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac

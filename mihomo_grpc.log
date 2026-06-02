@@ -1,0 +1,23 @@
+time="2026-06-03T02:56:03.077590000+08:00" level=info msg="Start initial configuration in progress"
+time="2026-06-03T02:56:03.077807000+08:00" level=info msg="Geodata Loader mode: memconservative"
+time="2026-06-03T02:56:03.077819000+08:00" level=info msg="Geosite Matcher implementation: succinct"
+time="2026-06-03T02:56:03.077917000+08:00" level=info msg="Initial configuration complete, total time: 0ms"
+time="2026-06-03T02:56:03.079310000+08:00" level=info msg="Sniffer is closed"
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x2e0 pc=0x105608d2c]
+
+goroutine 1 [running]:
+github.com/metacubex/mihomo/listener/sing_vless.New.func4()
+	github.com/metacubex/mihomo/listener/sing_vless/server.go:76 +0x2c
+github.com/metacubex/mihomo/listener/sing_vless.New({0x1, {0x61ce6cc9aeb0, 0xf}, {0x61ce6ccaf5c0, 0x1, 0x1}, {0x61ce6cba9360, 0x4a}, {0x0, 0x0}, ...}, ...)
+	github.com/metacubex/mihomo/listener/sing_vless/server.go:257 +0x1964
+github.com/metacubex/mihomo/listener/inbound.(*Vless).Listen(0x61ce6cd84308, {0x106b8time="2026-06-03T02:56:05.093055000+08:00" level=debug msg="[Rule] use default rules"
+time="2026-06-03T02:57:09.607783000+08:00" level=warning msg="[TCP] dial Proxy (match Match/) 127.0.0.1:53793 --> 1.1.1.1:80 error: 127.0.0.1:22787 connect error: context deadline exceeded"
+time="2026-06-03T02:57:09.607808000+08:00" level=warning msg="[TCP] dial Proxy (match Match/) 127.0.0.1:53717 --> 1.1.1.1:80 error: 127.0.0.1:22787 connect error: context deadline exceeded"
+time="2026-06-03T02:57:09.611524000+08:00" level=warning msg="Mihomo shutting down"
+om/metacubex/mihomo/hub.ApplyConfig(0x61ce6cba4780)
+	github.com/metacubex/mihomo/hub/hub.go:45 +0x2c
+github.com/metacubex/mihomo/hub.Parse({0x0?, 0x16?, 0x61ce6cc43c58?}, {0x0, 0x0, 0x1047af8ac?})
+	github.com/metacubex/mihomo/hub/hub.go:91 +0x98
+main.main()
+	github.com/metacubex/mihomo/main.go:184 +0x91c

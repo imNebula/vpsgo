@@ -1,0 +1,37 @@
+port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: debug
+ipv6: true
+
+proxies:
+  - name: "test-client"
+    type: vless
+    server: "127.0.0.1"
+    port: 22787
+    uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
+    cipher: auto
+    udp: true
+    encryption: "mlkem768x25519plus.native.0rtt.b4p9Y9M-6_ZBFMWNmFJoblp4zp0G6C92B9pQlsCpOTc"
+    tls: false
+    packet-encoding: "xudp"
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - test-client
+
+rules:
+  - MATCH,Proxy
+
+listeners:
+  - name: vless-tcp-in
+    type: vless
+    port: 22787
+    listen: "127.0.0.1"
+    users:
+      - username: "usft"
+        uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
+    decryption: "mlkem768x25519plus.native.600s.WK2snltCXU2Rj1z28mWS8Vmd8LUOhzOOBGu28_gYK38"

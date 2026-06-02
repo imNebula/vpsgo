@@ -1,0 +1,55 @@
+port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: debug
+ipv6: true
+
+proxies:
+  - name: "test-client"
+    type: vless
+    server: "127.0.0.1"
+    port: 22787
+    uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
+    cipher: auto
+    udp: true
+    tls: true
+    client-fingerprint: chrome
+    servername: www.apple.com
+    reality-opts:
+      public-key: "-93OdiQj0U5M1G78NLVIK_3nikR7US_HbuxraGSfvhM"
+      short-id: "12345678"
+    packet-encoding: "xudp"
+    network: grpc
+    grpc-opts:
+      grpc-service-name: "ggrpc"
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - test-client
+
+rules:
+  - IN-PORT,22787,DIRECT
+  - MATCH,Proxy
+
+listeners:
+  - name: vless-grpc-in-22787
+    type: vless
+    port: 22787
+    listen: "127.0.0.1"
+    users:
+      - username: "usft"
+        uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
+    reality-config:
+      private-key: "6JNk7Ew-1nv7OrqV7iuop30KNpwJH3jm9kAIN4FxBG0"
+      short-id:
+        - "12345678"
+      dest: "www.apple.com:443"
+      server-names:
+        - "www.apple.com"
+    transport:
+      type: grpc
+      grpc-opts:
+        grpc-service-name: "ggrpc"

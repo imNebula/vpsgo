@@ -1,0 +1,13 @@
+listeners:
+  - name: vless-grpc-in-22787
+    type: vless
+    port: 22787
+    listen: "127.0.0.1"
+    users:
+      - username: "usft"
+        uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
+    decryption: "mlkem768x25519plus.native.600s.sDRgqU9tF9a3GpeUjUNCzCGjsxLDDFitKfCNJpyC7U8"
+    transport:
+      type: grpc
+      grpc-opts:
+        grpc-service-name: "ggrpc"

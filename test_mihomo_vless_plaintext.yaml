@@ -1,0 +1,43 @@
+port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: debug
+ipv6: true
+
+proxies:
+  - name: "test-client"
+    type: vless
+    server: "127.0.0.1"
+    port: 22787
+    uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
+    cipher: auto
+    udp: true
+    tls: false
+    packet-encoding: "xudp"
+    network: grpc
+    grpc-opts:
+      grpc-service-name: "ggrpc"
+
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - test-client
+
+rules:
+  - IN-PORT,22787,DIRECT
+  - MATCH,Proxy
+
+listeners:
+  - name: vless-grpc-in-22787
+    type: vless
+    port: 22787
+    listen: "127.0.0.1"
+    users:
+      - username: "usft"
+        uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
+    transport:
+      type: grpc
+      grpc-opts:
+        grpc-service-name: "ggrpc"
