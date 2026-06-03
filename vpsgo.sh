@@ -9897,8 +9897,18 @@ MIHOMOCONF_VMESS_GRPC_TRANS_EOF
     # vpsgo-vless-grpc-service-name: ${_vless_grpc_service_name}
     # vpsgo-vless-grpc-tls: ${_vless_grpc_tls}
     # vpsgo-vless-grpc-host: ${_vless_grpc_host}
-    users:
 MIHOMOCONF_VLESS_GRPC_EOF
+                if [[ "$_vless_grpc_tls" == "reality" ]]; then
+                    local _vless_grpc_reality_pub="${VLESS_GRPC_REALITY_PUBLIC_KEYS[$i]}"
+                    local _vless_grpc_reality_short="${VLESS_GRPC_REALITY_SHORT_IDS[$i]}"
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_REALITY_COMMENT_EOF
+    # vpsgo-reality-public-key: ${_vless_grpc_reality_pub}
+    # vpsgo-reality-short-id: ${_vless_grpc_reality_short}
+MIHOMOCONF_VLESS_GRPC_REALITY_COMMENT_EOF
+                fi
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_USERS_EOF
+    users:
+MIHOMOCONF_VLESS_GRPC_USERS_EOF
                 for _row in "${VLESS_GRPC_USER_ROWS[@]}"; do
                     IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
                     [[ "$_li" == "$i" ]] || continue
@@ -10025,6 +10035,25 @@ MIHOMOCONF_TROJAN_WS_HOST_EOF
                 local _trojan_grpc_service_name="${TROJAN_GRPC_SERVICE_NAMES[$i]}"
                 local _trojan_grpc_tls="${TROJAN_GRPC_TLS_OPTS[$i]}"
                 local _trojan_grpc_host="${TROJAN_GRPC_HOSTS[$i]}"
+                cat <<MIHOMOCONF_VLESS_YAML
+    proxies:
+      - name: "${_vless_client_name}"
+        type: vless
+        server: ${SERVER_HOST}
+        port: ${_vless_port}
+        cipher: auto
+        udp: true
+        uuid: "${_u_uuid}"
+        flow: ${VLESS_FLOW}
+        packet-encoding: xudp
+        tls: true
+        servername: ${VLESS_REALITY_SERVER_NAME}
+        client-fingerprint: ${VLESS_CLIENT_FINGERPRINT}
+        reality-opts:
+          public-key: "${_vless_public_key}"
+          short-id: "${_vless_short_id}"
+        encryption: none
+MIHOMOCONF_VLESS_YAML
                 cat >> "$_target_file" <<MIHOMOCONF_TROJAN_GRPC_EOF
   - name: trojan-grpc-in-${_trojan_grpc_port}
     tag: "${_trojan_grpc_tag}"
@@ -10677,7 +10706,28 @@ MIHOMOCONF_VMESS_GRPC_YAML2
                 printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
                 printf "  ${GREEN}%s${PLAIN}\n" "$VLESS_GRPC_LINK"
                 printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
-                cat <<MIHOMOCONF_VLESS_GRPC_YAML
+                if [[ "$_vless_grpc_tls" == "reality" ]]; then
+                    cat <<MIHOMOCONF_VLESS_GRPC_REALITY_YAML
+    - name: "${_vless_grpc_client_name}"
+      type: vless
+      server: ${SERVER_HOST}
+      port: ${_vless_grpc_port}
+      uuid: "${_u_uuid}"
+      cipher: auto
+      udp: true
+      tls: true
+      servername: ${_vless_grpc_host}
+      client-fingerprint: chrome
+      reality-opts:
+        public-key: "${_vless_grpc_pbk}"
+        short-id: "${_vless_grpc_sid}"
+      encryption: none
+      network: grpc
+      grpc-opts:
+        grpc-service-name: "${_vless_grpc_service_name}"
+MIHOMOCONF_VLESS_GRPC_REALITY_YAML
+                else
+                    cat <<MIHOMOCONF_VLESS_GRPC_YAML
     - name: "${_vless_grpc_client_name}"
       type: vless
       server: ${SERVER_HOST}
@@ -10688,14 +10738,15 @@ MIHOMOCONF_VMESS_GRPC_YAML2
       tls: ${_vless_grpc_tls}
       encryption: ${_vless_grpc_enc}
 MIHOMOCONF_VLESS_GRPC_YAML
-                if [[ "$_vless_grpc_tls" == "true" && -n "$_vless_grpc_host" ]]; then
-                    echo "      servername: ${_vless_grpc_host}"
-                fi
-                cat <<MIHOMOCONF_VLESS_GRPC_YAML2
+                    if [[ "$_vless_grpc_tls" == "true" && -n "$_vless_grpc_host" ]]; then
+                        echo "      servername: ${_vless_grpc_host}"
+                    fi
+                    cat <<MIHOMOCONF_VLESS_GRPC_YAML2
       network: grpc
       grpc-opts:
         grpc-service-name: "${_vless_grpc_service_name}"
 MIHOMOCONF_VLESS_GRPC_YAML2
+                fi
             done
             if [[ "$_vless_grpc_user_idx" -eq 0 ]]; then
                 _warn "  VLESS gRPC 入站 ${_vless_grpc_tag} 未配置 user，已跳过导出"
@@ -11902,6 +11953,7 @@ MIHOMO_ANYTLS_JSON
         reality-opts:
           public-key: "${vless_public_key}"
           short-id: "${vless_short_id}"
+        encryption: none
 MIHOMO_VLESS_YAML
                     fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
@@ -11979,7 +12031,11 @@ MIHOMO_VLESS_WS_YAML3
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
                     vless_name="$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
-                    vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host" "$vless_public_key")
+                    if [[ "$vless_ws_tls" == "reality" ]]; then
+                        vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host" "none" "$vless_public_key" "$vless_short_id")
+                    else
+                        vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host" "$vless_public_key")
+                    fi
                     if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
                         printf "%s\n" "$vless_link"
                     else
@@ -11993,7 +12049,29 @@ MIHOMO_VLESS_WS_YAML3
                         [[ -n "$vless_ws_host" ]] && printf "    gRPC Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
                         printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
                         printf "    YAML:\n"
-                        cat <<MIHOMO_VLESS_GRPC_YAML
+                        if [[ "$vless_ws_tls" == "reality" ]]; then
+                            cat <<MIHOMO_VLESS_GRPC_REALITY_YAML
+    proxies:
+      - name: "${vless_name}"
+        type: vless
+        server: ${server_ip}
+        port: ${port}
+        uuid: "${vless_uuid}"
+        cipher: auto
+        udp: true
+        tls: true
+        servername: ${vless_ws_host}
+        client-fingerprint: chrome
+        reality-opts:
+          public-key: "${vless_public_key}"
+          short-id: "${vless_short_id}"
+        encryption: none
+        network: grpc
+        grpc-opts:
+          grpc-service-name: ${vless_grpc_service_name}
+MIHOMO_VLESS_GRPC_REALITY_YAML
+                        else
+                            cat <<MIHOMO_VLESS_GRPC_YAML
     proxies:
       - name: "${vless_name}"
         type: vless
@@ -12005,14 +12083,15 @@ MIHOMO_VLESS_WS_YAML3
         tls: ${vless_ws_tls}
         encryption: ${vless_public_key:-none}
 MIHOMO_VLESS_GRPC_YAML
-                        if [[ "$vless_ws_tls" == "true" && -n "$vless_ws_host" ]]; then
-                            echo "        servername: ${vless_ws_host}"
-                        fi
-                        cat <<MIHOMO_VLESS_GRPC_YAML2
+                            if [[ "$vless_ws_tls" == "true" && -n "$vless_ws_host" ]]; then
+                                echo "        servername: ${vless_ws_host}"
+                            fi
+                            cat <<MIHOMO_VLESS_GRPC_YAML2
         network: grpc
         grpc-opts:
           grpc-service-name: ${vless_grpc_service_name}
 MIHOMO_VLESS_GRPC_YAML2
+                        fi
                     fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$vless_found" -eq 0 ]]; then
@@ -12568,6 +12647,123 @@ MIHOMO_WG_YAML2
                         printf '        mtu: %s\n' "$p_wg_mtu"
                     fi
                     ;;
+                vless)
+                    if [[ -z "$p_vless_uuid" ]]; then
+                        _warn "跳过 ${p_name}: vless 出站字段不完整(uuid)"
+                        continue
+                    fi
+                    local vless_proxy_link vless_network_val="${p_user:-tcp}"
+                    local vless_tls_val="${p_cipher:-false}"
+                    
+                    if [[ "$vless_network_val" == "ws" ]]; then
+                        vless_proxy_link=$(_mihomoconf_gen_vless_ws_link "$p_server" "$p_port" "$p_vless_uuid" "$p_name" "${p_pass:-}" "$vless_tls_val" "${p_obfs:-}" "$p_vless_encryption")
+                    elif [[ "$vless_network_val" == "grpc" ]]; then
+                        local grpc_tls_mode="$vless_tls_val"
+                        if [[ -n "$p_vless_public_key" ]]; then
+                            grpc_tls_mode="reality"
+                        fi
+                        if [[ "$grpc_tls_mode" == "reality" ]]; then
+                            vless_proxy_link=$(_mihomoconf_gen_vless_grpc_link "$p_server" "$p_port" "$p_vless_uuid" "$p_name" "${p_pass:-}" "$grpc_tls_mode" "${p_obfs:-}" "none" "$p_vless_public_key" "$p_vless_short_id")
+                        else
+                            vless_proxy_link=$(_mihomoconf_gen_vless_grpc_link "$p_server" "$p_port" "$p_vless_uuid" "$p_name" "${p_pass:-}" "$grpc_tls_mode" "${p_obfs:-}" "$p_vless_encryption")
+                        fi
+                    else
+                        if [[ -n "$p_vless_public_key" ]]; then
+                            vless_proxy_link=$(_mihomoconf_gen_vless_link "$p_server" "$p_port" "$p_vless_uuid" "$p_name" "$p_sni" "$p_vless_public_key" "$p_vless_short_id" "$p_vless_flow" "$p_vless_client_fingerprint")
+                        else
+                            local encoded_name query=""
+                            local -a params=()
+                            encoded_name=$(_mihomoconf_urlencode "${p_name}")
+                            if [[ -n "$p_vless_encryption" && "$p_vless_encryption" != "none" ]]; then
+                                params+=("encryption=$(_mihomoconf_urlencode "$p_vless_encryption")")
+                            else
+                                params+=("encryption=none")
+                            fi
+                            if [[ -n "$p_vless_flow" ]]; then
+                                params+=("flow=$(_mihomoconf_urlencode "$p_vless_flow")")
+                            fi
+                            if [[ "$vless_tls_val" == "true" ]]; then
+                                params+=("security=tls")
+                                [[ -n "$p_sni" ]] && params+=("sni=$(_mihomoconf_urlencode "$p_sni")")
+                            else
+                                params+=("security=none")
+                            fi
+                            if (( ${#params[@]} > 0 )); then
+                                local IFS='&'
+                                query="?${params[*]}"
+                            fi
+                            vless_proxy_link="vless://${p_vless_uuid}@${p_server}:${p_port}${query}#${encoded_name}"
+                        fi
+                    fi
+
+                    proxy_export=$((proxy_export + 1))
+                    export_count=$((export_count + 1))
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$vless_proxy_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[VLESS 出站] %s${PLAIN}\n" "$p_name"
+                        printf "    地址: ${GREEN}%s:%s${PLAIN}\n" "$p_server" "$p_port"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_proxy_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_VLESS_PROXY_YAML
+    proxies:
+      - name: "${p_name}"
+        type: vless
+        server: "${p_server}"
+        port: ${p_port}
+        uuid: "${p_vless_uuid}"
+        cipher: auto
+        udp: true
+MIHOMO_VLESS_PROXY_YAML
+                        if [[ -n "$p_vless_encryption" ]]; then
+                            printf '        encryption: "%s"\n' "$p_vless_encryption"
+                        else
+                            printf '        encryption: "none"\n'
+                        fi
+                        if [[ -n "$p_vless_flow" && "$vless_tls_val" == "true" ]]; then
+                            printf '        flow: "%s"\n' "$p_vless_flow"
+                        fi
+                        if [[ "$vless_tls_val" == "true" ]]; then
+                            echo "        tls: true"
+                            if [[ -n "$p_sni" ]]; then
+                                printf '        servername: "%s"\n' "$p_sni"
+                            fi
+                            if [[ -n "$p_vless_client_fingerprint" ]]; then
+                                printf '        client-fingerprint: "%s"\n' "$p_vless_client_fingerprint"
+                            fi
+                            if [[ -n "$p_vless_public_key" ]]; then
+                                echo "        reality-opts:"
+                                printf '          public-key: "%s"\n' "$p_vless_public_key"
+                                if [[ -n "$p_vless_short_id" ]]; then
+                                    printf '          short-id: "%s"\n' "$p_vless_short_id"
+                                fi
+                            fi
+                        else
+                            echo "        tls: false"
+                        fi
+                        if [[ -n "$p_vless_packet_encoding" ]]; then
+                            printf '        packet-encoding: "%s"\n' "$p_vless_packet_encoding"
+                        fi
+                        if [[ "$vless_network_val" == "ws" ]]; then
+                            echo "        network: ws"
+                            echo "        ws-opts:"
+                            if [[ -n "${p_pass:-}" ]]; then
+                                printf '          path: "%s"\n' "$p_pass"
+                            fi
+                            if [[ -n "${p_obfs:-}" ]]; then
+                                echo "          headers:"
+                                printf '            Host: "%s"\n' "$p_obfs"
+                            fi
+                        elif [[ "$vless_network_val" == "grpc" ]]; then
+                            echo "        network: grpc"
+                            if [[ -n "${p_pass:-}" ]]; then
+                                echo "        grpc-opts:"
+                                printf '          grpc-service-name: "%s"\n' "$p_pass"
+                            fi
+                        fi
+                    fi
+                    ;;
             esac
         done < <(_mihomochain_read_proxy_rows "$config_file")
     fi
@@ -12581,7 +12777,7 @@ MIHOMO_WG_YAML2
         else
             _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
             if [[ "$EXPORT_PROXIES" == "1" ]]; then
-                _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta)"
+                _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta / VLESS)"
             fi
             _info "总计: 读取 ${total_count}，导出 ${export_count}"
         fi
@@ -12662,6 +12858,7 @@ _mihomochain_read_proxy_rows() {
             vless_uuid=vless_flow=vless_public_key=vless_short_id=vless_client_fingerprint=vless_packet_encoding=vless_encryption=""
             in_reality=0
             reality_indent=-1
+            in_ws_opts=in_ws_headers=in_grpc_opts=0
         }
         function emit() {
             if (name == "") return
@@ -12794,6 +12991,61 @@ _mihomochain_read_proxy_rows() {
             line=$0
             sub(/^      short-id:[[:space:]]*/, "", line)
             vless_short_id=unquote(trim(line))
+            next
+        }
+        /^    network:/ {
+            line=$0
+            sub(/^    network:[[:space:]]*/, "", line)
+            username=unquote(trim(line))
+            next
+        }
+        /^    tls:/ {
+            line=$0
+            sub(/^    tls:[[:space:]]*/, "", line)
+            cipher=trim(line)
+            next
+        }
+        /^    ws-opts:[[:space:]]*$/ {
+            in_ws_opts=1
+            next
+        }
+        in_ws_opts && /^    [^ ]/ {
+            in_ws_opts=0
+        }
+        in_ws_opts && /^      path:/ {
+            line=$0
+            sub(/^      path:[[:space:]]*/, "", line)
+            password=unquote(trim(line))
+            next
+        }
+        in_ws_opts && /^      headers:[[:space:]]*$/ {
+            in_ws_headers=1
+            next
+        }
+        in_ws_headers && /^    [^ ]/ {
+            in_ws_headers=0
+            in_ws_opts=0
+        }
+        in_ws_headers && /^      [^ ]/ {
+            in_ws_headers=0
+        }
+        in_ws_headers && /^        Host:/ {
+            line=$0
+            sub(/^        Host:[[:space:]]*/, "", line)
+            obfs=unquote(trim(line))
+            next
+        }
+        /^    grpc-opts:[[:space:]]*$/ {
+            in_grpc_opts=1
+            next
+        }
+        in_grpc_opts && /^    [^ ]/ {
+            in_grpc_opts=0
+        }
+        in_grpc_opts && /^      grpc-service-name:/ {
+            line=$0
+            sub(/^      grpc-service-name:[[:space:]]*/, "", line)
+            password=unquote(trim(line))
             next
         }
         /^    obfs:/ {
