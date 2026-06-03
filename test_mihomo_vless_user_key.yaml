@@ -6,7 +6,7 @@ listeners:
     users:
       - username: "usft"
         uuid: "dfdf81ac-14d9-4add-be25-9a33ed88caa2"
-    decryption: "mlkem768x25519plus.native.600s.sDRgqU9tF9a3GpeUjUNCzCGjsxLDDFitKfCNJpyC7U8"
+    decryption: "mlkem768x25519plus.native.600s.kCfiNi1eLE17emppap3ganhyZ5yjYj6FbAu2lFY3oGI.WluuwNdPa-OnfdfqsPvqQRGXMNFU_bp0VM7sQ2p_dKZxTzwNk_hGk7C1kdusdIt9nMeNmBxx57YOD2ZQG5OeTw"
     transport:
       type: grpc
       grpc-opts:

@@ -5170,16 +5170,31 @@ _mihomoconf_gen_reality_keypair() {
 }
 
 _mihomoconf_gen_vless_keys() {
-    local output decryption encryption
+    local output_x25519 output_mlkem
+    local x25519_priv x25519_pub mlkem_seed mlkem_client
+    local decryption encryption
 
     if ! command -v mihomo >/dev/null 2>&1; then
         return 1
     fi
 
-    output=$(mihomo generate vless-x25519 2>/dev/null) || return 1
-    decryption=$(printf '%s\n' "$output" | awk -F'"' '/^\[Server\] decryption:/ {print $2; exit}')
-    encryption=$(printf '%s\n' "$output" | awk -F'"' '/^\[Client\] encryption:/ {print $2; exit}')
-    [[ -n "$decryption" && -n "$encryption" ]] || return 1
+    # 1. 生成并解析 X25519 密钥
+    output_x25519=$(mihomo generate vless-x25519 2>/dev/null) || return 1
+    x25519_priv=$(printf '%s\n' "$output_x25519" | awk -F': *' '/^PrivateKey:/ {print $2; exit}' | tr -d '()[:space:]')
+    x25519_pub=$(printf '%s\n' "$output_x25519" | awk -F': *' '/^Password:/ {print $2; exit}' | tr -d '()[:space:]')
+
+    # 2. 生成并解析 ML-KEM-768 密钥
+    output_mlkem=$(mihomo generate vless-mlkem768 2>/dev/null) || return 1
+    mlkem_seed=$(printf '%s\n' "$output_mlkem" | awk -F': *' '/^Seed:/ {print $2; exit}' | tr -d '()[:space:]')
+    mlkem_client=$(printf '%s\n' "$output_mlkem" | awk -F': *' '/^Client:/ {print $2; exit}' | tr -d '()[:space:]')
+
+    # 3. 校验所有关键密钥均不为空
+    [[ -n "$x25519_priv" && -n "$x25519_pub" && -n "$mlkem_seed" && -n "$mlkem_client" ]] || return 1
+
+    # 4. 拼接
+    decryption="mlkem768x25519plus.native.600s.${x25519_priv}.${mlkem_seed}"
+    encryption="mlkem768x25519plus.native.0rtt.${x25519_pub}.${mlkem_client}"
+
     printf '%s\t%s\n' "$decryption" "$encryption"
 }
 
