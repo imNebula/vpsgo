@@ -29078,6 +29078,24 @@ _he_tunnel_read_current() {
 }
 
 _he_tunnel_edit() {
+    local daemon_was_active="n"
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active he-monitor.service >/dev/null 2>&1; then
+        _info "检测到隧道守护进程 (he-monitor) 正在运行，正在临时停止以避免冲突..."
+        systemctl stop he-monitor.service >/dev/null 2>&1 || true
+        daemon_was_active="y"
+    fi
+
+    _he_tunnel_edit_impl "$@"
+    local ret=$?
+
+    if [[ "$daemon_was_active" == "y" ]]; then
+        _info "正在恢复启动隧道守护进程 (he-monitor)..."
+        systemctl start he-monitor.service >/dev/null 2>&1 || true
+    fi
+    return $ret
+}
+
+_he_tunnel_edit_impl() {
     _header "修改 HE 隧道配置"
 
     if [ ! -f /etc/network/interfaces.d/he-ipv6 ]; then
@@ -29321,33 +29339,78 @@ EOF
                 local c_name
                 c_name=$(basename "$c_dir")
                 local c_interfaces="${c_dir}/rootfs/etc/network/interfaces"
-                local c_networkd_conf="${c_dir}/rootfs/etc/systemd/network/eth0.network"
                 local updated="n"
                 
-                # 检查并更新 /etc/network/interfaces
+                # 检查并更新 /etc/network/interfaces 及其子配置文件
+                local iface_files=()
                 if [ -f "$c_interfaces" ]; then
-                    if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
-                        local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
-                        if grep -q -E "${old_prefix_clean}" "$c_interfaces" 2>/dev/null; then
-                            cp "$c_interfaces" "${c_interfaces}.bak" 2>/dev/null || true
-                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::2|${container_routed_ip}|g" "$c_interfaces"
-                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::1|${host_bridge_ipv6}|g" "$c_interfaces"
-                            updated="y"
-                        fi
-                    fi
+                    iface_files+=("$c_interfaces")
+                fi
+                if [ -d "${c_dir}/rootfs/etc/network/interfaces.d" ]; then
+                    local d_file
+                    for d_file in "${c_dir}"/rootfs/etc/network/interfaces.d/*; do
+                        [ -f "$d_file" ] && iface_files+=("$d_file")
+                    done
                 fi
                 
-                # 检查并更新 systemd-networkd eth0.network
-                if [ -f "$c_networkd_conf" ]; then
+                local f
+                for f in "${iface_files[@]}"; do
+                    local need_update="n"
                     if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
                         local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
-                        if grep -q -E "${old_prefix_clean}" "$c_networkd_conf" 2>/dev/null; then
-                            cp "$c_networkd_conf" "${c_networkd_conf}.bak" 2>/dev/null || true
-                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::2|${container_routed_ip}|g" "$c_networkd_conf"
-                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::1|${host_bridge_ipv6}|g" "$c_networkd_conf"
-                            updated="y"
+                        if grep -q -E "${old_prefix_clean}" "$f" 2>/dev/null; then
+                            need_update="y"
                         fi
                     fi
+                    if grep -q "iface eth0 inet6 static" "$f" 2>/dev/null; then
+                        need_update="y"
+                    fi
+                    
+                    if [[ "$need_update" == "y" ]]; then
+                        cp "$f" "${f}.bak" 2>/dev/null || true
+                        if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
+                            local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
+                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::2|${container_routed_ip}|g" "$f"
+                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::1|${host_bridge_ipv6}|g" "$f"
+                        fi
+                        # 兜底：对 iface eth0 inet6 static 范围内的 IPv6 地址进行通用替换，确保改全
+                        sed -i -E '/iface eth0 inet6 static/,/^(iface|auto|source)/ {
+                            s|(address\s+)[a-fA-F0-9:]+:[a-fA-F0-9:]+(/[0-9]+)?|\1'"${container_routed_ip}"'/64|
+                            s|(gateway\s+)[a-fA-F0-9:]+:[a-fA-F0-9:]+|\1'"${host_bridge_ipv6}"'|
+                        }' "$f"
+                        updated="y"
+                    fi
+                done
+                
+                # 检查并更新 systemd-networkd network 配置文件 (支持所有 *.network 文件)
+                if [ -d "${c_dir}/rootfs/etc/systemd/network" ]; then
+                    local net_file
+                    for net_file in "${c_dir}"/rootfs/etc/systemd/network/*.network; do
+                        [ -f "$net_file" ] || continue
+                        local need_update="n"
+                        if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
+                            local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
+                            if grep -q -E "${old_prefix_clean}" "$net_file" 2>/dev/null; then
+                                need_update="y"
+                            fi
+                        fi
+                        if grep -q -E "Address\s*=\s*[a-fA-F0-9:]+:[a-fA-F0-9:]+" "$net_file" 2>/dev/null; then
+                            need_update="y"
+                        fi
+                        
+                        if [[ "$need_update" == "y" ]]; then
+                            cp "$net_file" "${net_file}.bak" 2>/dev/null || true
+                            if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
+                                local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
+                                sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::2|${container_routed_ip}|g" "$net_file"
+                                sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::1|${host_bridge_ipv6}|g" "$net_file"
+                            fi
+                            # 兜底通用替换
+                            sed -i -E 's|(Address\s*=\s*)[a-fA-F0-9:]+:[a-fA-F0-9:]+(/[0-9]+)?|\1'"${container_routed_ip}"'/64|g' "$net_file"
+                            sed -i -E 's|(Gateway\s*=\s*)[a-fA-F0-9:]+:[a-fA-F0-9:]+|\1'"${host_bridge_ipv6}"'|g' "$net_file"
+                            updated="y"
+                        fi
+                    done
                 fi
                 
                 if [[ "$updated" == "y" ]]; then
@@ -29393,6 +29456,24 @@ EOF
 }
 
 _he_ipv6_lxc_install() {
+    local daemon_was_active="n"
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active he-monitor.service >/dev/null 2>&1; then
+        _info "检测到隧道守护进程 (he-monitor) 正在运行，正在临时停止以避免冲突..."
+        systemctl stop he-monitor.service >/dev/null 2>&1 || true
+        daemon_was_active="y"
+    fi
+
+    _he_ipv6_lxc_install_impl "$@"
+    local ret=$?
+
+    if [[ "$daemon_was_active" == "y" ]]; then
+        _info "正在恢复启动隧道守护进程 (he-monitor)..."
+        systemctl start he-monitor.service >/dev/null 2>&1 || true
+    fi
+    return $ret
+}
+
+_he_ipv6_lxc_install_impl() {
     _header "创建 LXC 容器与 HE 隧道"
     
     local os
