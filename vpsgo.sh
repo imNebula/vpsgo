@@ -28948,7 +28948,7 @@ _select_lxc_container() {
         return 1
     fi
 
-    _info "可用 LXC 容器列表："
+    _info "可用 LXC 容器列表：" >&2
     local i=1
     for cname in "${lxc_list[@]}"; do
         local cstate
@@ -28956,10 +28956,10 @@ _select_lxc_container() {
         local ctone="yellow"
         [[ "$cstate" == "RUNNING" ]] && ctone="green"
         [[ "$cstate" == "STOPPED" ]] && ctone="dim"
-        _status_kv "[$i] $cname" "$cstate" "$ctone" "20"
+        _status_kv "[$i] $cname" "$cstate" "$ctone" "20" >&2
         i=$((i+1))
     done
-    echo ""
+    echo "" >&2
 
     local choice
     while true; do
@@ -28970,7 +28970,7 @@ _select_lxc_container() {
             echo "${lxc_list[$((choice-1))]}"
             return 0
         fi
-        _error_no_exit "无效序号，请重新输入"
+        _error_no_exit "无效序号，请重新输入" >&2
     done
 }
 
@@ -29857,7 +29857,7 @@ EOF
         if [[ "$recreate_container" =~ ^[Yy] ]]; then
             _info "正在停止并删除旧容器..."
             lxc-stop -n "$container_name" -k 2>/dev/null || true
-            lxc-destroy -n "$container_name" 2>/dev/null || true
+            lxc-destroy -f -n "$container_name" 2>/dev/null || true
             container_exists=0
         fi
     fi
@@ -30652,8 +30652,11 @@ _he_ipv6_lxc_uninstall() {
     if lxc-info -n "$container_name" >/dev/null 2>&1; then
         _info "正在停止并销毁 LXC 容器 $container_name..."
         lxc-stop -n "$container_name" -k 2>/dev/null || true
-        lxc-destroy -n "$container_name" 2>/dev/null || true
-        _success "LXC 容器已删除"
+        if lxc-destroy -f -n "$container_name" 2>/dev/null; then
+            _success "LXC 容器已删除"
+        else
+            _error_no_exit "删除 LXC 容器失败，请尝试手动执行: lxc-destroy -f -n $container_name"
+        fi
     else
         _info "未检测到容器 $container_name。"
     fi
