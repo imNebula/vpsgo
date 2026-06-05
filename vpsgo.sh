@@ -29137,6 +29137,34 @@ _he_tunnel_edit() {
     # Routed Prefix: 去除多余空格，保留 /64 供后续前缀提取
     new_routed_ipv6=$(echo "$new_routed_ipv6" | sed 's/[[:space:]]//g')
 
+    # 读取旧的子网后缀（如果存在）
+    local cur_suffix=""
+    if [[ -n "$new_routed_ipv6" && -f /etc/default/lxc-net ]]; then
+        local cur_lxc_ip
+        cur_lxc_ip=$(grep -oE 'LXC_IPV6_ADDR="[^"]+"' /etc/default/lxc-net | cut -d'"' -f2 || true)
+        if [[ -n "$cur_lxc_ip" ]]; then
+            local ref_prefix="${_HE_CUR_ROUTED_IPV6:-$new_routed_ipv6}"
+            local prefix_clean="${ref_prefix%%::*}"
+            local suffix_part="${cur_lxc_ip#"$prefix_clean"}"
+            suffix_part="${suffix_part#":"}"
+            cur_suffix="${suffix_part%%::*}"
+        fi
+    fi
+
+    # 提示用户输入子网后缀
+    local new_routed_suffix=""
+    if [[ -n "$new_routed_ipv6" ]]; then
+        local random_suffix
+        random_suffix=$(printf '%04x' $((RANDOM % 65536)))
+        read -rp "  请输入 Routed Prefix 的子网后缀 (随机生成可避免冲突) [${cur_suffix:-$random_suffix}]: " new_routed_suffix
+        new_routed_suffix="${new_routed_suffix:-${cur_suffix:-$random_suffix}}"
+        new_routed_suffix=$(echo "$new_routed_suffix" | sed 's/[^a-fA-F0-9]//g' | tr '[:upper:]' '[:lower:]')
+        if [[ -z "$new_routed_suffix" ]]; then
+            new_routed_suffix="${cur_suffix:-$random_suffix}"
+        fi
+        _info "容器 IPv6 地址后缀: ${new_routed_suffix} (Host: ::1, Container: ::2)"
+    fi
+
     local share_with_host="y"
     if grep -q "table 100" /etc/network/interfaces.d/he-ipv6 2>/dev/null; then
         share_with_host="n"
@@ -29237,7 +29265,7 @@ EOF
     fi
     _success "HE 隧道接口已重新应用"
 
-    # 如果有 Routed IPv6 Prefix，更新容器内 interfaces（仅提示，不自动修改）
+    # 如果有 Routed IPv6 Prefix，更新宿主机 lxc-net 配置以及自动更新现有容器配置
     if [[ -n "$new_routed_ipv6" ]]; then
         # 提取前缀 base：先去掉 /64，再根据是否含 :: 分支处理
         local prefix_base
@@ -29247,10 +29275,111 @@ EOF
         else
             prefix_base="${_routed_addr%:*}"    # 展开格式：去掉最后一个主机段
         fi
-        local container_routed_ip="${prefix_base}::2"
+
+        local container_routed_ip
+        local host_bridge_ipv6
+        if [[ -n "$new_routed_suffix" ]]; then
+            container_routed_ip="${prefix_base}:${new_routed_suffix}::2"
+            host_bridge_ipv6="${prefix_base}:${new_routed_suffix}::1"
+        else
+            container_routed_ip="${prefix_base}::2"
+            host_bridge_ipv6="${prefix_base}::1"
+        fi
+
+        # 更新宿主机 lxc-net 配置文件 (/etc/default/lxc-net)
+        if [ -f /etc/default/lxc-net ]; then
+            _info "正在更新宿主机 LXC 网桥 IPv6 参数..."
+            _update_lxc_net_config "USE_LXC_BRIDGE" "true"
+            _update_lxc_net_config "LXC_IPV6_ADDR" "$host_bridge_ipv6"
+            _update_lxc_net_config "LXC_IPV6_MASK" "64"
+            _update_lxc_net_config "LXC_IPV6_NETWORK" "${new_routed_ipv6}"
+            _update_lxc_net_config "LXC_IPV6_NAT" "false"
+
+            _info "正在直接配置 lxcbr0 IPv6 地址..."
+            # 先删除旧 of 网桥 IP 避免冲突
+            if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
+                local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
+                local old_host_bridge_ipv6
+                if [[ -n "$cur_suffix" ]]; then
+                    old_host_bridge_ipv6="${old_prefix_clean}:${cur_suffix}::1"
+                else
+                    old_host_bridge_ipv6="${old_prefix_clean}::1"
+                fi
+                ip -6 addr del ${old_host_bridge_ipv6}/64 dev lxcbr0 2>/dev/null || true
+            fi
+            ip -6 addr add ${host_bridge_ipv6}/64 dev lxcbr0 2>/dev/null || true
+            ip link set lxcbr0 up 2>/dev/null || true
+        fi
+
         _info "Routed IPv6 已提供，容器内 Routed IP 应为: ${container_routed_ip}/64"
-        _warn "注意：容器内 /etc/network/interfaces 需要手动或重建容器才能同步更新。"
-        _warn "可通过 lxc-attach -n <容器名> 进入容器后自行修改。"
+
+        # 自动扫描并更新现有容器
+        local updated_containers=()
+        local c_dir
+        for c_dir in /var/lib/lxc/*; do
+            if [ -d "$c_dir" ]; then
+                local c_name
+                c_name=$(basename "$c_dir")
+                local c_interfaces="${c_dir}/rootfs/etc/network/interfaces"
+                local c_networkd_conf="${c_dir}/rootfs/etc/systemd/network/eth0.network"
+                local updated="n"
+                
+                # 检查并更新 /etc/network/interfaces
+                if [ -f "$c_interfaces" ]; then
+                    if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
+                        local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
+                        if grep -q -E "${old_prefix_clean}" "$c_interfaces" 2>/dev/null; then
+                            cp "$c_interfaces" "${c_interfaces}.bak" 2>/dev/null || true
+                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::2|${container_routed_ip}|g" "$c_interfaces"
+                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::1|${host_bridge_ipv6}|g" "$c_interfaces"
+                            updated="y"
+                        fi
+                    fi
+                fi
+                
+                # 检查并更新 systemd-networkd eth0.network
+                if [ -f "$c_networkd_conf" ]; then
+                    if [[ -n "$_HE_CUR_ROUTED_IPV6" ]]; then
+                        local old_prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
+                        if grep -q -E "${old_prefix_clean}" "$c_networkd_conf" 2>/dev/null; then
+                            cp "$c_networkd_conf" "${c_networkd_conf}.bak" 2>/dev/null || true
+                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::2|${container_routed_ip}|g" "$c_networkd_conf"
+                            sed -i -E "s|${old_prefix_clean}(:[a-fA-F0-9]+)?::1|${host_bridge_ipv6}|g" "$c_networkd_conf"
+                            updated="y"
+                        fi
+                    fi
+                fi
+                
+                if [[ "$updated" == "y" ]]; then
+                    updated_containers+=("$c_name")
+                fi
+            fi
+        done
+        
+        if [ ${#updated_containers[@]} -gt 0 ]; then
+            _success "已自动更新以下容器的 IPv6 配置并备份原配置："
+            local uc
+            for uc in "${updated_containers[@]}"; do
+                _info "  - ${uc}"
+                # 如果容器在运行，提示重启
+                if lxc-info -n "$uc" -s | grep -q "RUNNING"; then
+                    local reboot_c="y"
+                    read -rp "    容器 ${uc} 正在运行，是否立即重启容器使配置生效? [Y/n]: " reboot_c
+                    reboot_c="${reboot_c:-y}"
+                    if [[ "$reboot_c" =~ ^[Yy] ]]; then
+                        _info "    正在重启容器 ${uc}..."
+                        lxc-stop -n "$uc" -r 2>/dev/null || true
+                        _success "    容器 ${uc} 已重启"
+                    else
+                        _warn "    注意：需要手动重启容器 ${uc} 才能使新配置生效。"
+                    fi
+                fi
+            done
+        else
+            _warn "注意：未找到需要更新的 LXC 容器配置。如果需要同步更新，请使用以下方法："
+            _warn "1. 可手动修改容器内 /etc/network/interfaces 或 /etc/systemd/network/eth0.network 后重启容器。"
+            _warn "2. 可通过 lxc-attach -n <容器名> 进入容器后自行修改。"
+        fi
     fi
 
     _info "正在测试 HE 隧道连通性..."
