@@ -8,12 +8,12 @@ listeners:
     password: "change-me"
     udp: true
 
-  - name: vless-grpc-in-22787
-    tag: "vless_grpc_relay"
+  - name: vless-enc-in-22787
+    tag: "vless_enc_relay"
     type: vless
     port: 22787
     listen: "::"
-    # vpsgo-vless-type: grpc
+    # vpsgo-vless-type: vless-enc
     # vpsgo-vless-grpc-service-name: testservice
     # vpsgo-vless-grpc-tls: false
     users:

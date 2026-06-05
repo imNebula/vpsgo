@@ -5960,7 +5960,7 @@ _mihomoconf_has_listener_type() {
             if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
             }
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*(grpc|vless-enc)/) {
                 is_grpc=1
             }
             if ($0 ~ /^    type:/) {
@@ -6065,7 +6065,7 @@ _mihomoconf_list_listeners() {
             if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
             }
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*(grpc|vless-enc)/) {
                 is_grpc=1
             }
             if ($0 ~ /^    type:/) {
@@ -6185,7 +6185,7 @@ _mihomoconf_remove_listeners_by_type() {
             if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
             }
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*(grpc|vless-enc)/) {
                 is_grpc=1
             }
             if ($0 ~ /^    type:/) {
@@ -6250,7 +6250,7 @@ _mihomoconf_read_listener_rows() {
             if (type == "vless") {
                 if (vless_type == "ws") {
                     actual_type = "vless-ws"
-                } else if (vless_type == "grpc") {
+                } else if (vless_type == "grpc" || vless_type == "vless-enc") {
                     actual_type = "vless-grpc"
                 }
             } else if (type == "vmess") {
@@ -9073,7 +9073,11 @@ _mihomoconf_setup() {
             read -rp "    VLESS gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_grpc_host_input
             VLESS_GRPC_HOSTS+=("$(_mihomoconf_trim "${_vless_grpc_host_input:-}")")
 
-            VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
+            if [[ "${VLESS_GRPC_TLS_OPTS[$i]}" == "false" ]]; then
+                VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_enc_relay")")
+            else
+                VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
+            fi
 
             _user_rows=$(_mihomoconf_collect_users_input "VLESS gRPC #$((i + 1))" "" "vless")
             while IFS=$'\t' read -r _u_name _u_uuid; do
@@ -9902,7 +9906,20 @@ MIHOMOCONF_VMESS_GRPC_TRANS_EOF
                 local _vless_grpc_service_name="${VLESS_GRPC_SERVICE_NAMES[$i]}"
                 local _vless_grpc_tls="${VLESS_GRPC_TLS_OPTS[$i]}"
                 local _vless_grpc_host="${VLESS_GRPC_HOSTS[$i]}"
-                cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_EOF
+                if [[ "$_vless_grpc_tls" == "false" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_EOF
+  - name: vless-enc-in-${_vless_grpc_port}
+    tag: "${_vless_grpc_tag}"
+    type: vless
+    port: ${_vless_grpc_port}
+    listen: "::"
+    # vpsgo-vless-type: vless-enc
+    # vpsgo-vless-grpc-service-name: ${_vless_grpc_service_name}
+    # vpsgo-vless-grpc-tls: ${_vless_grpc_tls}
+    # vpsgo-vless-grpc-host: ${_vless_grpc_host}
+MIHOMOCONF_VLESS_GRPC_EOF
+                else
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_EOF
   - name: vless-grpc-in-${_vless_grpc_port}
     tag: "${_vless_grpc_tag}"
     type: vless
@@ -9913,6 +9930,7 @@ MIHOMOCONF_VMESS_GRPC_TRANS_EOF
     # vpsgo-vless-grpc-tls: ${_vless_grpc_tls}
     # vpsgo-vless-grpc-host: ${_vless_grpc_host}
 MIHOMOCONF_VLESS_GRPC_EOF
+                fi
                 if [[ "$_vless_grpc_tls" == "reality" ]]; then
                     local _vless_grpc_reality_pub="${VLESS_GRPC_REALITY_PUBLIC_KEYS[$i]}"
                     local _vless_grpc_reality_short="${VLESS_GRPC_REALITY_SHORT_IDS[$i]}"
@@ -10695,14 +10713,22 @@ MIHOMOCONF_VMESS_GRPC_YAML2
             _vless_grpc_service_name="${VLESS_GRPC_SERVICE_NAMES[$i]}"
             _vless_grpc_tls="${VLESS_GRPC_TLS_OPTS[$i]}"
             _vless_grpc_host="${VLESS_GRPC_HOSTS[$i]}"
-            _vless_grpc_name=$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            if [[ "$_vless_grpc_tls" == "false" ]]; then
+                _vless_grpc_name=$(_mihomoconf_make_node_name "VLESS-Enc" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            else
+                _vless_grpc_name=$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            fi
             _separator
             printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vless_grpc_name"
             printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tag"
             printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
             printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_vless_grpc_port"
             printf "      Service: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_service_name"
-            printf "      gRPC TLS: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tls"
+            if [[ "$_vless_grpc_tls" == "false" ]]; then
+                printf "      gRPC Enc: ${GREEN}%s${PLAIN}\n" "启用"
+            else
+                printf "      gRPC TLS: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tls"
+            fi
             [[ -n "$_vless_grpc_host" ]] && printf "      gRPC Host: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_host"
             _vless_grpc_user_idx=0
             for _row in "${VLESS_GRPC_USER_ROWS[@]}"; do
@@ -10718,7 +10744,11 @@ MIHOMOCONF_VMESS_GRPC_YAML2
                 VLESS_GRPC_LINK=$(_mihomoconf_gen_vless_grpc_link "$SERVER_HOST" "$_vless_grpc_port" "$_u_uuid" "$_vless_grpc_client_name" "$_vless_grpc_service_name" "$_vless_grpc_tls" "$_vless_grpc_host" "$_vless_grpc_enc" "$_vless_grpc_pbk" "$_vless_grpc_sid")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_user_idx" "$_u_name"
                 printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
-                printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
+                if [[ "$_vless_grpc_tls" == "false" ]]; then
+                    printf "  ${BOLD}VLESS Enc 分享链接:${PLAIN}\n"
+                else
+                    printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
+                fi
                 printf "  ${GREEN}%s${PLAIN}\n" "$VLESS_GRPC_LINK"
                 printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
                 if [[ "$_vless_grpc_tls" == "reality" ]]; then
@@ -12045,7 +12075,11 @@ MIHOMO_VLESS_WS_YAML3
                     vless_found=1
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
-                    vless_name="$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
+                    if [[ "$vless_ws_tls" == "false" ]]; then
+                        vless_name="$(_mihomoconf_make_node_name "VLESS-Enc" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
+                    else
+                        vless_name="$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
+                    fi
                     if [[ "$vless_ws_tls" == "reality" ]]; then
                         vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host" "none" "$vless_public_key" "$vless_short_id")
                     else
@@ -12055,12 +12089,20 @@ MIHOMO_VLESS_WS_YAML3
                         printf "%s\n" "$vless_link"
                     else
                         _separator
-                        printf "  ${BOLD}[VLESS gRPC] %s${PLAIN}\n" "$vless_name"
+                        if [[ "$vless_ws_tls" == "false" ]]; then
+                            printf "  ${BOLD}[VLESS Enc] %s${PLAIN}\n" "$vless_name"
+                        else
+                            printf "  ${BOLD}[VLESS gRPC] %s${PLAIN}\n" "$vless_name"
+                        fi
                         printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
                         printf "    用户: ${GREEN}%s${PLAIN}\n" "$vless_user"
                         printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vless_uuid"
                         printf "    gRPC Service: ${GREEN}%s${PLAIN}\n" "$vless_grpc_service_name"
-                        printf "    gRPC TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        if [[ "$vless_ws_tls" == "false" ]]; then
+                            printf "    gRPC Enc : ${GREEN}%s${PLAIN}\n" "启用"
+                        else
+                            printf "    gRPC TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
+                        fi
                         [[ -n "$vless_ws_host" ]] && printf "    gRPC Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
                         printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
                         printf "    YAML:\n"
@@ -28937,6 +28979,79 @@ _he_ipv6_lxc_menu() {
     done
 }
 
+_he_update_systemd_service() {
+    local client_ipv6="$1"
+    local server_ipv4="$2"
+    local local_ipv4="$3"
+    local server_ipv6="$4"
+    local share_with_host="${5:-y}"
+    local routed_ipv6="${6:-}"
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _info "正在配置 systemd 开机自启服务..."
+    local ip_path
+    ip_path=$(command -v ip || echo "/sbin/ip")
+    local modprobe_path
+    modprobe_path=$(command -v modprobe || echo "/sbin/modprobe")
+
+    local service_file="/etc/systemd/system/he-ipv6.service"
+    
+    local exec_starts=""
+    exec_starts+="ExecStart=${ip_path} tunnel add he-ipv6 mode sit remote ${server_ipv4} local ${local_ipv4} ttl 255\n"
+    exec_starts+="ExecStart=${ip_path} link set he-ipv6 up\n"
+    exec_starts+="ExecStart=${ip_path} addr add ${client_ipv6}/64 dev he-ipv6\n"
+    
+    local exec_stops=""
+    
+    if [[ -n "$routed_ipv6" && "$share_with_host" == "n" ]]; then
+        exec_starts+="ExecStart=${ip_path} -6 route add default via ${server_ipv6} dev he-ipv6 table 100\n"
+        exec_starts+="ExecStart=${ip_path} -6 rule add from ${routed_ipv6} lookup 100\n"
+        
+        exec_stops+="ExecStop=-${ip_path} -6 rule del from ${routed_ipv6} lookup 100\n"
+        exec_stops+="ExecStop=-${ip_path} -6 route del default via ${server_ipv6} dev he-ipv6 table 100\n"
+    else
+        exec_starts+="ExecStart=${ip_path} route add ::/0 dev he-ipv6 via ${server_ipv6}\n"
+        exec_stops+="ExecStop=-${ip_path} route del ::/0 dev he-ipv6 via ${server_ipv6}\n"
+    fi
+    exec_stops+="ExecStop=-${ip_path} link set he-ipv6 down\n"
+    exec_stops+="ExecStop=-${ip_path} tunnel del he-ipv6\n"
+
+    cat > "$service_file" <<EOF
+[Unit]
+Description=Hurricane Electric IPv6 Tunnel (he-ipv6)
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-${modprobe_path} sit
+ExecStart=-${ip_path} tunnel del he-ipv6
+$(printf "$exec_starts")
+$(printf "$exec_stops")
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable he-ipv6.service >/dev/null 2>&1 || true
+    _info "正在启动 he-ipv6 systemd 服务..."
+    systemctl start he-ipv6.service >/dev/null 2>&1 || true
+}
+
+_he_remove_systemd_service() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files he-ipv6.service >/dev/null 2>&1; then
+        _info "正在停止并清理 he-ipv6 systemd 服务..."
+        systemctl stop he-ipv6.service >/dev/null 2>&1 || true
+        systemctl disable he-ipv6.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/he-ipv6.service
+        systemctl daemon-reload
+    fi
+}
+
 # 从持久化配置中读取当前隧道参数
 _he_tunnel_read_current() {
     local cfg="/etc/network/interfaces.d/he-ipv6"
@@ -29023,6 +29138,7 @@ _he_tunnel_edit() {
         ip link delete "${phys_dev}" 2>/dev/null || true
     done
 
+    _he_remove_systemd_service
     ip link set he-ipv6 down 2>/dev/null || true
     ip tunnel del he-ipv6 2>/dev/null || true
 
@@ -29037,7 +29153,7 @@ _he_tunnel_edit() {
     fi
     active_routed_ipv6="${active_routed_ipv6:-2001:db8:1::/64}"
 
-    if [[ "$share_with_host" == "y" ]]; then
+    if [[ "$share_with_host" == "n" ]]; then
         cat > /etc/network/interfaces.d/he-ipv6 <<EOF
 auto he-ipv6
 iface he-ipv6 inet6 v4tunnel
@@ -29060,32 +29176,40 @@ iface he-ipv6 inet6 v4tunnel
     endpoint ${new_server_ipv4}
     local ${new_local_ipv4}
     ttl 255
+    gateway ${new_server_ipv6}
 EOF
     fi
 
     _info "正在重新启动 HE 隧道..."
-    if ! ifup he-ipv6 2>/dev/null; then
-        modprobe sit >/dev/null 2>&1 || true
-        local err_msg
-        if ! err_msg=$(ip tunnel add he-ipv6 mode sit remote "${new_server_ipv4}" local "${new_local_ipv4}" ttl 255 2>&1); then
-            _error_no_exit "创建 sit 隧道失败: ${err_msg}"
-            _error_no_exit "请检查本地 IPv4 (${new_local_ipv4}) 是否是网卡上绑定的真实 IP (如果是 NAT 机，必须填内网 IP)。"
-            _press_any_key
-            return 1
-        fi
-        if ! err_msg=$(ip link set he-ipv6 up 2>&1); then
-            _error_no_exit "启用 he-ipv6 接口失败: ${err_msg}"
-            _press_any_key
-            return 1
-        fi
-        if ! err_msg=$(ip addr add "${new_client_ipv6}" dev he-ipv6 2>&1); then
-            _error_no_exit "为 he-ipv6 绑定 Client IPv6 失败: ${err_msg}"
-            _press_any_key
-            return 1
-        fi
-        if [[ "$share_with_host" == "y" ]]; then
-            ip -6 route add default via "${new_server_ipv6}" dev he-ipv6 table 100 2>/dev/null || true
-            ip -6 rule add from "${active_routed_ipv6}" lookup 100 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        _he_update_systemd_service "${new_client_ipv6}" "${new_server_ipv4}" "${new_local_ipv4}" "${new_server_ipv6}" "${share_with_host}" "${active_routed_ipv6}"
+    else
+        ifdown he-ipv6 >/dev/null 2>&1 || true
+        if ! ifup he-ipv6 2>/dev/null; then
+            modprobe sit >/dev/null 2>&1 || true
+            local err_msg
+            if ! err_msg=$(ip tunnel add he-ipv6 mode sit remote "${new_server_ipv4}" local "${new_local_ipv4}" ttl 255 2>&1); then
+                _error_no_exit "创建 sit 隧道失败: ${err_msg}"
+                _error_no_exit "请检查本地 IPv4 (${new_local_ipv4}) 是否是网卡上绑定的真实 IP (如果是 NAT 机，必须填内网 IP)。"
+                _press_any_key
+                return 1
+            fi
+            if ! err_msg=$(ip link set he-ipv6 up 2>&1); then
+                _error_no_exit "启用 he-ipv6 接口失败: ${err_msg}"
+                _press_any_key
+                return 1
+            fi
+            if ! err_msg=$(ip addr add "${new_client_ipv6}/64" dev he-ipv6 2>&1); then
+                _error_no_exit "为 he-ipv6 绑定 Client IPv6 失败: ${err_msg}"
+                _press_any_key
+                return 1
+            fi
+            if [[ "$share_with_host" == "n" ]]; then
+                ip -6 route add default via "${new_server_ipv6}" dev he-ipv6 table 100 2>/dev/null || true
+                ip -6 rule add from "${active_routed_ipv6}" lookup 100 2>/dev/null || true
+            else
+                ip route add ::/0 dev he-ipv6 via "${new_server_ipv6}" 2>/dev/null || true
+            fi
         fi
     fi
     _success "HE 隧道接口已重新应用"
@@ -29260,6 +29384,7 @@ _he_ipv6_lxc_install() {
             read -rp "  是否删除并重新配置该接口? [y/N]: " overwrite_tunnel
             if [[ "$overwrite_tunnel" =~ ^[Yy] ]]; then
                 _info "正在清理旧的 he-ipv6 接口..."
+                _he_remove_systemd_service
                 ip link set he-ipv6 down 2>/dev/null || true
                 ip tunnel del he-ipv6 2>/dev/null || true
                 rm -f /etc/network/interfaces.d/he-ipv6
@@ -29279,7 +29404,7 @@ _he_ipv6_lxc_install() {
             echo "source /etc/network/interfaces.d/*" >> /etc/network/interfaces
         fi
         
-        if [[ "$share_with_host" == "y" ]]; then
+        if [[ "$share_with_host" == "n" ]]; then
             cat > /etc/network/interfaces.d/he-ipv6 <<EOF
 auto he-ipv6
 iface he-ipv6 inet6 v4tunnel
@@ -29302,35 +29427,40 @@ iface he-ipv6 inet6 v4tunnel
     endpoint ${he_server_ipv4}
     local ${he_local_ipv4}
     ttl 255
+    gateway ${he_server_ipv6}
 EOF
         fi
         
         _info "正在启动宿主机 sit 隧道接口..."
-        ifdown he-ipv6 >/dev/null 2>&1 || true
-        if ! ifup he-ipv6 2>/dev/null; then
-            modprobe sit >/dev/null 2>&1 || true
-            local err_msg
-            if ! err_msg=$(ip tunnel add he-ipv6 mode sit remote "${he_server_ipv4}" local "${he_local_ipv4}" ttl 255 2>&1); then
-                _error_no_exit "创建 sit 隧道失败: ${err_msg}"
-                _error_no_exit "请检查本地 IPv4 (${he_local_ipv4}) 是否是网卡上绑定的真实 IP (如果是 NAT 机，必须填内网 IP)。"
-                _press_any_key
-                return 1
-            fi
-            if ! err_msg=$(ip link set he-ipv6 up 2>&1); then
-                _error_no_exit "启用 he-ipv6 接口失败: ${err_msg}"
-                _press_any_key
-                return 1
-            fi
-            if ! err_msg=$(ip addr add "${he_client_ipv6}/64" dev he-ipv6 2>&1); then
-                _error_no_exit "为 he-ipv6 绑定 Client IPv6 失败: ${err_msg}"
-                _press_any_key
-                return 1
-            fi
-            if [[ "$share_with_host" == "y" ]]; then
-                ip route add ::/0 dev he-ipv6 via "${he_server_ipv6}" 2>/dev/null || true
-            else
-                ip -6 route add default via "${he_server_ipv6}" dev he-ipv6 table 100 2>/dev/null || true
-                ip -6 rule add from "${routed_ipv6}" lookup 100 2>/dev/null || true
+        if command -v systemctl >/dev/null 2>&1; then
+            _he_update_systemd_service "${he_client_ipv6}" "${he_server_ipv4}" "${he_local_ipv4}" "${he_server_ipv6}" "${share_with_host}" "${routed_ipv6}"
+        else
+            ifdown he-ipv6 >/dev/null 2>&1 || true
+            if ! ifup he-ipv6 2>/dev/null; then
+                modprobe sit >/dev/null 2>&1 || true
+                local err_msg
+                if ! err_msg=$(ip tunnel add he-ipv6 mode sit remote "${he_server_ipv4}" local "${he_local_ipv4}" ttl 255 2>&1); then
+                    _error_no_exit "创建 sit 隧道失败: ${err_msg}"
+                    _error_no_exit "请检查本地 IPv4 (${he_local_ipv4}) 是否是网卡上绑定的真实 IP (如果是 NAT 机，必须填内网 IP)。"
+                    _press_any_key
+                    return 1
+                fi
+                if ! err_msg=$(ip link set he-ipv6 up 2>&1); then
+                    _error_no_exit "启用 he-ipv6 接口失败: ${err_msg}"
+                    _press_any_key
+                    return 1
+                fi
+                if ! err_msg=$(ip addr add "${he_client_ipv6}/64" dev he-ipv6 2>&1); then
+                    _error_no_exit "为 he-ipv6 绑定 Client IPv6 失败: ${err_msg}"
+                    _press_any_key
+                    return 1
+                fi
+                if [[ "$share_with_host" == "n" ]]; then
+                    ip -6 route add default via "${he_server_ipv6}" dev he-ipv6 table 100 2>/dev/null || true
+                    ip -6 rule add from "${routed_ipv6}" lookup 100 2>/dev/null || true
+                else
+                    ip route add ::/0 dev he-ipv6 via "${he_server_ipv6}" 2>/dev/null || true
+                fi
             fi
         fi
         
@@ -30239,6 +30369,7 @@ _he_ipv6_lxc_uninstall() {
     fi
     
     _info "正在清理宿主机 he-ipv6 隧道接口与配置..."
+    _he_remove_systemd_service
     ip -6 rule del lookup 100 2>/dev/null || true
     ip -6 route flush table 100 2>/dev/null || true
     ip link set he-ipv6 down 2>/dev/null || true
@@ -30353,6 +30484,7 @@ _he_host_tunnel_install() {
         read -rp "  是否删除并重新配置该接口? [y/N]: " overwrite_tunnel
         if [[ "$overwrite_tunnel" =~ ^[Yy] ]]; then
             _info "正在清理旧的 he-ipv6 接口..."
+            _he_remove_systemd_service
             ip link set he-ipv6 down 2>/dev/null || true
             ip tunnel del he-ipv6 2>/dev/null || true
             rm -f /etc/network/interfaces.d/he-ipv6
@@ -30384,26 +30516,30 @@ iface he-ipv6 inet6 v4tunnel
 EOF
     
     _info "正在启用宿主机 sit 隧道接口..."
-    ifdown he-ipv6 >/dev/null 2>&1 || true
-    if ! ifup he-ipv6 2>/dev/null; then
-        modprobe sit >/dev/null 2>&1 || true
-        local err_msg
-        if ! err_msg=$(ip tunnel add he-ipv6 mode sit remote "${he_server_ipv4}" local "${he_local_ipv4}" ttl 255 2>&1); then
-            _error_no_exit "创建 sit 隧道失败: ${err_msg}"
-            _press_any_key
-            return 1
+    if command -v systemctl >/dev/null 2>&1; then
+        _he_update_systemd_service "${he_client_ipv6}" "${he_server_ipv4}" "${he_local_ipv4}" "${he_server_ipv6}" "y" ""
+    else
+        ifdown he-ipv6 >/dev/null 2>&1 || true
+        if ! ifup he-ipv6 2>/dev/null; then
+            modprobe sit >/dev/null 2>&1 || true
+            local err_msg
+            if ! err_msg=$(ip tunnel add he-ipv6 mode sit remote "${he_server_ipv4}" local "${he_local_ipv4}" ttl 255 2>&1); then
+                _error_no_exit "创建 sit 隧道失败: ${err_msg}"
+                _press_any_key
+                return 1
+            fi
+            if ! err_msg=$(ip link set he-ipv6 up 2>&1); then
+                _error_no_exit "启用 he-ipv6 接口失败: ${err_msg}"
+                _press_any_key
+                return 1
+            fi
+            if ! err_msg=$(ip addr add "${he_client_ipv6}/64" dev he-ipv6 2>&1); then
+                _error_no_exit "为 he-ipv6 绑定 Client IPv6 失败: ${err_msg}"
+                _press_any_key
+                return 1
+            fi
+            ip route add ::/0 dev he-ipv6 via "${he_server_ipv6}" 2>/dev/null || true
         fi
-        if ! err_msg=$(ip link set he-ipv6 up 2>&1); then
-            _error_no_exit "启用 he-ipv6 接口失败: ${err_msg}"
-            _press_any_key
-            return 1
-        fi
-        if ! err_msg=$(ip addr add "${he_client_ipv6}/64" dev he-ipv6 2>&1); then
-            _error_no_exit "为 he-ipv6 绑定 Client IPv6 失败: ${err_msg}"
-            _press_any_key
-            return 1
-        fi
-        ip route add ::/0 dev he-ipv6 via "${he_server_ipv6}" 2>/dev/null || true
     fi
     
     _info "正在测试宿主机隧道连通性 (ping6 ${he_server_ipv6})..."
@@ -30466,15 +30602,25 @@ _he_host_tunnel_toggle() {
     if [[ "$state" == "UP" || "$state" == "UNKNOWN" ]]; then
         read -rp "  是否关闭宿主机 HE 隧道? [y/N]: " action
         if [[ "$action" =~ ^[Yy] ]]; then
-            _info "正在关闭 he-ipv6 接口..."
-            ip link set he-ipv6 down 2>/dev/null || true
+            if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files he-ipv6.service >/dev/null 2>&1; then
+                _info "正在通过 systemd 关闭 he-ipv6 服务..."
+                systemctl stop he-ipv6.service 2>/dev/null || true
+            else
+                _info "正在关闭 he-ipv6 接口..."
+                ip link set he-ipv6 down 2>/dev/null || true
+            fi
             _success "已关闭"
         fi
     else
         read -rp "  是否开启宿主机 HE 隧道? [y/N]: " action
         if [[ "$action" =~ ^[Yy] ]]; then
-            _info "正在开启 he-ipv6 接口..."
-            ip link set he-ipv6 up 2>/dev/null || true
+            if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files he-ipv6.service >/dev/null 2>&1; then
+                _info "正在通过 systemd 开启 he-ipv6 服务..."
+                systemctl start he-ipv6.service 2>/dev/null || true
+            else
+                _info "正在开启 he-ipv6 接口..."
+                ip link set he-ipv6 up 2>/dev/null || true
+            fi
             _success "已开启"
         fi
     fi
@@ -30488,6 +30634,7 @@ _he_host_tunnel_uninstall() {
     read -rp "  确定要完全删除宿主机的 HE 隧道配置与接口吗? [y/N]: " action
     if [[ "$action" =~ ^[Yy] ]]; then
         _info "正在停止并删除 he-ipv6 隧道接口..."
+        _he_remove_systemd_service
         ip link set he-ipv6 down 2>/dev/null || true
         ip tunnel del he-ipv6 2>/dev/null || true
         

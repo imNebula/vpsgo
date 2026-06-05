@@ -1,5 +1,5 @@
 listeners:
-  - name: vless-grpc-in-22787
+  - name: vless-enc-in-22787
     type: vless
     port: 22787
     listen: "127.0.0.1"
