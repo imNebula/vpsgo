@@ -28921,6 +28921,14 @@ _he_ipv6_lxc_menu_screen() {
     fi
     _status_kv "HE 隧道" "$tunnel_line" "$tunnel_tone" "8"
 
+    local daemon_line="未启用"
+    local daemon_tone="yellow"
+    if systemctl is-active he-monitor.service >/dev/null 2>&1; then
+        daemon_line="运行中"
+        daemon_tone="green"
+    fi
+    _status_kv "守护进程" "$daemon_line" "$daemon_tone" "8"
+
     # 列出所有 lxc 容器（最多 3 个）
     local lxc_list=()
     if command -v lxc-ls >/dev/null 2>&1; then
@@ -28954,7 +28962,7 @@ _he_ipv6_lxc_menu_screen() {
     _menu_pair "1" "创建/配置容器" "创建 Debian 容器(可选 HE 隧道)" "green" "2" "修改 HE 隧道配置" "重新设置 HE 参数并重启隧道" "green"
     _menu_pair "3" "端口转发管理" "映射宿主机端口到容器" "green" "4" "可用性与状态检查" "诊断宿主机与容器的网络" "green"
     _menu_pair "5" "启动/停止容器" "控制 LXC 容器开关" "green" "6" "进入容器终端" "快速连入运行中容器的 Shell" "green"
-    _menu_item "7" "卸载与清理" "删除容器与 HE 隧道配置" "red"
+    _menu_pair "7" "卸载与清理" "删除容器与 HE 隧道配置" "red" "8" "隧道守护进程" "监控与自动修复 HE 隧道" "green"
     _separator
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
@@ -28964,7 +28972,7 @@ _he_ipv6_lxc_menu() {
     while true; do
         _ui_print_screen _he_ipv6_lxc_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
         case "$ch" in
             1) _he_ipv6_lxc_install ;;
             2) _he_tunnel_edit ;;
@@ -28973,6 +28981,7 @@ _he_ipv6_lxc_menu() {
             5) _he_ipv6_lxc_power_control ;;
             6) _lxc_attach ;;
             7) _he_ipv6_lxc_uninstall ;;
+            8) _he_tunnel_daemon_menu ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
@@ -29062,6 +29071,9 @@ _he_tunnel_read_current() {
     _HE_CUR_SERVER_IPV4=$(awk '/^\s*endpoint /{print $2}' "$cfg" | head -1)
     _HE_CUR_LOCAL_IPV4=$(awk '/^\s*local /{print $2}' "$cfg" | head -1)
     _HE_CUR_SERVER_IPV6=$(awk '/^\s*gateway /{print $2}' "$cfg" | head -1)
+    if [[ -z "$_HE_CUR_SERVER_IPV6" ]]; then
+        _HE_CUR_SERVER_IPV6=$(grep -oE "via\s+[^ ]+" "$cfg" | head -1 | awk '{print $2}' || true)
+    fi
     return 0
 }
 
@@ -29078,11 +29090,21 @@ _he_tunnel_edit() {
     local _HE_CUR_CLIENT_IPV6="" _HE_CUR_SERVER_IPV4="" _HE_CUR_LOCAL_IPV4="" _HE_CUR_SERVER_IPV6=""
     _he_tunnel_read_current
 
+    local cfg="/etc/network/interfaces.d/he-ipv6"
+    local _HE_CUR_ROUTED_IPV6=""
+    if [ -f "$cfg" ]; then
+        _HE_CUR_ROUTED_IPV6=$(grep -oE "from\s+[^ ]+" "$cfg" | head -1 | awk '{print $2}' || true)
+    fi
+    if [[ -z "$_HE_CUR_ROUTED_IPV6" && -f /etc/default/lxc-net ]]; then
+        _HE_CUR_ROUTED_IPV6=$(grep -oE 'LXC_IPV6_NETWORK="[^"]+"' /etc/default/lxc-net | cut -d'"' -f2 || true)
+    fi
+
     _info "当前 HE 隧道参数："
     _status_kv "Server IPv4  " "${_HE_CUR_SERVER_IPV4:-未知}" "cyan" "14"
     _status_kv "Client IPv6  " "${_HE_CUR_CLIENT_IPV6:-未知}" "cyan" "14"
     _status_kv "Server IPv6  " "${_HE_CUR_SERVER_IPV6:-未知}" "cyan" "14"
     _status_kv "Local IPv4   " "${_HE_CUR_LOCAL_IPV4:-未知}" "cyan" "14"
+    _status_kv "Routed IPv6  " "${_HE_CUR_ROUTED_IPV6:-未知}" "cyan" "14"
     echo ""
 
     # 逐项重新输入（回车保留原值）
@@ -29110,7 +29132,8 @@ _he_tunnel_edit() {
     # Local IPv4: 去掉可能的 /32
     new_local_ipv4="${new_local_ipv4%%/*}"
 
-    read -rp "  HE Routed IPv6 Prefix (例如: 2001:470:1f11:xx::/64) [回车跳过]: " new_routed_ipv6
+    read -rp "  HE Routed IPv6 Prefix (例如: 2001:470:1f11:xx::/64) [${_HE_CUR_ROUTED_IPV6:-回车跳过}]: " new_routed_ipv6
+    new_routed_ipv6="${new_routed_ipv6:-$_HE_CUR_ROUTED_IPV6}"
     # Routed Prefix: 去除多余空格，保留 /64 供后续前缀提取
     new_routed_ipv6=$(echo "$new_routed_ipv6" | sed 's/[[:space:]]//g')
 
@@ -29297,39 +29320,56 @@ _he_ipv6_lxc_install() {
     
     local he_server_ipv4="" he_client_ipv6="" he_server_ipv6="" he_local_ipv4="" share_with_host="n" routed_ipv6=""
     if [[ "$configure_he" == "y" ]]; then
+        local _HE_CUR_CLIENT_IPV6="" _HE_CUR_SERVER_IPV4="" _HE_CUR_LOCAL_IPV4="" _HE_CUR_SERVER_IPV6="" _HE_CUR_ROUTED_IPV6=""
+        local cfg="/etc/network/interfaces.d/he-ipv6"
+        if [ -f "$cfg" ]; then
+            _HE_CUR_CLIENT_IPV6=$(awk '/^\s*address /{print $2}' "$cfg" | head -1)
+            _HE_CUR_SERVER_IPV4=$(awk '/^\s*endpoint /{print $2}' "$cfg" | head -1)
+            _HE_CUR_LOCAL_IPV4=$(awk '/^\s*local /{print $2}' "$cfg" | head -1)
+            _HE_CUR_SERVER_IPV6=$(awk '/^\s*gateway /{print $2}' "$cfg" | head -1)
+            if [[ -z "$_HE_CUR_SERVER_IPV6" ]]; then
+                _HE_CUR_SERVER_IPV6=$(grep -oE "via\s+[^ ]+" "$cfg" | head -1 | awk '{print $2}' || true)
+            fi
+            _HE_CUR_ROUTED_IPV6=$(grep -oE "from\s+[^ ]+" "$cfg" | head -1 | awk '{print $2}' || true)
+        fi
+        if [[ -z "$_HE_CUR_ROUTED_IPV6" && -f /etc/default/lxc-net ]]; then
+            _HE_CUR_ROUTED_IPV6=$(grep -oE 'LXC_IPV6_NETWORK="[^"]+"' /etc/default/lxc-net | cut -d'"' -f2 || true)
+        fi
+
         while true; do
-            read -rp "  请输入 HE Server IPv4 (Endpoint) [必填]: " he_server_ipv4
+            read -rp "  请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]: " he_server_ipv4
+            he_server_ipv4="${he_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
             if [[ -n "$he_server_ipv4" ]]; then
                 break
             fi
             _error_no_exit "此项必填"
         done
+        he_server_ipv4="${he_server_ipv4%%/*}"
         
         while true; do
-            read -rp "  请输入 HE Client IPv6 Address (例如: 2001:470:1f10:xx::2/64) [必填]: " he_client_ipv6
+            read -rp "  请输入 HE Client IPv6 Address (例如: 2001:470:1f10:xx::2/64) [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
+            he_client_ipv6="${he_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
             if [[ -n "$he_client_ipv6" ]]; then
                 break
             fi
             _error_no_exit "此项必填"
         done
-        # Client IPv6: 提取纯地址（去掉 /64 等前缀长度），interfaces 中 netmask 单独写
         he_client_ipv6="${he_client_ipv6%%/*}"
         
         while true; do
-            read -rp "  请输入 HE Server IPv6 Address (例如: 2001:470:1f10:xx::1/64 或纯地址) [必填]: " he_server_ipv6
+            read -rp "  请输入 HE Server IPv6 Address (例如: 2001:470:1f10:xx::1/64 或纯地址) [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
+            he_server_ipv6="${he_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
             if [[ -n "$he_server_ipv6" ]]; then
                 break
             fi
             _error_no_exit "此项必填"
         done
-        # Server IPv6: gateway 只需纯地址
         he_server_ipv6="${he_server_ipv6%%/*}"
         
         local default_local_ipv4
-        default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || true)
-        read -rp "  请输入宿主机本地 IPv4 地址 (通常为公网 IP，若在 NAT 后则为内网 IP) [默认: $default_local_ipv4]: " he_local_ipv4
-        he_local_ipv4="${he_local_ipv4:-$default_local_ipv4}"
-        # Local IPv4: 去掉可能携带的 /32
+        default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || echo "$_HE_CUR_LOCAL_IPV4")
+        read -rp "  请输入宿主机本地 IPv4 地址 (通常为公网 IP，若在 NAT 后则为内网 IP) [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
+        he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
         he_local_ipv4="${he_local_ipv4%%/*}"
         if [[ -z "$he_local_ipv4" ]]; then
             _error_no_exit "无法自动获取本地 IPv4，且未手动输入，配置取消。"
@@ -29337,33 +29377,53 @@ _he_ipv6_lxc_install() {
             return 1
         fi
         
-        read -rp "  是否允许宿主机也使用此 IPv6 隧道访问外网? (否:仅容器可用，是:宿主机与容器均可用) [y/N]: " share_with_host
-        if [[ "$share_with_host" =~ ^[Yy] ]]; then
-            share_with_host="y"
+        local default_share="n"
+        if [ -f "$cfg" ]; then
+            if grep -q "gateway" "$cfg" 2>/dev/null; then
+                default_share="y"
+            fi
+        fi
+        read -rp "  是否允许宿主机也使用此 IPv6 隧道访问外网? (否:仅容器可用，是:宿主机与容器均可用) [y/N] (当前: $([[ "$default_share" == "y" ]] && echo "是" || echo "否")): " share_with_host
+        if [[ -n "$share_with_host" ]]; then
+            if [[ "$share_with_host" =~ ^[Yy] ]]; then
+                share_with_host="y"
+            else
+                share_with_host="n"
+            fi
         else
-            share_with_host="n"
+            share_with_host="$default_share"
         fi
         
         _info "请提供 HE 分配的 Routed IPv6 Prefix 以获得更广泛的地址空间。"
         _info "（在 HE 控制台 → Tunnel Details → Routed IPv6 Prefixes 中查看）"
         while true; do
-            read -rp "  请输入 HE Routed IPv6 Prefix (例如: 2001:470:1f11:xx::/64) [必填]: " routed_ipv6
+            read -rp "  请输入 HE Routed IPv6 Prefix (例如: 2001:470:1f11:xx::/64) [${_HE_CUR_ROUTED_IPV6:-必填}]: " routed_ipv6
+            routed_ipv6="${routed_ipv6:-$_HE_CUR_ROUTED_IPV6}"
             if [[ -n "$routed_ipv6" ]]; then
                 break
             fi
             _error_no_exit "此项必填，请于 HE 控制台获取 Routed IPv6 Prefix"
         done
-        # Routed Prefix: 规范化——保留网络部分（去掉末尾 /xx 之前的多余空格，但保留 /64）
-        # 提取前缀 base 时用 ${routed_ipv6%%/*} 或 ${routed_ipv6%%::*}；这里只做轻量规范
         routed_ipv6=$(echo "$routed_ipv6" | sed 's/[[:space:]]//g')
 
         local random_suffix
         random_suffix=$(printf '%04x' $((RANDOM % 65536)))
-        read -rp "  请输入 Routed Prefix 的子网后缀 (随机生成可避免冲突) [默认: ${random_suffix}]: " routed_suffix
-        routed_suffix="${routed_suffix:-$random_suffix}"
+        local cur_suffix=""
+        if [[ -n "$_HE_CUR_ROUTED_IPV6" && -f /etc/default/lxc-net ]]; then
+            local cur_lxc_ip
+            cur_lxc_ip=$(grep -oE 'LXC_IPV6_ADDR="[^"]+"' /etc/default/lxc-net | cut -d'"' -f2 || true)
+            if [[ -n "$cur_lxc_ip" ]]; then
+                local prefix_clean="${_HE_CUR_ROUTED_IPV6%%::*}"
+                local suffix_part="${cur_lxc_ip#"$prefix_clean"}"
+                suffix_part="${suffix_part#":"}"
+                cur_suffix="${suffix_part%%::*}"
+            fi
+        fi
+        read -rp "  请输入 Routed Prefix 的子网后缀 (随机生成可避免冲突) [${cur_suffix:-$random_suffix}]: " routed_suffix
+        routed_suffix="${routed_suffix:-${cur_suffix:-$random_suffix}}"
         routed_suffix=$(echo "$routed_suffix" | sed 's/[^a-fA-F0-9]//g' | tr '[:upper:]' '[:lower:]')
         if [[ -z "$routed_suffix" ]]; then
-            routed_suffix="$random_suffix"
+            routed_suffix="${cur_suffix:-$random_suffix}"
         fi
         _info "容器 IPv6 地址后缀: ${routed_suffix} (Host: ::1, Container: ::2)"
     fi
@@ -30369,6 +30429,7 @@ _he_ipv6_lxc_uninstall() {
     fi
     
     _info "正在清理宿主机 he-ipv6 隧道接口与配置..."
+    _he_tunnel_daemon_uninstall_silent
     _he_remove_systemd_service
     ip -6 rule del lookup 100 2>/dev/null || true
     ip -6 route flush table 100 2>/dev/null || true
@@ -30403,10 +30464,19 @@ _he_host_tunnel_menu_screen() {
         tunnel_tone="green"
     fi
     _status_kv "HE 隧道状态" "$tunnel_line" "$tunnel_tone" "12"
+
+    local daemon_line="未启用"
+    local daemon_tone="yellow"
+    if systemctl is-active he-monitor.service >/dev/null 2>&1; then
+        daemon_line="运行中"
+        daemon_tone="green"
+    fi
+    _status_kv "守护进程状态" "$daemon_line" "$daemon_tone" "12"
     _separator
     
     _menu_pair "1" "配置/启用 HE 隧道" "为宿主机建立 IPv6 默认路由隧道" "green" "2" "可用性与状态检查" "诊断宿主机 HE 隧道连通性" "green"
     _menu_pair "3" "启用/禁用 HE 隧道" "控制宿主机隧道接口开关" "green" "4" "卸载与清理" "彻底删除宿主机 HE 隧道配置" "red"
+    _menu_item "5" "隧道守护进程 (Daemon)" "检测并自动修复 HE 隧道断连/配置错误" "green"
     _separator
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
@@ -30416,12 +30486,13 @@ _he_host_tunnel_menu() {
     while true; do
         _ui_print_screen _he_host_tunnel_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-4]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-5]: " ch
         case "$ch" in
             1) _he_host_tunnel_install ;;
             2) _he_host_tunnel_status ;;
             3) _he_host_tunnel_toggle ;;
             4) _he_host_tunnel_uninstall ;;
+            5) _he_tunnel_daemon_menu ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
@@ -30439,18 +30510,33 @@ _he_host_tunnel_install() {
         return 1
     fi
     
+    local _HE_CUR_CLIENT_IPV6="" _HE_CUR_SERVER_IPV4="" _HE_CUR_LOCAL_IPV4="" _HE_CUR_SERVER_IPV6=""
+    local cfg="/etc/network/interfaces.d/he-ipv6"
+    if [ -f "$cfg" ]; then
+        _HE_CUR_CLIENT_IPV6=$(awk '/^\s*address /{print $2}' "$cfg" | head -1)
+        _HE_CUR_SERVER_IPV4=$(awk '/^\s*endpoint /{print $2}' "$cfg" | head -1)
+        _HE_CUR_LOCAL_IPV4=$(awk '/^\s*local /{print $2}' "$cfg" | head -1)
+        _HE_CUR_SERVER_IPV6=$(awk '/^\s*gateway /{print $2}' "$cfg" | head -1)
+        if [[ -z "$_HE_CUR_SERVER_IPV6" ]]; then
+            _HE_CUR_SERVER_IPV6=$(grep -oE "via\s+[^ ]+" "$cfg" | head -1 | awk '{print $2}' || true)
+        fi
+    fi
+    
     local he_server_ipv4="" he_client_ipv6="" he_server_ipv6="" he_local_ipv4=""
     
     while true; do
-        read -rp "  请输入 HE Server IPv4 (Endpoint) [必填]: " he_server_ipv4
+        read -rp "  请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]: " he_server_ipv4
+        he_server_ipv4="${he_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
         if [[ -n "$he_server_ipv4" ]]; then
             break
         fi
         _error_no_exit "此项必填"
     done
+    he_server_ipv4="${he_server_ipv4%%/*}"
     
     while true; do
-        read -rp "  请输入 HE Client IPv6 Address (例如: 2001:470:1f10:xx::2/64) [必填]: " he_client_ipv6
+        read -rp "  请输入 HE Client IPv6 Address (例如: 2001:470:1f10:xx::2/64) [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
+        he_client_ipv6="${he_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
         if [[ -n "$he_client_ipv6" ]]; then
             break
         fi
@@ -30459,7 +30545,8 @@ _he_host_tunnel_install() {
     he_client_ipv6="${he_client_ipv6%%/*}"
     
     while true; do
-        read -rp "  请输入 HE Server IPv6 Address (例如: 2001:470:1f10:xx::1/64 或纯地址) [必填]: " he_server_ipv6
+        read -rp "  请输入 HE Server IPv6 Address (例如: 2001:470:1f10:xx::1/64 或纯地址) [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
+        he_server_ipv6="${he_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
         if [[ -n "$he_server_ipv6" ]]; then
             break
         fi
@@ -30468,9 +30555,9 @@ _he_host_tunnel_install() {
     he_server_ipv6="${he_server_ipv6%%/*}"
     
     local default_local_ipv4
-    default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || true)
-    read -rp "  请输入宿主机本地 IPv4 地址 (通常为公网 IP，若在 NAT 后则为内网 IP) [默认: $default_local_ipv4]: " he_local_ipv4
-    he_local_ipv4="${he_local_ipv4:-$default_local_ipv4}"
+    default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || echo "$_HE_CUR_LOCAL_IPV4")
+    read -rp "  请输入宿主机本地 IPv4 地址 (通常为公网 IP，若在 NAT 后则为内网 IP) [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
+    he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
     he_local_ipv4="${he_local_ipv4%%/*}"
     if [[ -z "$he_local_ipv4" ]]; then
         _error_no_exit "无法自动获取本地 IPv4，且未手动输入，配置取消。"
@@ -30484,6 +30571,7 @@ _he_host_tunnel_install() {
         read -rp "  是否删除并重新配置该接口? [y/N]: " overwrite_tunnel
         if [[ "$overwrite_tunnel" =~ ^[Yy] ]]; then
             _info "正在清理旧的 he-ipv6 接口..."
+            _he_tunnel_daemon_uninstall_silent
             _he_remove_systemd_service
             ip link set he-ipv6 down 2>/dev/null || true
             ip tunnel del he-ipv6 2>/dev/null || true
@@ -30634,6 +30722,7 @@ _he_host_tunnel_uninstall() {
     read -rp "  确定要完全删除宿主机的 HE 隧道配置与接口吗? [y/N]: " action
     if [[ "$action" =~ ^[Yy] ]]; then
         _info "正在停止并删除 he-ipv6 隧道接口..."
+        _he_tunnel_daemon_uninstall_silent
         _he_remove_systemd_service
         ip link set he-ipv6 down 2>/dev/null || true
         ip tunnel del he-ipv6 2>/dev/null || true
@@ -30645,6 +30734,168 @@ _he_host_tunnel_uninstall() {
     else
         _info "操作已取消。"
     fi
+    _press_any_key
+}
+
+_he_tunnel_daemon_uninstall_silent() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop he-monitor.service >/dev/null 2>&1 || true
+        systemctl disable he-monitor.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/he-monitor.service
+        systemctl daemon-reload
+    fi
+    rm -f /usr/local/bin/he-monitor.sh
+}
+
+_he_tunnel_daemon_menu_screen() {
+    _header "HE 隧道守护进程管理"
+    
+    local daemon_line="未安装/未运行"
+    local daemon_tone="yellow"
+    if systemctl is-active he-monitor.service >/dev/null 2>&1; then
+        daemon_line="运行中"
+        daemon_tone="green"
+    elif systemctl is-enabled he-monitor.service >/dev/null 2>&1; then
+        daemon_line="已启用但未运行"
+        daemon_tone="cyan"
+    fi
+    _status_kv "守护进程状态" "$daemon_line" "$daemon_tone" "12"
+    _separator
+    
+    _menu_pair "1" "启用/安装守护进程" "开始自动监控 HE 隧道状态并自动修复" "green" "2" "禁用/卸载守护进程" "停止自动监控 HE 隧道" "red"
+    _menu_item "3" "查看守护进程日志" "显示最近的监控与修复日志" "green"
+    _separator
+    _menu_item "0" "返回上级菜单" "" "red"
+    _separator
+}
+
+_he_tunnel_daemon_menu() {
+    while true; do
+        _ui_print_screen _he_tunnel_daemon_menu_screen
+        local ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-3]: " ch
+        case "$ch" in
+            1) _he_tunnel_daemon_install ;;
+            2) _he_tunnel_daemon_uninstall ;;
+            3)
+                _info "正在查看最近 30 行守护进程日志 (按 Ctrl+C 退出):"
+                journalctl -u he-monitor.service -n 30 -f || true
+                _press_any_key
+                ;;
+            0) return ;;
+            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+        esac
+    done
+}
+
+_he_tunnel_daemon_install() {
+    _header "安装/启用 HE 隧道守护进程"
+    
+    if ! command -v systemctl >/dev/null 2>&1; then
+        _error_no_exit "此系统不支持 systemd，无法启用守护进程。"
+        _press_any_key
+        return 1
+    fi
+    
+    _info "正在写入守护进程脚本..."
+    cat > /usr/local/bin/he-monitor.sh <<'EOF'
+#!/usr/bin/env bash
+
+# HE IPv6 Monitor Daemon
+PING_TARGETS=("2606:4700:4700::1111" "2001:4860:4860::8888")
+CHECK_INTERVAL=30
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
+}
+
+check_once() {
+    if ! ip link show he-ipv6 >/dev/null 2>&1; then
+        log "Error: he-ipv6 interface does not exist."
+        return 1
+    fi
+
+    local state
+    state=$(ip link show he-ipv6 | grep -oE "state [A-Z]+" | awk '{print $2}' || echo "DOWN")
+    if [[ "$state" != "UP" && "$state" != "UNKNOWN" ]]; then
+        log "Warning: he-ipv6 interface state is $state, not UP."
+        return 2
+    fi
+
+    local success=0
+    local target
+    for target in "${PING_TARGETS[@]}"; do
+        if ping6 -c 2 -W 3 "$target" >/dev/null 2>&1; then
+            success=1
+            break
+        fi
+    done
+
+    if [ "$success" -eq 0 ]; then
+        local gateway_ip
+        gateway_ip=$(ip -6 route show | grep default | grep he-ipv6 | awk '{print $3}' | head -n1 || true)
+        if [[ -n "$gateway_ip" ]]; then
+            if ping6 -c 2 -W 3 "$gateway_ip" >/dev/null 2>&1; then
+                success=1
+            fi
+        fi
+    fi
+
+    if [ "$success" -eq 0 ]; then
+        log "Error: HE IPv6 tunnel ping connectivity check failed."
+        return 3
+    fi
+
+    return 0
+}
+
+log "HE IPv6 tunnel monitor started."
+
+while true; do
+    if ! check_once; then
+        log "Attempting to restart he-ipv6 service..."
+        if systemctl list-unit-files he-ipv6.service >/dev/null 2>&1; then
+            systemctl restart he-ipv6.service
+        else
+            ifdown he-ipv6 >/dev/null 2>&1 || true
+            ifup he-ipv6 >/dev/null 2>&1 || true
+        fi
+        sleep 15
+    fi
+    sleep "$CHECK_INTERVAL"
+done
+EOF
+    chmod +x /usr/local/bin/he-monitor.sh
+    
+    _info "正在写入 systemd 服务文件..."
+    cat > /etc/systemd/system/he-monitor.service <<EOF
+[Unit]
+Description=HE IPv6 Tunnel Monitor Daemon
+After=network.target he-ipv6.service
+Wants=he-ipv6.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/he-monitor.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable he-monitor.service >/dev/null 2>&1 || true
+    systemctl start he-monitor.service >/dev/null 2>&1 || true
+    
+    _success "HE 隧道守护进程已安装并启动。"
+    _press_any_key
+}
+
+_he_tunnel_daemon_uninstall() {
+    _header "卸载/禁用 HE 隧道守护进程"
+    _he_tunnel_daemon_uninstall_silent
+    _success "HE 隧道守护进程已卸载。"
     _press_any_key
 }
 
