@@ -651,6 +651,35 @@ _is_valid_port() {
     [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
+_is_ipv4() {
+    local ip="$1"
+    ip="${ip%%/*}"
+    if [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        local i
+        for i in 1 2 3 4; do
+            if (( ${BASH_REMATCH[i]} > 255 )); then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    return 1
+}
+
+_is_ipv6() {
+    local ip="$1"
+    ip="${ip%%/*}"
+    if [[ ! "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+        return 1
+    fi
+    local colons
+    colons="${ip//[^:]/}"
+    if [ ${#colons} -lt 2 ]; then
+        return 1
+    fi
+    return 0
+}
+
 _is_64bit() {
     [ "$(getconf WORD_BIT)" = '32' ] && [ "$(getconf LONG_BIT)" = '64' ]
 }
@@ -28905,6 +28934,46 @@ _reset_lxc_net_ipv6_config() {
     _update_lxc_net_config "LXC_IPV6_NAT" "false"
 }
 
+_select_lxc_container() {
+    local lxc_list=()
+    if command -v lxc-ls >/dev/null 2>&1; then
+        while IFS= read -r cname; do
+            cname=$(echo "$cname" | xargs)
+            [[ -z "$cname" ]] && continue
+            lxc_list+=("$cname")
+        done < <(lxc-ls -1 2>/dev/null || lxc-ls 2>/dev/null | tr ' ' '\n' || true)
+    fi
+
+    if [ "${#lxc_list[@]}" -eq 0 ]; then
+        return 1
+    fi
+
+    _info "可用 LXC 容器列表："
+    local i=1
+    for cname in "${lxc_list[@]}"; do
+        local cstate
+        cstate=$(lxc-info -n "$cname" -s 2>/dev/null | awk '{print $2}' || echo "UNKNOWN")
+        local ctone="yellow"
+        [[ "$cstate" == "RUNNING" ]] && ctone="green"
+        [[ "$cstate" == "STOPPED" ]] && ctone="dim"
+        _status_kv "[$i] $cname" "$cstate" "$ctone" "20"
+        i=$((i+1))
+    done
+    echo ""
+
+    local choice
+    while true; do
+        read -rp "  请选择容器序号 [1-${#lxc_list[@]}, 默认: 1]: " choice
+        choice="${choice:-1}"
+        choice=$(echo "$choice" | xargs)
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#lxc_list[@]}" ]; then
+            echo "${lxc_list[$((choice-1))]}"
+            return 0
+        fi
+        _error_no_exit "无效序号，请重新输入"
+    done
+}
+
 _he_ipv6_lxc_menu_screen() {
     _header "LXC 容器(支持HE隧道)"
 
@@ -29128,32 +29197,63 @@ _he_tunnel_edit_impl() {
     # 逐项重新输入（回车保留原值）
     local new_server_ipv4 new_client_ipv6 new_server_ipv6 new_local_ipv4 new_routed_ipv6
 
-    read -rp "  HE Server IPv4 [${_HE_CUR_SERVER_IPV4}]: " new_server_ipv4
-    new_server_ipv4="${new_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
-    # Server IPv4: 去掉可能的 /32
-    new_server_ipv4="${new_server_ipv4%%/*}"
+    while true; do
+        read -rp "  HE Server IPv4 [${_HE_CUR_SERVER_IPV4}]: " new_server_ipv4
+        new_server_ipv4="${new_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
+        new_server_ipv4="${new_server_ipv4%%/*}"
+        if _is_ipv4 "$new_server_ipv4"; then
+            break
+        fi
+        _error_no_exit "格式错误：请输入有效的 IPv4 地址"
+    done
 
-    read -rp "  HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6}] (可带 /64): " new_client_ipv6
-    new_client_ipv6="${new_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
-    # Client IPv6: interfaces 里 address 行单独写 netmask，只取纯地址
+    while true; do
+        read -rp "  HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6}] (可带 /64): " new_client_ipv6
+        new_client_ipv6="${new_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
+        local clean_ipv6="${new_client_ipv6%%/*}"
+        if _is_ipv6 "$clean_ipv6"; then
+            break
+        fi
+        _error_no_exit "格式错误：请输入有效的 IPv6 地址"
+    done
     new_client_ipv6="${new_client_ipv6%%/*}"
 
-    read -rp "  HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6}] (可带 /64): " new_server_ipv6
-    new_server_ipv6="${new_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
-    # Server IPv6: gateway 只需纯地址
+    while true; do
+        read -rp "  HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6}] (可带 /64): " new_server_ipv6
+        new_server_ipv6="${new_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
+        local clean_ipv6="${new_server_ipv6%%/*}"
+        if _is_ipv6 "$clean_ipv6"; then
+            break
+        fi
+        _error_no_exit "格式错误：请输入有效的 IPv6 地址"
+    done
     new_server_ipv6="${new_server_ipv6%%/*}"
 
     local default_local_ipv4
     default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || echo "$_HE_CUR_LOCAL_IPV4")
-    read -rp "  宿主机本地 IPv4 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " new_local_ipv4
-    new_local_ipv4="${new_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
-    # Local IPv4: 去掉可能的 /32
-    new_local_ipv4="${new_local_ipv4%%/*}"
+    while true; do
+        read -rp "  宿主机本地 IPv4 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " new_local_ipv4
+        new_local_ipv4="${new_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
+        new_local_ipv4="${new_local_ipv4%%/*}"
+        if _is_ipv4 "$new_local_ipv4"; then
+            break
+        fi
+        _error_no_exit "格式错误：请输入有效的 IPv4 地址"
+    done
 
-    read -rp "  HE Routed IPv6 Prefix (例如: 2001:470:1f11:xx::/64) [${_HE_CUR_ROUTED_IPV6:-回车跳过}]: " new_routed_ipv6
-    new_routed_ipv6="${new_routed_ipv6:-$_HE_CUR_ROUTED_IPV6}"
-    # Routed Prefix: 去除多余空格，保留 /64 供后续前缀提取
-    new_routed_ipv6=$(echo "$new_routed_ipv6" | sed 's/[[:space:]]//g')
+    while true; do
+        read -rp "  HE Routed IPv6 Prefix [${_HE_CUR_ROUTED_IPV6:-回车跳过}]: " new_routed_ipv6
+        new_routed_ipv6="${new_routed_ipv6:-$_HE_CUR_ROUTED_IPV6}"
+        new_routed_ipv6=$(echo "$new_routed_ipv6" | sed 's/[[:space:]]//g')
+        if [[ -z "$new_routed_ipv6" ]]; then
+            break
+        fi
+        local clean_prefix="${new_routed_ipv6%%/*}"
+        if _is_ipv6 "$clean_prefix"; then
+            break
+        fi
+        _error_no_exit "格式错误：请输入有效的 Routed IPv6 Prefix"
+    done
 
     # 读取旧的子网后缀（如果存在）
     local cur_suffix=""
@@ -29452,6 +29552,10 @@ EOF
         _warn "无法 ping6 通 HE 网关 ${new_server_ipv6}，请检查 Server IPv4 端点与协议号 41 放行状态。"
     fi
 
+    if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active he-monitor.service >/dev/null 2>&1; then
+        _info "【提醒】HE 隧道配置已修改。建议启用「隧道守护进程 (Daemon)」以自动监控和修复网络断连。"
+    fi
+
     _press_any_key
 }
 
@@ -29549,43 +29653,46 @@ _he_ipv6_lxc_install_impl() {
         while true; do
             read -rp "  请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]: " he_server_ipv4
             he_server_ipv4="${he_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
-            if [[ -n "$he_server_ipv4" ]]; then
+            he_server_ipv4="${he_server_ipv4%%/*}"
+            if _is_ipv4 "$he_server_ipv4"; then
                 break
             fi
-            _error_no_exit "此项必填"
+            _error_no_exit "格式错误：请输入有效的 IPv4 地址"
         done
-        he_server_ipv4="${he_server_ipv4%%/*}"
         
         while true; do
-            read -rp "  请输入 HE Client IPv6 Address (例如: 2001:470:1f10:xx::2/64) [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
+            read -rp "  请输入 HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
             he_client_ipv6="${he_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
-            if [[ -n "$he_client_ipv6" ]]; then
+            local clean_ipv6="${he_client_ipv6%%/*}"
+            if _is_ipv6 "$clean_ipv6"; then
                 break
             fi
-            _error_no_exit "此项必填"
+            _error_no_exit "格式错误：请输入有效的 IPv6 地址"
         done
         he_client_ipv6="${he_client_ipv6%%/*}"
         
         while true; do
-            read -rp "  请输入 HE Server IPv6 Address (例如: 2001:470:1f10:xx::1/64 或纯地址) [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
+            read -rp "  请输入 HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
             he_server_ipv6="${he_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
-            if [[ -n "$he_server_ipv6" ]]; then
+            local clean_ipv6="${he_server_ipv6%%/*}"
+            if _is_ipv6 "$clean_ipv6"; then
                 break
             fi
-            _error_no_exit "此项必填"
+            _error_no_exit "格式错误：请输入有效的 IPv6 地址"
         done
         he_server_ipv6="${he_server_ipv6%%/*}"
         
         local default_local_ipv4
         default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || echo "$_HE_CUR_LOCAL_IPV4")
-        read -rp "  请输入宿主机本地 IPv4 地址 (通常为公网 IP，若在 NAT 后则为内网 IP) [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
-        he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
-        he_local_ipv4="${he_local_ipv4%%/*}"
-        if [[ -z "$he_local_ipv4" ]]; then
-            _error_no_exit "无法自动获取本地 IPv4，且未手动输入，配置取消。"
-            _press_any_key
-            return 1
-        fi
+        while true; do
+            read -rp "  请输入本地 IPv4 地址 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
+            he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
+            he_local_ipv4="${he_local_ipv4%%/*}"
+            if _is_ipv4 "$he_local_ipv4"; then
+                break
+            fi
+            _error_no_exit "格式错误：请输入有效的 IPv4 地址"
+        done
         
         local default_share="n"
         if [ -f "$cfg" ]; then
@@ -29593,7 +29700,7 @@ _he_ipv6_lxc_install_impl() {
                 default_share="y"
             fi
         fi
-        read -rp "  是否允许宿主机也使用此 IPv6 隧道访问外网? (否:仅容器可用，是:宿主机与容器均可用) [y/N] (当前: $([[ "$default_share" == "y" ]] && echo "是" || echo "否")): " share_with_host
+        read -rp "  是否允许宿主机共享此隧道访问外网? [y/N] (当前: $([[ "$default_share" == "y" ]] && echo "是" || echo "否")): " share_with_host
         if [[ -n "$share_with_host" ]]; then
             if [[ "$share_with_host" =~ ^[Yy] ]]; then
                 share_with_host="y"
@@ -29604,17 +29711,16 @@ _he_ipv6_lxc_install_impl() {
             share_with_host="$default_share"
         fi
         
-        _info "请提供 HE 分配的 Routed IPv6 Prefix 以获得更广泛的地址空间。"
-        _info "（在 HE 控制台 → Tunnel Details → Routed IPv6 Prefixes 中查看）"
         while true; do
-            read -rp "  请输入 HE Routed IPv6 Prefix (例如: 2001:470:1f11:xx::/64) [${_HE_CUR_ROUTED_IPV6:-必填}]: " routed_ipv6
+            read -rp "  请输入 HE Routed IPv6 Prefix (e.g. 2001:470:1f11:xx::/64) [${_HE_CUR_ROUTED_IPV6:-必填}]: " routed_ipv6
             routed_ipv6="${routed_ipv6:-$_HE_CUR_ROUTED_IPV6}"
-            if [[ -n "$routed_ipv6" ]]; then
+            routed_ipv6=$(echo "$routed_ipv6" | sed 's/[[:space:]]//g')
+            local clean_prefix="${routed_ipv6%%/*}"
+            if _is_ipv6 "$clean_prefix"; then
                 break
             fi
-            _error_no_exit "此项必填，请于 HE 控制台获取 Routed IPv6 Prefix"
+            _error_no_exit "格式错误：请输入有效的 Routed IPv6 Prefix"
         done
-        routed_ipv6=$(echo "$routed_ipv6" | sed 's/[[:space:]]//g')
 
         local random_suffix
         random_suffix=$(printf '%04x' $((RANDOM % 65536)))
@@ -29629,7 +29735,7 @@ _he_ipv6_lxc_install_impl() {
                 cur_suffix="${suffix_part%%::*}"
             fi
         fi
-        read -rp "  请输入 Routed Prefix 的子网后缀 (随机生成可避免冲突) [${cur_suffix:-$random_suffix}]: " routed_suffix
+        read -rp "  请输入 Routed Prefix 子网后缀 [${cur_suffix:-$random_suffix}]: " routed_suffix
         routed_suffix="${routed_suffix:-${cur_suffix:-$random_suffix}}"
         routed_suffix=$(echo "$routed_suffix" | sed 's/[^a-fA-F0-9]//g' | tr '[:upper:]' '[:lower:]')
         if [[ -z "$routed_suffix" ]]; then
@@ -30121,6 +30227,12 @@ EOF
             _warn "容器内无法访问外网 IPv4，请检查宿主机 NAT 规则与 lxc-net 状态。"
         fi
     fi
+
+    if [[ "$configure_he" == "y" ]]; then
+        if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active he-monitor.service >/dev/null 2>&1; then
+            _info "【提醒】HE 隧道已配置。建议在菜单中选择「8. 隧道守护进程」以开启自动监控和断网自动修复。"
+        fi
+    fi
     
     _press_any_key
 }
@@ -30184,9 +30296,11 @@ _lxc_port_forward_add() {
     _header "添加端口转发"
     
     local container_name
-    read -rp "  请输入 LXC 容器名称 [默认: warp-container]: " container_name
-    container_name="${container_name:-warp-container}"
-    container_name=$(echo "$container_name" | xargs)
+    if ! container_name=$(_select_lxc_container); then
+        _error_no_exit "当前系统中未检测到任何 LXC 容器。"
+        _press_any_key
+        return
+    fi
     
     local container_ip=""
     if lxc-info -n "$container_name" -i >/dev/null 2>&1; then
@@ -30290,12 +30404,8 @@ _he_ipv6_lxc_status_check() {
     _header "可用性与状态检查"
     
     local container_name
-    read -rp "  请输入 LXC 容器名称 [默认: warp-container]: " container_name
-    container_name="${container_name:-warp-container}"
-    container_name=$(echo "$container_name" | xargs)
-    
-    if ! lxc-info -n "$container_name" >/dev/null 2>&1; then
-        _error_no_exit "LXC 容器 $container_name 不存在。"
+    if ! container_name=$(_select_lxc_container); then
+        _error_no_exit "当前系统中未检测到任何 LXC 容器。"
         _press_any_key
         return
     fi
@@ -30407,12 +30517,8 @@ _he_ipv6_lxc_power_control() {
     _header "启动/停止容器"
     
     local container_name
-    read -rp "  请输入 LXC 容器名称 [默认: warp-container]: " container_name
-    container_name="${container_name:-warp-container}"
-    container_name=$(echo "$container_name" | xargs)
-    
-    if ! lxc-info -n "$container_name" >/dev/null 2>&1; then
-        _error_no_exit "LXC 容器 $container_name 不存在。"
+    if ! container_name=$(_select_lxc_container); then
+        _error_no_exit "当前系统中未检测到 any LXC 容器。"
         _press_any_key
         return
     fi
@@ -30471,48 +30577,9 @@ _he_ipv6_lxc_power_control() {
 _lxc_attach() {
     _header "快速进入容器终端"
     
-    local lxc_list=()
-    if command -v lxc-ls >/dev/null 2>&1; then
-        while IFS= read -r cname; do
-            cname=$(echo "$cname" | xargs)
-            [[ -z "$cname" ]] && continue
-            lxc_list+=("$cname")
-        done < <(lxc-ls -1 2>/dev/null || lxc-ls 2>/dev/null | tr ' ' '\n' || true)
-    fi
-
-    if [ "${#lxc_list[@]}" -eq 0 ]; then
+    local target_name
+    if ! target_name=$(_select_lxc_container); then
         _error_no_exit "当前系统中未检测到任何 LXC 容器。"
-        _press_any_key
-        return 1
-    fi
-
-    _info "可用 LXC 容器列表："
-    local i=1
-    for cname in "${lxc_list[@]}"; do
-        local cstate
-        cstate=$(lxc-info -n "$cname" -s 2>/dev/null | awk '{print $2}' || echo "UNKNOWN")
-        local ctone="yellow"
-        [[ "$cstate" == "RUNNING" ]] && ctone="green"
-        [[ "$cstate" == "STOPPED" ]] && ctone="dim"
-        _status_kv "[$i] $cname" "$cstate" "$ctone" "20"
-        i=$((i+1))
-    done
-    echo ""
-
-    local choice
-    read -rp "  请输入要进入的容器序号或名称 [默认: 1]: " choice
-    choice="${choice:-1}"
-    choice=$(echo "$choice" | xargs)
-
-    local target_name=""
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -le "${#lxc_list[@]}" ] && [ "$choice" -gt 0 ]; then
-        target_name="${lxc_list[$((choice-1))]}"
-    else
-        target_name="$choice"
-    fi
-
-    if ! lxc-info -n "$target_name" >/dev/null 2>&1; then
-        _error_no_exit "LXC 容器 $target_name 不存在。"
         _press_any_key
         return 1
     fi
@@ -30561,38 +30628,9 @@ _lxc_attach() {
 _he_ipv6_lxc_uninstall() {
     _header "卸载与清理"
 
-    local lxc_list=()
-    if command -v lxc-ls >/dev/null 2>&1; then
-        while IFS= read -r cname; do
-            cname=$(echo "$cname" | xargs)
-            [[ -z "$cname" ]] && continue
-            lxc_list+=("$cname")
-        done < <(lxc-ls -1 2>/dev/null || lxc-ls 2>/dev/null | tr ' ' '\n' || true)
-    fi
-
-    if [ "${#lxc_list[@]}" -eq 0 ]; then
-        _info "当前没有任何 LXC 容器，无需卸载。"
-        _press_any_key
-        return
-    fi
-
-    _info "当前存在的 LXC 容器："
-    local i=1
-    for cname in "${lxc_list[@]}"; do
-        local c_status="停止"
-        lxc-info -n "$cname" -s 2>/dev/null | grep -q "RUNNING" && c_status="运行中"
-        echo -e "      ${GREEN}${i}.${PLAIN} ${cname} (${c_status})"
-        i=$((i + 1))
-    done
-    echo ""
-
     local container_name
-    read -rp "  请输入要删除的容器名称 [默认: ${lxc_list[0]}]: " container_name
-    container_name="${container_name:-${lxc_list[0]}}"
-    container_name=$(echo "$container_name" | xargs)
-
-    if ! lxc-info -n "$container_name" >/dev/null 2>&1; then
-        _error_no_exit "LXC 容器 $container_name 不存在。"
+    if ! container_name=$(_select_lxc_container); then
+        _info "当前没有任何 LXC 容器，无需卸载。"
         _press_any_key
         return
     fi
@@ -30737,38 +30775,46 @@ _he_host_tunnel_install() {
     while true; do
         read -rp "  请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]: " he_server_ipv4
         he_server_ipv4="${he_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
-        if [[ -n "$he_server_ipv4" ]]; then
+        he_server_ipv4="${he_server_ipv4%%/*}"
+        if _is_ipv4 "$he_server_ipv4"; then
             break
         fi
-        _error_no_exit "此项必填"
+        _error_no_exit "格式错误：请输入有效的 IPv4 地址"
     done
-    he_server_ipv4="${he_server_ipv4%%/*}"
     
     while true; do
-        read -rp "  请输入 HE Client IPv6 Address (例如: 2001:470:1f10:xx::2/64) [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
+        read -rp "  请输入 HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
         he_client_ipv6="${he_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
-        if [[ -n "$he_client_ipv6" ]]; then
+        local clean_ipv6="${he_client_ipv6%%/*}"
+        if _is_ipv6 "$clean_ipv6"; then
             break
         fi
-        _error_no_exit "此项必填"
+        _error_no_exit "格式错误：请输入有效的 IPv6 地址"
     done
     he_client_ipv6="${he_client_ipv6%%/*}"
     
     while true; do
-        read -rp "  请输入 HE Server IPv6 Address (例如: 2001:470:1f10:xx::1/64 或纯地址) [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
+        read -rp "  请输入 HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
         he_server_ipv6="${he_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
-        if [[ -n "$he_server_ipv6" ]]; then
+        local clean_ipv6="${he_server_ipv6%%/*}"
+        if _is_ipv6 "$clean_ipv6"; then
             break
         fi
-        _error_no_exit "此项必填"
+        _error_no_exit "格式错误：请输入有效的 IPv6 地址"
     done
     he_server_ipv6="${he_server_ipv6%%/*}"
     
     local default_local_ipv4
     default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || echo "$_HE_CUR_LOCAL_IPV4")
-    read -rp "  请输入宿主机本地 IPv4 地址 (通常为公网 IP，若在 NAT 后则为内网 IP) [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
-    he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
-    he_local_ipv4="${he_local_ipv4%%/*}"
+    while true; do
+        read -rp "  请输入本地 IPv4 地址 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
+        he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
+        he_local_ipv4="${he_local_ipv4%%/*}"
+        if _is_ipv4 "$he_local_ipv4"; then
+            break
+        fi
+        _error_no_exit "格式错误：请输入有效的 IPv4 地址"
+    done
     if [[ -z "$he_local_ipv4" ]]; then
         _error_no_exit "无法自动获取本地 IPv4，且未手动输入，配置取消。"
         _press_any_key
@@ -30840,13 +30886,17 @@ EOF
         fi
     fi
     
-    _info "正在测试宿主机隧道连通性 (ping6 ${he_server_ipv6})..."
+    _info "正在测试宿主机隧道连通性 (ping6 ${he_server_ipv6})...."
     if ping6 -c 3 -W 3 "${he_server_ipv6}" >/dev/null 2>&1; then
         _success "宿主机 HE IPv6 隧道连通性测试成功！"
     else
         _warn "宿主机无法 ping6 通 HE 网关 ${he_server_ipv6}，请检查安全组或本地 IPv4 是否放行协议号 41。"
     fi
     
+    if command -v systemctl >/dev/null 2>&1 && ! systemctl is-active he-monitor.service >/dev/null 2>&1; then
+        _info "【提醒】HE 隧道已配置。建议在菜单中选择「5. 隧道守护进程」以开启自动监控和断网自动修复。"
+    fi
+
     _press_any_key
 }
 
