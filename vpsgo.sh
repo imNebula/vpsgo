@@ -58,7 +58,7 @@ _MIHOMO_AUTO_UPDATE_SCRIPT="/usr/local/bin/vpsgo-mihomo-auto-update.sh"
 _MIHOMO_AUTO_UPDATE_CRON="/etc/cron.d/vpsgo-mihomo-auto-update"
 _MIHOMO_AUTO_UPDATE_LOG="/var/log/vpsgo-mihomo-auto-update.log"
 _MIHOMO_TRACK="stable"
-_GITHUB_PROXY_DEFAULT_BASE="https://gh-proxy.org"
+_GITHUB_PROXY_DEFAULT_BASE="https://ghproxy.net"
 _GITHUB_PROXY_ENABLED="0"
 _GITHUB_PROXY_BASE="$_GITHUB_PROXY_DEFAULT_BASE"
 
@@ -117,7 +117,8 @@ _load_runtime_config() {
     file_enabled=$(_config_read_value "VPSGO_GITHUB_PROXY" "0")
     file_base=$(_config_read_value "VPSGO_GITHUB_PROXY_BASE" "$_GITHUB_PROXY_DEFAULT_BASE")
     file_track=$(_config_read_value "VPSGO_MIHOMO_TRACK" "stable")
-    if [[ "$file_base" == "https://gh-proxy.com" ]] || [[ "$file_base" == "gh-proxy.com" ]]; then
+    if [[ "$file_base" == "https://gh-proxy.com" ]] || [[ "$file_base" == "gh-proxy.com" ]] || \
+       [[ "$file_base" == "https://gh-proxy.org" ]] || [[ "$file_base" == "gh-proxy.org" ]]; then
         file_base="$_GITHUB_PROXY_DEFAULT_BASE"
     fi
 

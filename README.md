@@ -41,12 +41,12 @@ vpsgo
 
 ```bash
 # 国内网络可在上面的命令前加这一段
-export VPSGO_URL="https://gh-proxy.org/https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
+export VPSGO_URL="https://ghproxy.net/https://raw.githubusercontent.com/imNebula/vpsgo/refs/heads/main/vpsgo.sh"
 ```
 
 安装命令会自动补齐 `bash` 和下载工具（优先 `curl`，已有 `wget` 也可运行），脚本首次启动会自安装到 `/usr/local/bin/vpsgo`。Alpine 默认没有 `sudo`，直接用 root 执行即可。
 
-首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://gh-proxy.org/`，会自动作用到脚本自更新、GitHub API、Mihomo、Realm、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载。
+首页支持 `g` 键一键切换 GitHub 代理，默认使用 `https://ghproxy.net/`，会自动作用到脚本自更新、GitHub API、Mihomo、Realm、Shadowsocks-Rust、Akile DNS 等 GitHub 相关下载。
 
 如果出现 `-ash: vpsgo: Permission denied`，可执行：
 
@@ -102,7 +102,7 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 
 | 快捷键 | 功能 |
 |--------|------|
-| g | GitHub 代理开关（gh-proxy.org） |
+| g | GitHub 代理开关（ghproxy.net） |
 | u | 从 GitHub 更新到最新版 |
 | x | 卸载 VPSGo |
 | 0 | 退出脚本 |
