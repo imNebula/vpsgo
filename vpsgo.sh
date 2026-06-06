@@ -5757,6 +5757,27 @@ _mihomoconf_gen_vless_grpc_link() {
     echo "vless://${uuid}@${server}:${port}${query}#${encoded_name}"
 }
 
+_mihomoconf_gen_vless_enc_link() {
+    local server="$1" port="$2" uuid="$3" name="$4" encryption="$5"
+    local encoded_name query=""
+    local -a params=()
+
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    if [[ -n "$encryption" && "$encryption" != "none" ]]; then
+        params+=("encryption=$(_mihomoconf_urlencode "$encryption")")
+    else
+        params+=("encryption=none")
+    fi
+    params+=("type=tcp")
+    params+=("security=none")
+
+    if (( ${#params[@]} > 0 )); then
+        local IFS='&'
+        query="?${params[*]}"
+    fi
+    echo "vless://${uuid}@${server}:${port}${query}#${encoded_name}"
+}
+
 _mihomoconf_gen_vmess_link() {
     local server="$1" port="$2" uuid="$3" name="$4" net="${5:-tcp}" path="${6:-}" tls="${7:-false}" host="${8:-}"
     local tls_str=""
@@ -5937,6 +5958,8 @@ _mihomoconf_has_listener_type() {
                     resolved_type = "vless-ws"
                 } else if (is_grpc) {
                     resolved_type = "vless-grpc"
+                } else if (is_enc) {
+                    resolved_type = "vless-enc"
                 } else {
                     resolved_type = "vless"
                 }
@@ -5963,6 +5986,7 @@ _mihomoconf_has_listener_type() {
             in_item = 0
             is_ws = 0
             is_grpc = 0
+            is_enc = 0
             type_val = ""
         }
         BEGIN {
@@ -5971,6 +5995,7 @@ _mihomoconf_has_listener_type() {
             found=0
             is_ws=0
             is_grpc=0
+            is_enc=0
             type_val=""
         }
         /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
@@ -5990,8 +6015,11 @@ _mihomoconf_has_listener_type() {
             if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
             }
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*(grpc|vless-enc)/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
                 is_grpc=1
+            }
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-vless-type:[[:space:]]*vless-enc/) {
+                is_enc=1
             }
             if ($0 ~ /^    type:/) {
                 line=$0
@@ -6030,6 +6058,8 @@ _mihomoconf_list_listeners() {
                     resolved_type = "vless-ws"
                 } else if (is_grpc) {
                     resolved_type = "vless-grpc"
+                } else if (is_enc) {
+                    resolved_type = "vless-enc"
                 } else {
                     resolved_type = "vless"
                 }
@@ -6060,6 +6090,7 @@ _mihomoconf_list_listeners() {
             in_item = 0
             is_ws = 0
             is_grpc = 0
+            is_enc = 0
             type_val = ""
             name = ""
             tag = ""
@@ -6070,6 +6101,7 @@ _mihomoconf_list_listeners() {
             in_item=0
             is_ws=0
             is_grpc=0
+            is_enc=0
             type_val=""
             name=""
             tag=""
@@ -6095,8 +6127,11 @@ _mihomoconf_list_listeners() {
             if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
             }
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*(grpc|vless-enc)/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
                 is_grpc=1
+            }
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-vless-type:[[:space:]]*vless-enc/) {
+                is_enc=1
             }
             if ($0 ~ /^    type:/) {
                 line=$0
@@ -6147,6 +6182,8 @@ _mihomoconf_remove_listeners_by_type() {
                     resolved_type = "vless-ws"
                 } else if (is_grpc) {
                     resolved_type = "vless-grpc"
+                } else if (is_enc) {
+                    resolved_type = "vless-enc"
                 } else {
                     resolved_type = "vless"
                 }
@@ -6175,6 +6212,7 @@ _mihomoconf_remove_listeners_by_type() {
             }
             item_buf=""
             in_item=0
+            is_enc=0
         }
         BEGIN {
             in_listeners=0
@@ -6183,6 +6221,7 @@ _mihomoconf_remove_listeners_by_type() {
             item_buf=""
             is_ws=0
             is_grpc=0
+            is_enc=0
             type_val=""
         }
         /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
@@ -6207,6 +6246,7 @@ _mihomoconf_remove_listeners_by_type() {
             item_buf=$0 "\n"
             is_ws=0
             is_grpc=0
+            is_enc=0
             type_val=""
             next
         }
@@ -6215,8 +6255,11 @@ _mihomoconf_remove_listeners_by_type() {
             if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*ws/) {
                 is_ws=1
             }
-            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*(grpc|vless-enc)/) {
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-(vless|vmess|trojan)-type:[[:space:]]*grpc/) {
                 is_grpc=1
+            }
+            if ($0 ~ /^[[:space:]]+#[[:space:]]*vpsgo-vless-type:[[:space:]]*vless-enc/) {
+                is_enc=1
             }
             if ($0 ~ /^    type:/) {
                 line=$0
@@ -6280,8 +6323,10 @@ _mihomoconf_read_listener_rows() {
             if (type == "vless") {
                 if (vless_type == "ws") {
                     actual_type = "vless-ws"
-                } else if (vless_type == "grpc" || vless_type == "vless-enc") {
+                } else if (vless_type == "grpc") {
                     actual_type = "vless-grpc"
+                } else if (vless_type == "vless-enc") {
+                    actual_type = "vless-enc"
                 }
             } else if (type == "vmess") {
                 if (vless_type == "ws") {
@@ -8286,17 +8331,17 @@ _mihomoconf_setup() {
     local WRITE_MODE="new"
     local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n" ENABLE_TUIC="n" ENABLE_SOCKS="n" ENABLE_VLESS_WS="n"
     local ENABLE_VMESS="n" ENABLE_VMESS_WS="n" ENABLE_VMESS_GRPC="n"
-    local ENABLE_VLESS_GRPC="n" ENABLE_VLESS_PURE_GRPC="n"
+    local ENABLE_VLESS_GRPC="n" ENABLE_VLESS_PURE_GRPC="n" ENABLE_VLESS_ENC="n"
     local ENABLE_TROJAN="n" ENABLE_TROJAN_WS="n" ENABLE_TROJAN_GRPC="n"
 
     local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0 TUIC_COUNT=0 SOCKS_COUNT=0 VLESS_WS_COUNT=0
     local VMESS_COUNT=0 VMESS_WS_COUNT=0 VMESS_GRPC_COUNT=0
-    local VLESS_GRPC_COUNT=0 VLESS_PURE_GRPC_COUNT=0
+    local VLESS_GRPC_COUNT=0 VLESS_PURE_GRPC_COUNT=0 VLESS_ENC_COUNT=0
     local TROJAN_COUNT=0 TROJAN_WS_COUNT=0 TROJAN_GRPC_COUNT=0
 
     local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n" TUIC_REPLACE="n" SOCKS_REPLACE="n" VLESS_WS_REPLACE="n"
     local VMESS_REPLACE="n" VMESS_WS_REPLACE="n" VMESS_GRPC_REPLACE="n"
-    local VLESS_GRPC_REPLACE="n"
+    local VLESS_GRPC_REPLACE="n" VLESS_ENC_REPLACE="n"
     local TROJAN_REPLACE="n" TROJAN_WS_REPLACE="n" TROJAN_GRPC_REPLACE="n"
 
     local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
@@ -8317,6 +8362,9 @@ _mihomoconf_setup() {
     local -a VLESS_GRPC_DECRYPTIONS=() VLESS_GRPC_ENCRYPTIONS=()
     local -a VLESS_GRPC_REALITY_PRIVATE_KEYS=() VLESS_GRPC_REALITY_PUBLIC_KEYS=() VLESS_GRPC_REALITY_SHORT_IDS=() VLESS_GRPC_REALITY_DSTS=() VLESS_GRPC_REALITY_SNIS=()
     local _vless_grpc_user_total=0
+    local -a VLESS_ENC_PORTS=() VLESS_ENC_TAGS=() VLESS_ENC_USER_ROWS=()
+    local -a VLESS_ENC_DECRYPTIONS=() VLESS_ENC_ENCRYPTIONS=()
+    local _vless_enc_user_total=0
 
     local -a TROJAN_PORTS=() TROJAN_TAGS=() TROJAN_USER_ROWS=() TROJAN_TLS_OPTS=() TROJAN_HOSTS=()
     local -a TROJAN_WS_PORTS=() TROJAN_WS_TAGS=() TROJAN_WS_USER_ROWS=() TROJAN_WS_PATHS=() TROJAN_WS_TLS_OPTS=() TROJAN_WS_HOSTS=()
@@ -8398,18 +8446,20 @@ _mihomoconf_setup() {
                 esac
                 ;;
             3)
-                printf "    ${BOLD}配置第 $((VLESS_COUNT + VLESS_WS_COUNT + VLESS_GRPC_COUNT + VLESS_PURE_GRPC_COUNT + 1)) 个 VLESS 节点类型:${PLAIN}\n"
+                printf "    ${BOLD}配置第 $((VLESS_COUNT + VLESS_WS_COUNT + VLESS_GRPC_COUNT + VLESS_PURE_GRPC_COUNT + VLESS_ENC_COUNT + 1)) 个 VLESS 节点类型:${PLAIN}\n"
                 printf "      1) VLESS Reality (XTLS Vision)\n"
                 printf "      2) VLESS WebSocket (CDN 回源)\n"
                 printf "      3) VLESS gRPC (CDN 回源)\n"
                 printf "      4) VLESS gRPC Reality (防封锁强加密)\n"
+                printf "      5) VLESS Enc (抗量子加密)\n"
                 local vless_sub
-                read -rp "      选择 [1-4]（默认 1）: " vless_sub
+                read -rp "      选择 [1-5]（默认 1）: " vless_sub
                 case "${vless_sub:-1}" in
                     1) ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
                     2) ENABLE_VLESS_WS="y"; VLESS_WS_COUNT=$((VLESS_WS_COUNT + 1)) ;;
                     3) ENABLE_VLESS_GRPC="y"; VLESS_GRPC_COUNT=$((VLESS_GRPC_COUNT + 1)) ;;
                     4) ENABLE_VLESS_PURE_GRPC="y"; VLESS_PURE_GRPC_COUNT=$((VLESS_PURE_GRPC_COUNT + 1)) ;;
+                    5) ENABLE_VLESS_ENC="y"; VLESS_ENC_COUNT=$((VLESS_ENC_COUNT + 1)) ;;
                     *) _warn "未知 VLESS 类型，默认选择 VLESS Reality"; ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
                 esac
                 ;;
@@ -8434,7 +8484,7 @@ _mihomoconf_setup() {
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VLESS_PURE_GRPC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 ]]; then
+    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VLESS_PURE_GRPC_COUNT" -eq 0 && "$VLESS_ENC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
@@ -8445,6 +8495,7 @@ _mihomoconf_setup() {
     _status_kv "VLESS WS 数量" "${VLESS_WS_COUNT}" "cyan" 10
     _status_kv "VLESS gRPC 数量" "${VLESS_GRPC_COUNT}" "cyan" 10
     _status_kv "VLESS gRPC Reality 数量" "${VLESS_PURE_GRPC_COUNT}" "cyan" 10
+    _status_kv "VLESS Enc 数量" "${VLESS_ENC_COUNT}" "cyan" 10
     _status_kv "VMess TCP 数量" "${VMESS_COUNT}" "cyan" 10
     _status_kv "VMess WS 数量" "${VMESS_WS_COUNT}" "cyan" 10
     _status_kv "VMess gRPC 数量" "${VMESS_GRPC_COUNT}" "cyan" 10
@@ -8567,6 +8618,16 @@ _mihomoconf_setup() {
         read -rp "  选择 [1/2]（默认 2）: " vless_grpc_action
             [[ "${vless_grpc_action:-2}" == "1" ]] && VLESS_GRPC_REPLACE="y"
         fi
+        if [[ "$ENABLE_VLESS_ENC" == "y" ]] && _mihomoconf_has_listener_type "vless-enc"; then
+            _warn "配置中已存在 VLESS Enc 节点:"
+            _mihomoconf_list_listeners "vless-enc"
+            _separator
+            _menu_pair "1" "覆盖已有 VLESS Enc 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local vless_enc_action
+        read -rp "  选择 [1/2]（默认 2）: " vless_enc_action
+            [[ "${vless_enc_action:-2}" == "1" ]] && VLESS_ENC_REPLACE="y"
+        fi
         if [[ "$ENABLE_TROJAN" == "y" ]] && _mihomoconf_has_listener_type "trojan"; then
             _warn "配置中已存在 Trojan TCP 节点:"
             _mihomoconf_list_listeners "trojan"
@@ -8618,6 +8679,7 @@ _mihomoconf_setup() {
                 vless) [[ "$VLESS_REPLACE" == "y" ]] && continue ;;
                 vless-ws) [[ "$VLESS_WS_REPLACE" == "y" ]] && continue ;;
                 vless-grpc) [[ "$VLESS_GRPC_REPLACE" == "y" ]] && continue ;;
+                vless-enc) [[ "$VLESS_ENC_REPLACE" == "y" ]] && continue ;;
                 vmess) [[ "$VMESS_REPLACE" == "y" ]] && continue ;;
                 vmess-ws) [[ "$VMESS_WS_REPLACE" == "y" ]] && continue ;;
                 vmess-grpc) [[ "$VMESS_GRPC_REPLACE" == "y" ]] && continue ;;
@@ -9068,32 +9130,16 @@ _mihomoconf_setup() {
             done
         done
 
-        local _vless_grpc_service_name_input _vless_grpc_tls_input _vless_grpc_host_input
+        local _vless_grpc_service_name_input _vless_grpc_host_input
         local i _user_rows _u_name _u_uuid
         for i in "${!VLESS_GRPC_PORTS[@]}"; do
             read -rp "    VLESS gRPC #$((i + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_grpc_service_name_input
             _vless_grpc_service_name_input=$(_mihomoconf_trim "${_vless_grpc_service_name_input:-vless-grpc}")
             VLESS_GRPC_SERVICE_NAMES+=("$_vless_grpc_service_name_input")
 
-            read -rp "    VLESS gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [Y/n]: " _vless_grpc_tls_input
-            _vless_grpc_tls_input=$(_mihomoconf_trim "${_vless_grpc_tls_input:-Y}")
-            if [[ "$_vless_grpc_tls_input" =~ ^[Nn]$ ]]; then
-                VLESS_GRPC_TLS_OPTS+=("false")
-                local _grpc_keys _grpc_dec _grpc_enc
-                if _grpc_keys=$(_mihomoconf_gen_vless_keys); then
-                    IFS=$'\t' read -r _grpc_dec _grpc_enc <<< "$_grpc_keys"
-                    VLESS_GRPC_DECRYPTIONS+=("$_grpc_dec")
-                    VLESS_GRPC_ENCRYPTIONS+=("$_grpc_enc")
-                else
-                    _warn "无法生成 VLESS Encryption 密钥，请确保已安装 mihomo 内核"
-                    VLESS_GRPC_DECRYPTIONS+=("none")
-                    VLESS_GRPC_ENCRYPTIONS+=("none")
-                fi
-            else
-                VLESS_GRPC_TLS_OPTS+=("true")
-                VLESS_GRPC_DECRYPTIONS+=("none")
-                VLESS_GRPC_ENCRYPTIONS+=("none")
-            fi
+            VLESS_GRPC_TLS_OPTS+=("true")
+            VLESS_GRPC_DECRYPTIONS+=("none")
+            VLESS_GRPC_ENCRYPTIONS+=("none")
             VLESS_GRPC_REALITY_PRIVATE_KEYS+=("")
             VLESS_GRPC_REALITY_PUBLIC_KEYS+=("")
             VLESS_GRPC_REALITY_SHORT_IDS+=("")
@@ -9103,11 +9149,7 @@ _mihomoconf_setup() {
             read -rp "    VLESS gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_grpc_host_input
             VLESS_GRPC_HOSTS+=("$(_mihomoconf_trim "${_vless_grpc_host_input:-}")")
 
-            if [[ "${VLESS_GRPC_TLS_OPTS[$i]}" == "false" ]]; then
-                VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_enc_relay")")
-            else
-                VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
-            fi
+            VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
 
             _user_rows=$(_mihomoconf_collect_users_input "VLESS gRPC #$((i + 1))" "" "vless")
             while IFS=$'\t' read -r _u_name _u_uuid; do
@@ -9217,6 +9259,57 @@ _mihomoconf_setup() {
             done <<< "$_user_rows"
         done
         _info "VLESS gRPC Reality 已生成 ${VLESS_PURE_GRPC_COUNT} 个入站"
+    fi
+
+    # ---- VLESS Enc 配置 ----
+    if [[ "$ENABLE_VLESS_ENC" == "y" ]]; then
+        printf "  ${BOLD}VLESS Enc 配置${PLAIN}\n"
+        _separator
+        local _vless_enc_idx vless_enc_port_input
+        for ((_vless_enc_idx=1; _vless_enc_idx<=VLESS_ENC_COUNT; _vless_enc_idx++)); do
+            while true; do
+                read -rp "    VLESS Enc #${_vless_enc_idx} 监听端口 [默认 22787]: " vless_enc_port_input
+                vless_enc_port_input=$(_mihomoconf_trim "${vless_enc_port_input:-22787}")
+                if _is_valid_port "$vless_enc_port_input"; then
+                    if _mihomoconf_port_in_list "$vless_enc_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${vless_enc_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$vless_enc_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${vless_enc_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    VLESS_ENC_PORTS+=("$vless_enc_port_input")
+                    NEW_PORTS+=("$vless_enc_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local i _enc_keys _enc_dec _enc_enc
+        for i in "${!VLESS_ENC_PORTS[@]}"; do
+            if _enc_keys=$(_mihomoconf_gen_vless_keys); then
+                IFS=$'\t' read -r _enc_dec _enc_enc <<< "$_enc_keys"
+                VLESS_ENC_DECRYPTIONS+=("$_enc_dec")
+                VLESS_ENC_ENCRYPTIONS+=("$_enc_enc")
+            else
+                _warn "无法生成 VLESS Encryption 密钥，请确保已安装 mihomo 内核"
+                VLESS_ENC_DECRYPTIONS+=("none")
+                VLESS_ENC_ENCRYPTIONS+=("none")
+            fi
+
+            VLESS_ENC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_enc_relay")")
+
+            local _user_rows _u_name _u_uuid
+            _user_rows=$(_mihomoconf_collect_users_input "VLESS Enc #$((i + 1))" "" "vless")
+            while IFS=$'\t' read -r _u_name _u_uuid; do
+                [[ -z "${_u_name:-}" || -z "${_u_uuid:-}" ]] && continue
+                VLESS_ENC_USER_ROWS+=("${i}"$'\x1f'"${_u_name}"$'\x1f'"${_u_uuid}")
+                _vless_enc_user_total=$((_vless_enc_user_total + 1))
+            done <<< "$_user_rows"
+        done
+        _info "VLESS Enc 已生成 ${#VLESS_ENC_PORTS[@]} 个入站，共 ${_vless_enc_user_total} 个 user"
     fi
 
     # ---- Trojan TCP 配置 ----
@@ -9936,20 +10029,7 @@ MIHOMOCONF_VMESS_GRPC_TRANS_EOF
                 local _vless_grpc_service_name="${VLESS_GRPC_SERVICE_NAMES[$i]}"
                 local _vless_grpc_tls="${VLESS_GRPC_TLS_OPTS[$i]}"
                 local _vless_grpc_host="${VLESS_GRPC_HOSTS[$i]}"
-                if [[ "$_vless_grpc_tls" == "false" ]]; then
-                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_EOF
-  - name: vless-enc-in-${_vless_grpc_port}
-    tag: "${_vless_grpc_tag}"
-    type: vless
-    port: ${_vless_grpc_port}
-    listen: "::"
-    # vpsgo-vless-type: vless-enc
-    # vpsgo-vless-grpc-service-name: ${_vless_grpc_service_name}
-    # vpsgo-vless-grpc-tls: ${_vless_grpc_tls}
-    # vpsgo-vless-grpc-host: ${_vless_grpc_host}
-MIHOMOCONF_VLESS_GRPC_EOF
-                else
-                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_EOF
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_EOF
   - name: vless-grpc-in-${_vless_grpc_port}
     tag: "${_vless_grpc_tag}"
     type: vless
@@ -9960,7 +10040,6 @@ MIHOMOCONF_VLESS_GRPC_EOF
     # vpsgo-vless-grpc-tls: ${_vless_grpc_tls}
     # vpsgo-vless-grpc-host: ${_vless_grpc_host}
 MIHOMOCONF_VLESS_GRPC_EOF
-                fi
                 if [[ "$_vless_grpc_tls" == "reality" ]]; then
                     local _vless_grpc_reality_pub="${VLESS_GRPC_REALITY_PUBLIC_KEYS[$i]}"
                     local _vless_grpc_reality_short="${VLESS_GRPC_REALITY_SHORT_IDS[$i]}"
@@ -10000,13 +10079,6 @@ MIHOMOCONF_VLESS_GRPC_TLS_EOF
       server-names:
         - "${_vless_grpc_reality_sni}"
 MIHOMOCONF_VLESS_GRPC_REALITY_EOF
-                else
-                    local _vless_grpc_dec="${VLESS_GRPC_DECRYPTIONS[$i]:-none}"
-                    local _vless_grpc_enc="${VLESS_GRPC_ENCRYPTIONS[$i]:-none}"
-                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_DEC_EOF
-    decryption: "${_vless_grpc_dec}"
-    # vpsgo-vless-encryption: ${_vless_grpc_enc}
-MIHOMOCONF_VLESS_GRPC_DEC_EOF
                 fi
                 cat >> "$_target_file" <<MIHOMOCONF_VLESS_GRPC_TRANS_EOF
     transport:
@@ -10014,6 +10086,35 @@ MIHOMOCONF_VLESS_GRPC_DEC_EOF
       grpc-opts:
         grpc-service-name: "${_vless_grpc_service_name}"
 MIHOMOCONF_VLESS_GRPC_TRANS_EOF
+            done
+        fi
+        if [[ "$ENABLE_VLESS_ENC" == "y" ]]; then
+            for i in "${!VLESS_ENC_PORTS[@]}"; do
+                local _vless_enc_port="${VLESS_ENC_PORTS[$i]}"
+                local _vless_enc_tag="${VLESS_ENC_TAGS[$i]}"
+                local _vless_enc_dec="${VLESS_ENC_DECRYPTIONS[$i]:-none}"
+                local _vless_enc_enc="${VLESS_ENC_ENCRYPTIONS[$i]:-none}"
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_ENC_EOF
+  - name: vless-enc-in-${_vless_enc_port}
+    tag: "${_vless_enc_tag}"
+    type: vless
+    port: ${_vless_enc_port}
+    listen: "::"
+    # vpsgo-vless-type: vless-enc
+    # vpsgo-vless-encryption: ${_vless_enc_enc}
+    users:
+MIHOMOCONF_VLESS_ENC_EOF
+                for _row in "${VLESS_ENC_USER_ROWS[@]}"; do
+                    IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                    [[ "$_li" == "$i" ]] || continue
+                    cat >> "$_target_file" <<MIHOMOCONF_VLESS_ENC_USER_EOF
+      - username: "${_u_name}"
+        uuid: "${_u_uuid}"
+MIHOMOCONF_VLESS_ENC_USER_EOF
+                done
+                cat >> "$_target_file" <<MIHOMOCONF_VLESS_ENC_DEC_EOF
+    decryption: "${_vless_enc_dec}"
+MIHOMOCONF_VLESS_ENC_DEC_EOF
             done
         fi
         if [[ "$ENABLE_TROJAN" == "y" ]]; then
@@ -10281,6 +10382,7 @@ MIHOMOCONF_HEADER
         [[ "$VLESS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless" && _info "已移除旧的 VLESS 节点"
         [[ "$VLESS_WS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless-ws" && _info "已移除旧的 VLESS WS 节点"
         [[ "$VLESS_GRPC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless-grpc" && _info "已移除旧的 VLESS gRPC 节点"
+        [[ "$VLESS_ENC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vless-enc" && _info "已移除旧的 VLESS Enc 节点"
         [[ "$VMESS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vmess" && _info "已移除旧的 VMess TCP 节点"
         [[ "$VMESS_WS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vmess-ws" && _info "已移除旧的 VMess WS 节点"
         [[ "$VMESS_GRPC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "vmess-grpc" && _info "已移除旧的 VMess gRPC 节点"
@@ -10743,22 +10845,14 @@ MIHOMOCONF_VMESS_GRPC_YAML2
             _vless_grpc_service_name="${VLESS_GRPC_SERVICE_NAMES[$i]}"
             _vless_grpc_tls="${VLESS_GRPC_TLS_OPTS[$i]}"
             _vless_grpc_host="${VLESS_GRPC_HOSTS[$i]}"
-            if [[ "$_vless_grpc_tls" == "false" ]]; then
-                _vless_grpc_name=$(_mihomoconf_make_node_name "VLESS-Enc" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
-            else
-                _vless_grpc_name=$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
-            fi
+            _vless_grpc_name=$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
             _separator
             printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vless_grpc_name"
             printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tag"
             printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
             printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_vless_grpc_port"
             printf "      Service: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_service_name"
-            if [[ "$_vless_grpc_tls" == "false" ]]; then
-                printf "      gRPC Enc: ${GREEN}%s${PLAIN}\n" "启用"
-            else
-                printf "      gRPC TLS: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tls"
-            fi
+            printf "      gRPC TLS: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_tls"
             [[ -n "$_vless_grpc_host" ]] && printf "      gRPC Host: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_host"
             _vless_grpc_user_idx=0
             for _row in "${VLESS_GRPC_USER_ROWS[@]}"; do
@@ -10774,11 +10868,7 @@ MIHOMOCONF_VMESS_GRPC_YAML2
                 VLESS_GRPC_LINK=$(_mihomoconf_gen_vless_grpc_link "$SERVER_HOST" "$_vless_grpc_port" "$_u_uuid" "$_vless_grpc_client_name" "$_vless_grpc_service_name" "$_vless_grpc_tls" "$_vless_grpc_host" "$_vless_grpc_enc" "$_vless_grpc_pbk" "$_vless_grpc_sid")
                 printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_grpc_user_idx" "$_u_name"
                 printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
-                if [[ "$_vless_grpc_tls" == "false" ]]; then
-                    printf "  ${BOLD}VLESS Enc 分享链接:${PLAIN}\n"
-                else
-                    printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
-                fi
+                printf "  ${BOLD}VLESS gRPC 分享链接:${PLAIN}\n"
                 printf "  ${GREEN}%s${PLAIN}\n" "$VLESS_GRPC_LINK"
                 printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
                 if [[ "$_vless_grpc_tls" == "reality" ]]; then
@@ -10825,6 +10915,55 @@ MIHOMOCONF_VLESS_GRPC_YAML2
             done
             if [[ "$_vless_grpc_user_idx" -eq 0 ]]; then
                 _warn "  VLESS gRPC 入站 ${_vless_grpc_tag} 未配置 user，已跳过导出"
+            fi
+        done
+    fi
+
+    # VLESS Enc 输出
+    if [[ "$ENABLE_VLESS_ENC" == "y" ]]; then
+        printf "  ${BOLD}VLESS Enc 连接信息 (%s 个)${PLAIN}\n" "${#VLESS_ENC_PORTS[@]}"
+        local i VLESS_ENC_LINK _vless_enc_port _vless_enc_tag _vless_enc_name _vless_enc_client_name
+        local _vless_enc_user_idx _u_uuid
+        local _row _li _u_name
+        for i in "${!VLESS_ENC_PORTS[@]}"; do
+            _vless_enc_port="${VLESS_ENC_PORTS[$i]}"
+            _vless_enc_tag="${VLESS_ENC_TAGS[$i]}"
+            _vless_enc_name=$(_mihomoconf_make_node_name "VLESS-Enc" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_vless_enc_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_vless_enc_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_vless_enc_port"
+            printf "      VLESS Enc: ${GREEN}%s${PLAIN}\n" "启用"
+            _vless_enc_user_idx=0
+            for _row in "${VLESS_ENC_USER_ROWS[@]}"; do
+                IFS=$'\x1f' read -r _li _u_name _u_uuid <<< "$_row"
+                [[ "$_li" == "$i" ]] || continue
+                _vless_enc_user_idx=$((_vless_enc_user_idx + 1))
+                _vless_enc_client_name="${_vless_enc_name}-${_u_name}"
+                local _vless_enc_enc="${VLESS_ENC_ENCRYPTIONS[$i]:-none}"
+                VLESS_ENC_LINK=$(_mihomoconf_gen_vless_enc_link "$SERVER_HOST" "$_vless_enc_port" "$_u_uuid" "$_vless_enc_client_name" "$_vless_enc_enc")
+                printf "      用户[%s]: ${GREEN}%s${PLAIN}\n" "$_vless_enc_user_idx" "$_u_name"
+                printf "      UUID   : ${GREEN}%s${PLAIN}\n" "$_u_uuid"
+                printf "  ${BOLD}VLESS Enc 分享链接:${PLAIN}\n"
+                printf "  ${GREEN}%s${PLAIN}\n" "$VLESS_ENC_LINK"
+                printf "  ${BOLD}Clash Meta 客户端 YAML:${PLAIN}\n"
+                cat <<MIHOMOCONF_VLESS_ENC_YAML
+    - name: "${_vless_enc_client_name}"
+      type: vless
+      server: ${SERVER_HOST}
+      port: ${_vless_enc_port}
+      uuid: "${_u_uuid}"
+      cipher: auto
+      udp: true
+      tls: false
+      packet-encoding: xudp
+      network: tcp
+      encryption: ${_vless_enc_enc}
+MIHOMOCONF_VLESS_ENC_YAML
+            done
+            if [[ "$_vless_enc_user_idx" -eq 0 ]]; then
+                _warn "  VLESS Enc 入站 ${_vless_enc_tag} 未配置 user，已跳过导出"
             fi
         done
     fi
@@ -12105,11 +12244,7 @@ MIHOMO_VLESS_WS_YAML3
                     vless_found=1
                     export_count=$((export_count + 1))
                     listener_export=$((listener_export + 1))
-                    if [[ "$vless_ws_tls" == "false" ]]; then
-                        vless_name="$(_mihomoconf_make_node_name "VLESS-Enc" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
-                    else
-                        vless_name="$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
-                    fi
+                    vless_name="$(_mihomoconf_make_node_name "VLESS-gRPC" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
                     if [[ "$vless_ws_tls" == "reality" ]]; then
                         vless_link=$(_mihomoconf_gen_vless_grpc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_grpc_service_name" "$vless_ws_tls" "$vless_ws_host" "none" "$vless_public_key" "$vless_short_id")
                     else
@@ -12119,20 +12254,12 @@ MIHOMO_VLESS_WS_YAML3
                         printf "%s\n" "$vless_link"
                     else
                         _separator
-                        if [[ "$vless_ws_tls" == "false" ]]; then
-                            printf "  ${BOLD}[VLESS Enc] %s${PLAIN}\n" "$vless_name"
-                        else
-                            printf "  ${BOLD}[VLESS gRPC] %s${PLAIN}\n" "$vless_name"
-                        fi
+                        printf "  ${BOLD}[VLESS gRPC] %s${PLAIN}\n" "$vless_name"
                         printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
                         printf "    用户: ${GREEN}%s${PLAIN}\n" "$vless_user"
                         printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vless_uuid"
                         printf "    gRPC Service: ${GREEN}%s${PLAIN}\n" "$vless_grpc_service_name"
-                        if [[ "$vless_ws_tls" == "false" ]]; then
-                            printf "    gRPC Enc : ${GREEN}%s${PLAIN}\n" "启用"
-                        else
-                            printf "    gRPC TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
-                        fi
+                        printf "    gRPC TLS : ${GREEN}%s${PLAIN}\n" "$vless_ws_tls"
                         [[ -n "$vless_ws_host" ]] && printf "    gRPC Host: ${GREEN}%s${PLAIN}\n" "$vless_ws_host"
                         printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
                         printf "    YAML:\n"
@@ -12179,6 +12306,50 @@ MIHOMO_VLESS_GRPC_YAML
           grpc-service-name: ${vless_grpc_service_name}
 MIHOMO_VLESS_GRPC_YAML2
                         fi
+                    fi
+                done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
+                if [[ "$vless_found" -eq 0 ]]; then
+                    _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            vless-enc)
+                if [[ -z "$port" ]]; then
+                    _warn "跳过 ${name}: VLESS Enc 字段不完整"
+                    continue
+                fi
+                local vless_found=0 vless_link vless_name vless_user vless_uuid
+                while IFS=$'\x1f' read -r vless_user vless_uuid; do
+                    [[ -z "${vless_user:-}" || -z "${vless_uuid:-}" ]] && continue
+                    vless_found=1
+                    export_count=$((export_count + 1))
+                    listener_export=$((listener_export + 1))
+                    vless_name="$(_mihomoconf_make_node_name "VLESS-Enc" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${vless_user}"
+                    vless_link=$(_mihomoconf_gen_vless_enc_link "$server_ip" "$port" "$vless_uuid" "$vless_name" "$vless_public_key")
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$vless_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[VLESS Enc] %s${PLAIN}\n" "$vless_name"
+                        printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$vless_user"
+                        printf "    UUID: ${GREEN}%s${PLAIN}\n" "$vless_uuid"
+                        printf "    VLESS Enc: ${GREEN}%s${PLAIN}\n" "启用"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$vless_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_VLESS_ENC_YAML
+    proxies:
+      - name: "${vless_name}"
+        type: vless
+        server: ${server_ip}
+        port: ${port}
+        uuid: "${vless_uuid}"
+        cipher: auto
+        udp: true
+        tls: false
+        packet-encoding: xudp
+        network: tcp
+        encryption: ${vless_public_key:-none}
+MIHOMO_VLESS_ENC_YAML
                     fi
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$vless_found" -eq 0 ]]; then
@@ -13358,10 +13529,15 @@ _mihomochain_list_outbounds() {
                 ;;
             vless)
                 local vless_extra=""
-                [[ -n "${sni:-}" ]] && vless_extra="${vless_extra}, sni=${sni}"
-                [[ -n "${vless_flow:-}" ]] && vless_extra="${vless_extra}, flow=${vless_flow}"
-                [[ -n "${vless_short_id:-}" ]] && vless_extra="${vless_extra}, sid=${vless_short_id}"
-                printf "      %s (type=vless, %s:%s%s)\n" "$show_name" "$server" "$port" "$vless_extra"
+                if [[ "$cipher" == "false" ]]; then
+                    [[ -n "${vless_encryption:-}" ]] && vless_extra=", enc=${vless_encryption}"
+                    printf "      %s (type=vless-enc, %s:%s%s)\n" "$show_name" "$server" "$port" "$vless_extra"
+                else
+                    [[ -n "${sni:-}" ]] && vless_extra="${vless_extra}, sni=${sni}"
+                    [[ -n "${vless_flow:-}" ]] && vless_extra="${vless_extra}, flow=${vless_flow}"
+                    [[ -n "${vless_short_id:-}" ]] && vless_extra="${vless_extra}, sid=${vless_short_id}"
+                    printf "      %s (type=vless, %s:%s%s)\n" "$show_name" "$server" "$port" "$vless_extra"
+                fi
                 ;;
             socks5|http)
                 if [[ -n "${username:-}" || -n "${password:-}" ]]; then
@@ -17138,10 +17314,14 @@ EOF
                             fi
                             ;;
                         vless)
-                            if [[ -n "${sni:-}" ]]; then
-                                printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$sni"
+                            if [[ "$cipher" == "false" ]]; then
+                                printf "      [%d] %s (type=vless-enc, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
                             else
-                                printf "      [%d] %s (type=vless, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
+                                if [[ -n "${sni:-}" ]]; then
+                                    printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$sni"
+                                else
+                                    printf "      [%d] %s (type=vless, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
+                                fi
                             fi
                             ;;
                         *)
@@ -17331,10 +17511,14 @@ EOF
                             fi
                             ;;
                         vless)
-                            if [[ -n "${sni:-}" ]]; then
-                                printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$sni"
+                            if [[ "$cipher" == "false" ]]; then
+                                printf "      [%d] %s (type=vless-enc, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
                             else
-                                printf "      [%d] %s (type=vless, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
+                                if [[ -n "${sni:-}" ]]; then
+                                    printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$idx" "$out_show_name" "$server" "$port" "$sni"
+                                else
+                                    printf "      [%d] %s (type=vless, %s:%s)\n" "$idx" "$out_show_name" "$server" "$port"
+                                fi
                             fi
                             ;;
                         *)
@@ -17410,10 +17594,14 @@ EOF
                             fi
                             ;;
                         vless)
-                            if [[ -n "${sni:-}" ]]; then
-                                printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port" "$sni"
+                            if [[ "$cipher" == "false" ]]; then
+                                printf "      [%d] %s (type=vless-enc, %s:%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port"
                             else
-                                printf "      [%d] %s (type=vless, %s:%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port"
+                                if [[ -n "${sni:-}" ]]; then
+                                    printf "      [%d] %s (type=vless, %s:%s, sni=%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port" "$sni"
+                                else
+                                    printf "      [%d] %s (type=vless, %s:%s)\n" "$rm_out_idx" "$out_show_name" "$server" "$port"
+                                fi
                             fi
                             ;;
                         *)
@@ -17568,7 +17756,7 @@ EOF
                     l_vless_type l_vless_ws_path l_vless_ws_tls l_vless_ws_host l_vless_grpc_service_name; do
                     [[ -z "${l_name:-}" ]] && continue
                     case "$l_type" in
-                        anytls|hysteria2|hy2|tuic|socks|vless|vless-ws|vless-grpc|vmess|vmess-ws|vmess-grpc|trojan|trojan-ws|trojan-grpc) ;;
+                        anytls|hysteria2|hy2|tuic|socks|vless|vless-ws|vless-grpc|vless-enc|vmess|vmess-ws|vmess-grpc|trojan|trojan-ws|trojan-grpc) ;;
                         *) continue ;;
                     esac
                     l_listener_tag="${l_listener_tag:-$l_name}"
@@ -17586,7 +17774,7 @@ EOF
                         "$idx" "$l_name" "$l_type" "${l_port:-N/A}" "$user_count"
                 done < <(_mihomoconf_read_listener_rows "$config_file")
                 if (( ${#add_listener_tags[@]} == 0 )); then
-                    _warn "未找到支持 users 的入站节点 (AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VMess/Trojan 系列)"
+                    _warn "未找到支持 users 的入站节点 (AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VLESS Enc/VMess/Trojan 系列)"
                     _press_any_key
                     continue
                 fi
@@ -17668,7 +17856,7 @@ EOF
                     elif [[ "$add_listener_type" == "vless" ]]; then
                         add_uuid=$(_mihomoconf_gen_uuid)
                         _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "xtls-rprx-vision"
-                    elif [[ "$add_listener_type" == "vless-ws" || "$add_listener_type" == "vless-grpc" || "$add_listener_type" == "vmess" || "$add_listener_type" == "vmess-ws" || "$add_listener_type" == "vmess-grpc" ]]; then
+                    elif [[ "$add_listener_type" == "vless-ws" || "$add_listener_type" == "vless-grpc" || "$add_listener_type" == "vless-enc" || "$add_listener_type" == "vmess" || "$add_listener_type" == "vmess-ws" || "$add_listener_type" == "vmess-grpc" ]]; then
                         add_uuid=$(_mihomoconf_gen_uuid)
                         _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" ""
                     else
@@ -17678,7 +17866,7 @@ EOF
                     if [[ "$add_result" -ne 0 ]]; then
                         case "$add_result" in
                             2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
-                            3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VMess/Trojan 系列）" ;;
+                            3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VLESS Enc/VMess/Trojan 系列）" ;;
                             *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
                         esac
                         _press_any_key
@@ -17736,7 +17924,7 @@ EOF
                         elif [[ "$add_listener_type" == "vless" ]]; then
                             add_uuid=$(_mihomoconf_gen_uuid)
                             _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" "xtls-rprx-vision"
-                        elif [[ "$add_listener_type" == "vless-ws" || "$add_listener_type" == "vless-grpc" || "$add_listener_type" == "vmess" || "$add_listener_type" == "vmess-ws" || "$add_listener_type" == "vmess-grpc" ]]; then
+                        elif [[ "$add_listener_type" == "vless-ws" || "$add_listener_type" == "vless-grpc" || "$add_listener_type" == "vless-enc" || "$add_listener_type" == "vmess" || "$add_listener_type" == "vmess-ws" || "$add_listener_type" == "vmess-grpc" ]]; then
                             add_uuid=$(_mihomoconf_gen_uuid)
                             _mihomoconf_add_vless_listener_user "$config_file" "$add_listener_tag" "$add_username" "$add_uuid" ""
                         else
@@ -17746,7 +17934,7 @@ EOF
                         if [[ "$add_result" -ne 0 ]]; then
                             case "$add_result" in
                                 2) _error_no_exit "未找到入站节点: ${add_listener_name}" ;;
-                                3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VMess/Trojan 系列）" ;;
+                                3) _error_no_exit "入站类型 ${add_listener_type} 不支持 users（仅支持 AnyTLS/HY2/TUIC/Socks5/VLESS/VLESS-WS/VLESS-gRPC/VLESS Enc/VMess/Trojan 系列）" ;;
                                 *) _error_no_exit "用户写入失败，请检查配置格式后重试" ;;
                             esac
                             _press_any_key
