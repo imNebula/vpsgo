@@ -22411,8 +22411,34 @@ _realm_add_rule() {
     esac
 
     if [[ "$listen_addr" == "both" ]]; then
-        listen_value1="0.0.0.0:${listen_port}"
-        listen_value2="[::]:${listen_port}"
+        local ipv6_enabled=0
+        if [[ -f "/proc/net/if_inet6" && -s "/proc/net/if_inet6" ]]; then
+            ipv6_enabled=1
+        elif [[ -d "/proc/sys/net/ipv6" ]]; then
+            local disable_all="0"
+            if [[ -f "/proc/sys/net/ipv6/conf/all/disable_ipv6" ]]; then
+                disable_all=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo "0")
+            fi
+            if [[ "$disable_all" != "1" ]]; then
+                ipv6_enabled=1
+            fi
+        fi
+
+        if [[ "$ipv6_enabled" == "1" ]]; then
+            local bind_v6_only="0"
+            if [[ -f "/proc/sys/net/ipv6/bindv6only" ]]; then
+                bind_v6_only=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo "0")
+            fi
+
+            if [[ "$bind_v6_only" == "1" ]]; then
+                listen_value1="0.0.0.0:${listen_port}"
+                listen_value2="[::]:${listen_port}"
+            else
+                listen_value="[::]:${listen_port}"
+            fi
+        else
+            listen_value="0.0.0.0:${listen_port}"
+        fi
     elif [[ "$listen_addr" == *:* ]]; then
         listen_value="[${listen_addr}]:${listen_port}"
     else
@@ -22445,7 +22471,7 @@ _realm_add_rule() {
         remote_value="${remote_host}:${remote_port}"
     fi
 
-    if [[ -n "$listen_value1" && -n "$listen_value2" ]]; then
+    if [[ -n "${listen_value1:-}" && -n "${listen_value2:-}" ]]; then
         found1=0
         found2=0
         if [[ -f "$_REALM_CONFIG_FILE" ]]; then
@@ -22482,7 +22508,11 @@ _realm_add_rule() {
             _press_any_key
             return
         fi
-        _success "转发规则已添加: ${listen_value} → ${remote_value}"
+        if [[ "$listen_addr" == "both" ]]; then
+            _success "转发规则已添加: (同时监听 IPv4 和 IPv6) → ${remote_value}"
+        else
+            _success "转发规则已添加: ${listen_value} → ${remote_value}"
+        fi
     fi
 
     _realm_auto_restart_if_active
