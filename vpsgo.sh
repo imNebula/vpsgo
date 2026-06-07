@@ -22,6 +22,7 @@
 #  17. Swap 管理
 #  18. 1Panel iptables 代理链快速应用
 #  19. WARP 管理
+#  20. IPQuality 测试 (IP 质量与流媒体解锁检测)
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -38,7 +39,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.1"
+VERSION="5.2"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -19084,6 +19085,65 @@ _nodequality_setup() {
     _press_any_key
 }
 
+# --- 6.1 IPQuality 测试 ---
+
+_ipquality_setup() {
+    _header "IPQuality IP 质量/流媒体解锁检测"
+
+    _ensure_curl || true
+    if ! command -v curl >/dev/null 2>&1; then
+        _error_no_exit "需要 curl 命令，请先安装"
+        _press_any_key
+        return
+    fi
+
+    echo ""
+    _info "请选择 IPQuality 运行模式:"
+    echo "  1) 默认模式 (中文)"
+    echo "  2) 英文模式"
+    echo "  3) 仅 IPv4 (中文)"
+    echo "  4) 仅 IPv4 (英文)"
+    echo "  5) 仅 IPv6 (中文)"
+    echo "  6) 仅 IPv6 (英文)"
+    echo "  7) 返回上级菜单"
+    echo ""
+    local opt
+    read -rp "  请选择 [1-7, 默认 1]: " opt
+    opt="${opt:-1}"
+
+    local cmd_args=()
+    case "$opt" in
+        1) cmd_args=() ;;
+        2) cmd_args=("-l" "en") ;;
+        3) cmd_args=("-4") ;;
+        4) cmd_args=("-4" "-l" "en") ;;
+        5) cmd_args=("-6") ;;
+        6) cmd_args=("-6" "-l" "en") ;;
+        7) return ;;
+        *) _error_no_exit "无效选项: ${opt}"; sleep 1; return ;;
+    esac
+
+    echo ""
+    _info "正在运行 IPQuality 测试脚本..."
+    _separator
+    echo ""
+    
+    local url="https://raw.githubusercontent.com/xykt/IPQuality/main/ipquality.sh"
+    local fetch_url
+    fetch_url=$(_github_proxy_url "$url")
+
+    # If curl fails, try the fallback IP.Check.Place URL
+    if ! bash <(curl -fsSL "$fetch_url") "${cmd_args[@]}"; then
+        _warn "通过 GitHub 链接运行失败，尝试使用 IP.Check.Place 直连运行..."
+        if ! bash <(curl -fsSL "https://IP.Check.Place") "${cmd_args[@]}"; then
+            _error_no_exit "IPQuality 脚本运行失败"
+        fi
+    fi
+
+    echo ""
+    _press_any_key
+}
+
 # --- 7. Ookla Speedtest CLI 安装 ---
 
 _speedtest_prompt_yes_default() {
@@ -22597,11 +22657,10 @@ _realm_configure() {
         _ui_print_screen _realm_configure_screen
 
         local ch
-        read -rp "  选择 [0-3]: " ch
+        read -rp "  选择 [0-2]: " ch
         case "$ch" in
             1) _realm_add_rule ;;
             2) _realm_delete_rule ;;
-            3) _realm_enable_now ; _press_any_key ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
@@ -22622,7 +22681,6 @@ _realm_configure_screen() {
     _separator
     _menu_item "1" "添加转发规则" "监听端口 → 目标地址" "green"
     _menu_item "2" "删除转发规则" "" "yellow"
-    _menu_item "3" "启动/重启 Realm" "启用服务" "green"
     _menu_item "0" "返回" "" "red"
     _separator
 }
@@ -22685,9 +22743,9 @@ _realm_manage_screen() {
 
     _separator
     _menu_pair "1" "安装/更新 Realm" "下载二进制" "green" "2" "管理转发规则" "添加/删除规则" "green"
-    _menu_pair "3" "查看转发规则" "规则列表" "green" "4" "重启 Realm" "" "green"
+    _menu_pair "3" "启动/重启 Realm" "启用服务" "green" "4" "重启 Realm" "仅重启进程" "green"
     _menu_pair "5" "查看状态" "" "green" "6" "查看日志" "" "green"
-    _menu_item "7" "卸载 Realm" "停止并清理" "yellow"
+    _menu_pair "7" "查看转发规则" "规则列表" "green" "8" "卸载 Realm" "停止并清理" "yellow"
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
 }
@@ -22697,15 +22755,16 @@ _realm_manage() {
         _ui_print_screen _realm_manage_screen
 
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
         case "$ch" in
             1) _realm_install_or_update ;;
             2) _realm_configure ;;
-            3) _realm_view_rules ;;
+            3) _realm_enable_now ; _press_any_key ;;
             4) _realm_restart ;;
             5) _realm_status ;;
             6) _realm_log ;;
-            7) _realm_uninstall ;;
+            7) _realm_view_rules ;;
+            8) _realm_uninstall ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
@@ -31807,6 +31866,7 @@ _script_tools_menu_screen() {
     _menu_pair "1" "iPerf3 服务端" "启动测速服务" "green" "2" "NodeQuality" "线路质量测试" "green"
     _menu_pair "3" "Speedtest" "安装测速 CLI" "green" "4" "Akile DNS" "检测 DNS 解锁" "green"
     _menu_pair "5" "DNS 管理" "修改/验证 DNS" "green" "6" "NextTrace" "安装/路由检测" "green"
+    _menu_item "7" "IPQuality" "IP 质量/流媒体解锁检测" "green"
     _separator
     _menu_item "0" "返回主菜单" "" "red"
     _separator
@@ -31816,7 +31876,7 @@ _script_tools_menu() {
     while true; do
         _ui_print_screen _script_tools_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-6]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
         case "$ch" in
             1) _iperf3_setup ;;
             2) _nodequality_setup ;;
@@ -31824,6 +31884,7 @@ _script_tools_menu() {
             4) _akdns_setup ;;
             5) _dns_manage ;;
             6) _ntrace_setup ;;
+            7) _ipquality_setup ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac

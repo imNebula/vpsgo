@@ -80,6 +80,7 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 |---|------|------|
 | 5 | iPerf3 测速服务端 | 启动服务端并显示客户端命令 |
 | 6 | NodeQuality 测试 | 运行 NodeQuality 线路质量评分脚本 |
+| - | IPQuality 测试 | 运行 IPQuality IP 质量与流媒体解锁检测脚本 |
 | 7 | Ookla Speedtest CLI | 安装/更新 Speedtest CLI |
 | 8 | NextTrace | 安装/更新 nexttrace、nexttrace-tiny、ntr，并支持常用参数向导、快速回程、自定义列表、MTR、MTU、CDN Speed |
 | 9 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
