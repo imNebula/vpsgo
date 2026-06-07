@@ -19128,14 +19128,25 @@ _ipquality_setup() {
     _separator
     echo ""
     
-    local url="https://raw.githubusercontent.com/xykt/IPQuality/main/ipquality.sh"
+    local url="https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh"
     local fetch_url
     fetch_url=$(_github_proxy_url "$url")
 
-    # If curl fails, try the fallback IP.Check.Place URL
-    if ! bash <(curl -fsSL "$fetch_url") "${cmd_args[@]}"; then
+    # Save to a temporary file to accurately detect curl failures (process substitution hides exit codes)
+    local tmp_file
+    tmp_file=$(mktemp)
+    if curl -fsSL "$fetch_url" -o "$tmp_file" && [[ -s "$tmp_file" ]]; then
+        bash "$tmp_file" "${cmd_args[@]}"
+        rm -f "$tmp_file"
+    else
+        rm -f "$tmp_file"
         _warn "通过 GitHub 链接运行失败，尝试使用 IP.Check.Place 直连运行..."
-        if ! bash <(curl -fsSL "https://IP.Check.Place") "${cmd_args[@]}"; then
+        tmp_file=$(mktemp)
+        if curl -fsSL "https://IP.Check.Place" -o "$tmp_file" && [[ -s "$tmp_file" ]]; then
+            bash "$tmp_file" "${cmd_args[@]}"
+            rm -f "$tmp_file"
+        else
+            rm -f "$tmp_file"
             _error_no_exit "IPQuality 脚本运行失败"
         fi
     fi
