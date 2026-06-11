@@ -6315,6 +6315,8 @@ _mihomoconf_read_listener_rows() {
             in_users=0
             item_indent=-1
             users_indent=-1
+            in_obfs_opts=0
+            obfs_opts_indent=-1
             current_vless_username=current_vless_uuid=current_vless_flow=""
         }
         function emit() {
@@ -6374,7 +6376,25 @@ _mihomoconf_read_listener_rows() {
             tuic_congestion_control=tuic_alpn=tuic_udp_relay_mode=""
             in_users=0
             users_indent=-1
+            in_obfs_opts=0
+            obfs_opts_indent=-1
             next
+        }
+        in_obfs_opts {
+            curr_indent=lindent($0)
+            if (curr_indent <= obfs_opts_indent) {
+                in_obfs_opts=0
+            } else if ($0 ~ /^[[:space:]]+mode:/) {
+                line=$0
+                sub(/^[[:space:]]+mode:[[:space:]]*/, "", line)
+                hy2_obfs=unquote(trim(line))
+                next
+            } else if ($0 ~ /^[[:space:]]+host:/) {
+                line=$0
+                sub(/^[[:space:]]+host:[[:space:]]*/, "", line)
+                sni=unquote(trim(line))
+                next
+            }
         }
         in_users {
             curr_indent=lindent($0)
@@ -6582,6 +6602,55 @@ _mihomoconf_read_listener_rows() {
             tuic_udp_relay_mode=trim(line)
             next
         }
+        /^[[:space:]]+#[[:space:]]*vpsgo-snell-version:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-snell-version:[[:space:]]*/, "", line)
+            vless_ws_tls=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-snell-reuse:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-snell-reuse:[[:space:]]*/, "", line)
+            vless_type=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-snell-obfs:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-snell-obfs:[[:space:]]*/, "", line)
+            hy2_obfs=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+#[[:space:]]*vpsgo-snell-obfs-host:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+#[[:space:]]*vpsgo-snell-obfs-host:[[:space:]]*/, "", line)
+            sni=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+version:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+version:[[:space:]]*/, "", line)
+            vless_ws_tls=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+reuse:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+reuse:[[:space:]]*/, "", line)
+            vless_type=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+psk:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+psk:[[:space:]]*/, "", line)
+            password=unquote(trim(line))
+            next
+        }
         /^[[:space:]]+type:/ {
             if (lindent($0) != item_indent + 2) next
             line=$0
@@ -6656,6 +6725,12 @@ _mihomoconf_read_listener_rows() {
             if (lindent($0) != item_indent + 2) next
             in_users=1
             users_indent=lindent($0)
+            next
+        }
+        /^[[:space:]]+obfs-opts:[[:space:]]*$/ {
+            if (lindent($0) != item_indent + 2) next
+            in_obfs_opts=1
+            obfs_opts_indent=lindent($0)
             next
         }
         END {
@@ -8330,17 +8405,17 @@ _mihomoconf_setup() {
     local CONFIG_STATUS
 
     local WRITE_MODE="new"
-    local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n" ENABLE_TUIC="n" ENABLE_SOCKS="n" ENABLE_VLESS_WS="n"
+    local ENABLE_SS="n" ENABLE_ANYTLS="n" ENABLE_VLESS="n" ENABLE_HY2="n" ENABLE_TUIC="n" ENABLE_SOCKS="n" ENABLE_VLESS_WS="n" ENABLE_SNELL="n"
     local ENABLE_VMESS="n" ENABLE_VMESS_WS="n" ENABLE_VMESS_GRPC="n"
     local ENABLE_VLESS_GRPC="n" ENABLE_VLESS_PURE_GRPC="n" ENABLE_VLESS_ENC="n"
     local ENABLE_TROJAN="n" ENABLE_TROJAN_WS="n" ENABLE_TROJAN_GRPC="n"
 
-    local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0 TUIC_COUNT=0 SOCKS_COUNT=0 VLESS_WS_COUNT=0
+    local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0 TUIC_COUNT=0 SOCKS_COUNT=0 VLESS_WS_COUNT=0 SNELL_COUNT=0
     local VMESS_COUNT=0 VMESS_WS_COUNT=0 VMESS_GRPC_COUNT=0
     local VLESS_GRPC_COUNT=0 VLESS_PURE_GRPC_COUNT=0 VLESS_ENC_COUNT=0
     local TROJAN_COUNT=0 TROJAN_WS_COUNT=0 TROJAN_GRPC_COUNT=0
 
-    local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n" TUIC_REPLACE="n" SOCKS_REPLACE="n" VLESS_WS_REPLACE="n"
+    local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n" TUIC_REPLACE="n" SOCKS_REPLACE="n" VLESS_WS_REPLACE="n" SNELL_REPLACE="n"
     local VMESS_REPLACE="n" VMESS_WS_REPLACE="n" VMESS_GRPC_REPLACE="n"
     local VLESS_GRPC_REPLACE="n" VLESS_ENC_REPLACE="n"
     local TROJAN_REPLACE="n" TROJAN_WS_REPLACE="n" TROJAN_GRPC_REPLACE="n"
@@ -8348,6 +8423,7 @@ _mihomoconf_setup() {
     local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
     local SS_CIPHER=""
     local SS_EXPORT_UDP="1" SS_EXPORT_UOT="0"
+    local -a SNELL_PORTS=() SNELL_TAGS=() SNELL_PSKS=() SNELL_VERSIONS=() SNELL_REUSES=() SNELL_OBFS_MODES=() SNELL_OBFS_HOSTS=()
     local -a ANYTLS_PORTS=() ANYTLS_TAGS=() ANYTLS_USER_ROWS=()
     local ANYTLS_SNI=""
     
@@ -8425,6 +8501,7 @@ _mihomoconf_setup() {
     _menu_pair "3" "VLESS (含 Reality / WS / gRPC)" "" "green" "4" "Trojan (含 TCP / WS / gRPC)" "" "green"
     _menu_pair "5" "Hysteria 2 (HY2)" "" "green" "6" "TUIC" "" "green"
     _menu_pair "7" "AnyTLS" "" "green" "8" "Socks5" "" "green"
+    _menu_pair "9" "Snell (v5)" "" "green" "" "" "" ""
     _separator
     local PROTOCOL_CHOICES
     read -rp "  选择 (如 \"1 1 2\" 表示 2 个 SS + 1 个 VMess): " -a PROTOCOL_CHOICES
@@ -8482,10 +8559,11 @@ _mihomoconf_setup() {
             6) ENABLE_TUIC="y"; TUIC_COUNT=$((TUIC_COUNT + 1)) ;;
             7) ENABLE_ANYTLS="y"; ANYTLS_COUNT=$((ANYTLS_COUNT + 1)) ;;
             8) ENABLE_SOCKS="y"; SOCKS_COUNT=$((SOCKS_COUNT + 1)) ;;
+            9) ENABLE_SNELL="y"; SNELL_COUNT=$((SNELL_COUNT + 1)) ;;
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VLESS_PURE_GRPC_COUNT" -eq 0 && "$VLESS_ENC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 ]]; then
+    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VLESS_PURE_GRPC_COUNT" -eq 0 && "$VLESS_ENC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 && "$SNELL_COUNT" -eq 0 ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
@@ -8506,6 +8584,7 @@ _mihomoconf_setup() {
     _status_kv "HY2 数量" "${HY2_COUNT}" "cyan" 10
     _status_kv "Tuic 数量" "${TUIC_COUNT}" "cyan" 10
     _status_kv "Socks5 数量" "${SOCKS_COUNT}" "cyan" 10
+    _status_kv "Snell 数量" "${SNELL_COUNT}" "cyan" 10
 
     # ---- 追加模式: 检查已有同协议节点 ----
     if [[ "$WRITE_MODE" == "append" ]]; then
@@ -8578,6 +8657,16 @@ _mihomoconf_setup() {
             local socks_action
         read -rp "  选择 [1/2]（默认 2）: " socks_action
             [[ "${socks_action:-2}" == "1" ]] && SOCKS_REPLACE="y"
+        fi
+        if [[ "$ENABLE_SNELL" == "y" ]] && _mihomoconf_has_listener_type "snell"; then
+            _warn "配置中已存在 Snell 节点:"
+            _mihomoconf_list_listeners "snell"
+            _separator
+            _menu_pair "1" "覆盖已有 Snell 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local snell_action
+            read -rp "  选择 [1/2]（默认 2）: " snell_action
+            [[ "${snell_action:-2}" == "1" ]] && SNELL_REPLACE="y"
         fi
         if [[ "$ENABLE_VMESS" == "y" ]] && _mihomoconf_has_listener_type "vmess"; then
             _warn "配置中已存在 VMess TCP 节点:"
@@ -8690,6 +8779,7 @@ _mihomoconf_setup() {
                 hysteria2) [[ "$HY2_REPLACE" == "y" ]] && continue ;;
                 tuic) [[ "$TUIC_REPLACE" == "y" ]] && continue ;;
                 socks) [[ "$SOCKS_REPLACE" == "y" ]] && continue ;;
+                snell) [[ "$SNELL_REPLACE" == "y" ]] && continue ;;
             esac
             _mihomoconf_port_in_list "$_e_port" "${RESERVED_PORTS[@]}" || RESERVED_PORTS+=("$_e_port")
         done < <(_mihomoconf_read_listener_rows "$CONFIG_FILE")
@@ -9701,6 +9791,89 @@ _mihomoconf_setup() {
         _info "Socks5 已生成 ${#SOCKS_PORTS[@]} 个入站，共 ${_socks_user_total} 个 user"
     fi
 
+    # ---- Snell 配置 ----
+    if [[ "$ENABLE_SNELL" == "y" ]]; then
+        printf "  ${BOLD}Snell 配置${PLAIN}\n"
+        _separator
+        local _snell_idx snell_port_input
+        for ((_snell_idx=1; _snell_idx<=SNELL_COUNT; _snell_idx++)); do
+            while true; do
+                read -rp "    Snell #${_snell_idx} 监听端口 [默认 40000]: " snell_port_input
+                snell_port_input=$(_mihomoconf_trim "${snell_port_input:-40000}")
+                if _is_valid_port "$snell_port_input"; then
+                    if _mihomoconf_port_in_list "$snell_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${snell_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$snell_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${snell_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    SNELL_PORTS+=("$snell_port_input")
+                    NEW_PORTS+=("$snell_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local i _psk_input _obfs_choice _obfs_host
+        for i in "${!SNELL_PORTS[@]}"; do
+            SNELL_TAGS+=("$(_mihomoconf_gen_listener_tag "snell_relay")")
+            read -rp "    Snell #$((i + 1)) PSK (Pre-Shared Key) [留空随机生成]: " _psk_input
+            _psk_input=$(_mihomoconf_trim "${_psk_input:-}")
+            if [[ -z "$_psk_input" ]]; then
+                _psk_input=$(_mihomoconf_gen_anytls_password)
+                _info "已自动生成 PSK: ${_psk_input}"
+            fi
+            SNELL_PSKS+=("$_psk_input")
+
+            local _ver_input
+            read -rp "    Snell #$((i + 1)) 协议版本 [1-5] (默认 5): " _ver_input
+            _ver_input=$(_mihomoconf_trim "${_ver_input:-5}")
+            if [[ ! "$_ver_input" =~ ^[1-5]$ ]]; then
+                _warn "版本无效，将默认使用版本 5"
+                _ver_input="5"
+            fi
+            SNELL_VERSIONS+=("$_ver_input")
+
+            local _reuse_input
+            read -rp "    Snell #$((i + 1)) 是否开启 TCP 连接复用 (reuse)? [Y/n] (默认 Y): " _reuse_input
+            _reuse_input=$(_mihomoconf_trim "${_reuse_input:-y}")
+            if [[ "$_reuse_input" =~ ^[Nn] ]]; then
+                SNELL_REUSES+=("false")
+            else
+                SNELL_REUSES+=("true")
+            fi
+
+            printf "    Snell #$((i + 1)) 混淆设置 (obfs):\n"
+            printf "      ${GREEN}1${PLAIN}) 不启用混淆 (默认)\n"
+            printf "      ${GREEN}2${PLAIN}) HTTP 混淆\n"
+            printf "      ${GREEN}3${PLAIN}) TLS 混淆\n"
+            read -rp "      选择 [1-3]（默认 1）: " _obfs_choice
+            _obfs_choice=$(_mihomoconf_trim "${_obfs_choice:-1}")
+            case "$_obfs_choice" in
+                2)
+                    SNELL_OBFS_MODES+=("http")
+                    read -rp "      混淆域名 (host) [默认 m.baidu.com]: " _obfs_host
+                    _obfs_host=$(_mihomoconf_trim "${_obfs_host:-m.baidu.com}")
+                    SNELL_OBFS_HOSTS+=("$_obfs_host")
+                    ;;
+                3)
+                    SNELL_OBFS_MODES+=("tls")
+                    read -rp "      混淆域名 (host) [默认 m.baidu.com]: " _obfs_host
+                    _obfs_host=$(_mihomoconf_trim "${_obfs_host:-m.baidu.com}")
+                    SNELL_OBFS_HOSTS+=("$_obfs_host")
+                    ;;
+                *)
+                    SNELL_OBFS_MODES+=("none")
+                    SNELL_OBFS_HOSTS+=("")
+                    ;;
+            esac
+        done
+        _info "Snell 已生成 ${#SNELL_PORTS[@]} 个入站节点"
+    fi
+
     # ---- TLS 证书检查 (AnyTLS / HY2 / Tuic / TLS-enabled VMess/VLESS/Trojan 共用) ----
     local _any_tls_enabled="n"
     if [[ "$ENABLE_ANYTLS" == "y" || "$ENABLE_HY2" == "y" || "$ENABLE_TUIC" == "y" ]]; then
@@ -9767,6 +9940,7 @@ _mihomoconf_setup() {
         local _tuic_port _tuic_tag _tuic_uuid
         local _vless_ws_port _vless_ws_tag _vless_ws_path _vless_ws_tls _vless_ws_host
         local _row _li _u_name _u_pass _u_uuid
+        local _snell_port _snell_tag _snell_psk _snell_ver _snell_reuse _snell_obfs_mode _snell_obfs_host
         if [[ "$ENABLE_SS" == "y" ]]; then
             for i in "${!SS_PORTS[@]}"; do
                 _ss_port="${SS_PORTS[$i]}"
@@ -10358,6 +10532,38 @@ MIHOMOCONF_SOCKS_USER_EOF
                 done
             done
         fi
+        if [[ "$ENABLE_SNELL" == "y" ]]; then
+            for i in "${!SNELL_PORTS[@]}"; do
+                _snell_port="${SNELL_PORTS[$i]}"
+                _snell_tag="${SNELL_TAGS[$i]}"
+                _snell_psk="${SNELL_PSKS[$i]}"
+                _snell_ver="${SNELL_VERSIONS[$i]}"
+                _snell_reuse="${SNELL_REUSES[$i]}"
+                _snell_obfs_mode="${SNELL_OBFS_MODES[$i]}"
+                _snell_obfs_host="${SNELL_OBFS_HOSTS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_SNELL_EOF
+  - name: snell-in-${_snell_port}
+    tag: "${_snell_tag}"
+    type: snell
+    port: ${_snell_port}
+    listen: "::"
+    psk: "${_snell_psk}"
+    # vpsgo-snell-version: ${_snell_ver}
+    # vpsgo-snell-reuse: ${_snell_reuse}
+    # vpsgo-snell-obfs: ${_snell_obfs_mode}
+    # vpsgo-snell-obfs-host: ${_snell_obfs_host}
+    version: ${_snell_ver}
+    reuse: ${_snell_reuse}
+MIHOMOCONF_SNELL_EOF
+                if [[ "$_snell_obfs_mode" != "none" ]]; then
+                    cat >> "$_target_file" <<MIHOMOCONF_SNELL_OBFS_EOF
+    obfs-opts:
+      mode: ${_snell_obfs_mode}
+      host: "${_snell_obfs_host}"
+MIHOMOCONF_SNELL_OBFS_EOF
+                fi
+            done
+        fi
     }
 
     if [[ "$WRITE_MODE" == "new" ]]; then
@@ -10393,6 +10599,7 @@ MIHOMOCONF_HEADER
         [[ "$HY2_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "hysteria2" && _info "已移除旧的 HY2 节点"
         [[ "$TUIC_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "tuic" && _info "已移除旧的 Tuic 节点"
         [[ "$SOCKS_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "socks" && _info "已移除旧的 Socks5 节点"
+        [[ "$SNELL_REPLACE" == "y" ]] && _mihomoconf_remove_listeners_by_type "snell" && _info "已移除旧的 Snell 节点"
         if grep -q '^listeners:' "$CONFIG_FILE" 2>/dev/null; then
             # 将新 listener 内容插入到 listeners: 块末尾（下一个顶级键之前）
             local _tmplistener
@@ -11287,6 +11494,75 @@ MIHOMOCONF_SOCKS_YAML
             if [[ "$_user_idx" -eq 0 ]]; then
                 _warn "  Socks5 入站 ${_socks_tag} 未配置 user，已跳过导出"
             fi
+        done
+    fi
+
+    # Snell 输出
+    if [[ "$ENABLE_SNELL" == "y" ]]; then
+        printf "  ${BOLD}Snell V5 连接信息 (%s 个)${PLAIN}\n" "${#SNELL_PORTS[@]}"
+        local i SNELL_LINK _snell_port _snell_tag _snell_name _snell_client_name _snell_psk _snell_ver _snell_reuse _snell_obfs_mode _snell_obfs_host
+        for i in "${!SNELL_PORTS[@]}"; do
+            _snell_port="${SNELL_PORTS[$i]}"
+            _snell_tag="${SNELL_TAGS[$i]}"
+            _snell_psk="${SNELL_PSKS[$i]}"
+            _snell_ver="${SNELL_VERSIONS[$i]}"
+            _snell_reuse="${SNELL_REUSES[$i]}"
+            _snell_obfs_mode="${SNELL_OBFS_MODES[$i]}"
+            _snell_obfs_host="${SNELL_OBFS_HOSTS[$i]}"
+            
+            _snell_name=$(_mihomoconf_make_node_name "Snell" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _snell_client_name="${_snell_name}-v${_snell_ver}"
+            
+            local _snell_link_opts=""
+            if [[ "$_snell_obfs_mode" != "none" ]]; then
+                _snell_link_opts="&obfs=${_snell_obfs_mode}&obfs-host=$(_mihomoconf_urlencode \"$_snell_obfs_host\")"
+            fi
+            
+            local _encoded_client_name
+            _encoded_client_name=$(_mihomoconf_urlencode "$_snell_client_name")
+            SNELL_LINK=$(printf 'snell://%s@%s:%s?version=%s&reuse=%s%s#%s' \
+                "$_snell_psk" "$SERVER_HOST" "$_snell_port" "$_snell_ver" "$_snell_reuse" "$_snell_link_opts" "$_encoded_client_name")
+                
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_snell_client_name"
+            printf "      入站tag: ${GREEN}%s${PLAIN}\n" "$_snell_tag"
+            printf "      服务器 : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口   : ${GREEN}%s${PLAIN}\n" "$_snell_port"
+            printf "      PSK    : ${GREEN}%s${PLAIN}\n" "$_snell_psk"
+            printf "      版本   : ${GREEN}%s${PLAIN}\n" "$_snell_ver"
+            printf "      复用   : ${GREEN}%s${PLAIN}\n" "$_snell_reuse"
+            if [[ "$_snell_obfs_mode" != "none" ]]; then
+                printf "      混淆   : ${GREEN}%s (${_snell_obfs_host})${PLAIN}\n" "$_snell_obfs_mode"
+            fi
+            
+            printf "  ${CYAN}Surge V5 配置:${PLAIN}\n"
+            local _surge_obfs=""
+            if [[ "$_snell_obfs_mode" != "none" ]]; then
+                _surge_obfs=",obfs=${_snell_obfs_mode},obfs-host=${_snell_obfs_host}"
+            fi
+            printf "  %s=snell,%s,%s,psk=%s,version=%s,reuse=%s%s,tfo=true\n\n" \
+                "$_snell_client_name" "$SERVER_HOST" "$_snell_port" "$_snell_psk" "$_snell_ver" "$_snell_reuse" "$_surge_obfs"
+                
+            printf "  ${CYAN}Clash Meta / Mihomo 客户端 YAML:${PLAIN}\n"
+            cat <<MIHOMOCONF_SNELL_YAML
+      - name: "${_snell_client_name}"
+        type: snell
+        server: ${SERVER_HOST}
+        port: ${_snell_port}
+        psk: ${_snell_psk}
+        version: ${_snell_ver}
+        reuse: ${_snell_reuse}
+MIHOMOCONF_SNELL_YAML
+            if [[ "$_snell_obfs_mode" != "none" ]]; then
+                cat <<MIHOMOCONF_SNELL_YAML_OBFS
+        obfs-opts:
+          mode: ${_snell_obfs_mode}
+          host: "${_snell_obfs_host}"
+MIHOMOCONF_SNELL_YAML_OBFS
+            fi
+            
+            printf "\n  ${CYAN}分享链接:${PLAIN}\n"
+            printf "  %s\n" "$SNELL_LINK"
         done
     fi
 
@@ -12800,6 +13076,73 @@ MIHOMO_SOCKS_YAML
                 done < <(_mihomoconf_read_users_by_tag "$config_file" "$listener_tag")
                 if [[ "$socks_found" -eq 0 ]]; then
                     _warn "跳过 ${name}: 未配置可用 user"
+                fi
+                ;;
+            snell)
+                if [[ -z "$port" || -z "$password" ]]; then
+                    _warn "跳过 ${name}: Snell 字段不完整(port/psk)"
+                    continue
+                fi
+                export_count=$((export_count + 1))
+                listener_export=$((listener_export + 1))
+                
+                local snell_ver_val="${vless_ws_tls:-5}"
+                local snell_reuse_val="${vless_type:-true}"
+                local snell_obfs_val="${hy2_obfs:-none}"
+                local snell_obfs_host_val="${sni}"
+                
+                local snell_name snell_link
+                snell_name="$(_mihomoconf_make_node_name "Snell" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-v${snell_ver_val}"
+                
+                local snell_link_opts=""
+                if [[ "$snell_obfs_val" != "none" ]]; then
+                    snell_link_opts="&obfs=${snell_obfs_val}&obfs-host=$(_mihomoconf_urlencode \"$snell_obfs_host_val\")"
+                fi
+                local _encoded_snell_name
+                _encoded_snell_name=$(_mihomoconf_urlencode "$snell_name")
+                snell_link=$(printf 'snell://%s@%s:%s?version=%s&reuse=%s%s#%s' \
+                    "$password" "$server_ip" "$port" "$snell_ver_val" "$snell_reuse_val" "$snell_link_opts" "$_encoded_snell_name")
+                
+                if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                    printf "%s\n" "$snell_link"
+                else
+                    _separator
+                    printf "  ${BOLD}[Snell] %s${PLAIN}\n" "$snell_name"
+                    printf "    入站tag: ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                    printf "    端口   : ${GREEN}%s${PLAIN}\n" "$port"
+                    printf "    PSK    : ${GREEN}%s${PLAIN}\n" "$password"
+                    printf "    版本   : ${GREEN}%s${PLAIN}\n" "$snell_ver_val"
+                    printf "    复用   : ${GREEN}%s${PLAIN}\n" "$snell_reuse_val"
+                    if [[ "$snell_obfs_val" != "none" ]]; then
+                        printf "    混淆   : ${GREEN}%s (${snell_obfs_host_val})${PLAIN}\n" "$snell_obfs_val"
+                    fi
+                    
+                    printf "    Surge V5 配置:\n"
+                    local _surge_obfs=""
+                    if [[ "$snell_obfs_val" != "none" ]]; then
+                        _surge_obfs=",obfs=${snell_obfs_val},obfs-host=${snell_obfs_host_val}"
+                    fi
+                    printf "    %s=snell,%s,%s,psk=%s,version=%s,reuse=%s%s,tfo=true\n\n" \
+                        "$snell_name" "$server_ip" "$port" "$password" "$snell_ver_val" "$snell_reuse_val" "$_surge_obfs"
+                        
+                    printf "    YAML:\n"
+                    cat <<MIHOMO_SNELL_YAML
+      - name: "${snell_name}"
+        type: snell
+        server: ${server_ip}
+        port: ${port}
+        psk: ${password}
+        version: ${snell_ver_val}
+        reuse: ${snell_reuse_val}
+MIHOMO_SNELL_YAML
+                    if [[ "$snell_obfs_val" != "none" ]]; then
+                        cat <<MIHOMO_SNELL_YAML_OBFS
+        obfs-opts:
+          mode: ${snell_obfs_val}
+          host: "${snell_obfs_host_val}"
+MIHOMO_SNELL_YAML_OBFS
+                    fi
+                    printf "\n    分享链接: ${GREEN}%s${PLAIN}\n" "$snell_link"
                 fi
                 ;;
             *)
