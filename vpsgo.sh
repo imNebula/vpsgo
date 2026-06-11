@@ -21999,6 +21999,864 @@ _snell_manage() {
     done
 }
 
+# --- 11.5 Snell V6 管理 ---
+
+_SNELL6_CONFIG_DIR="/etc/snell6"
+_SNELL6_CONFIG_FILE="/etc/snell6/snell-server.conf"
+_SNELL6_SERVICE_NAME="snell6"
+_SNELL6_SYSTEMD_SERVICE_FILE="/etc/systemd/system/${_SNELL6_SERVICE_NAME}.service"
+_SNELL6_OPENRC_SERVICE_FILE="/etc/init.d/${_SNELL6_SERVICE_NAME}"
+_SNELL6_BIN="/usr/local/bin/snell-server-v6"
+_SNELL6_LOG_FILE="/var/log/snell6.log"
+_SNELL6_ERR_FILE="/var/log/snell6.error.log"
+_SNELL6_KB_URL="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell"
+
+_snell6_running_pid() {
+    local pid=""
+    local pid_file="/run/${_SNELL6_SERVICE_NAME}.pid"
+
+    if [[ -f "$pid_file" ]]; then
+        pid=$(tr -cd '0-9' < "$pid_file" 2>/dev/null || true)
+        if _is_digit "${pid:-}" && kill -0 "$pid" >/dev/null 2>&1; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    fi
+
+    if command -v pgrep >/dev/null 2>&1; then
+        pid=$(pgrep -x snell-server-v6 2>/dev/null | head -n1 || true)
+        [[ -z "$pid" ]] && pid=$(pgrep snell-server-v6 2>/dev/null | head -n1 || true)
+        if _is_digit "${pid:-}" && kill -0 "$pid" >/dev/null 2>&1; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+_snell6_systemd_service_configured() {
+    _has_systemd || return 1
+    systemctl is-enabled "${_SNELL6_SERVICE_NAME}.service" &>/dev/null \
+        || systemctl is-active "${_SNELL6_SERVICE_NAME}.service" &>/dev/null \
+        || [[ -f "$_SNELL6_SYSTEMD_SERVICE_FILE" ]]
+}
+
+_snell6_openrc_service_configured() {
+    _has_openrc || return 1
+    [[ -x "$_SNELL6_OPENRC_SERVICE_FILE" ]] || _openrc_service_in_default "$_SNELL6_SERVICE_NAME"
+}
+
+_snell6_service_is_active() {
+    if _has_systemd && systemctl is-active --quiet "$_SNELL6_SERVICE_NAME" 2>/dev/null; then
+        return 0
+    fi
+    if _has_openrc && [[ -x "$_SNELL6_OPENRC_SERVICE_FILE" ]] && rc-service "$_SNELL6_SERVICE_NAME" status >/dev/null 2>&1; then
+        return 0
+    fi
+    _snell6_running_pid >/dev/null 2>&1
+}
+
+_snell6_detect_arch() {
+    local machine
+    machine=$(uname -m 2>/dev/null || echo unknown)
+    case "$machine" in
+        x86_64|amd64) echo "amd64" ;;
+        i386|i486|i586|i686) echo "i386" ;;
+        aarch64|arm64) echo "aarch64" ;;
+        armv7l|armv7) echo "armv7l" ;;
+        *) echo "" ;;
+    esac
+}
+
+_snell6_bin_version() {
+    if [[ -x "$_SNELL6_BIN" ]]; then
+        local out
+        out=$("$_SNELL6_BIN" --version 2>/dev/null | head -1 || true)
+        [[ -z "$out" ]] && out=$("$_SNELL6_BIN" -v 2>/dev/null | head -1 || true)
+        printf '%s' "$out"
+        return
+    fi
+    echo ""
+}
+
+_snell6_get_latest_version() {
+    local page version
+    page=$(curl -fsSL "$_SNELL6_KB_URL" 2>/dev/null || true)
+    version=$(printf '%s' "$page" | grep -oE 'snell-server-v6\.[0-9]+\.[0-9]+[a-zA-Z0-9]*-linux-amd64\.zip' | head -1 \
+        | sed -E 's/.*(v6\.[0-9]+\.[0-9]+[a-zA-Z0-9]*).*/\1/')
+    if [[ -z "$version" ]]; then
+        version=$(printf '%s' "$page" | grep -oE 'v6\.[0-9]+\.[0-9]+[a-zA-Z0-9]*' | head -1)
+    fi
+    printf '%s' "$version"
+}
+
+_snell6_conf_get_value() {
+    local key="$1"
+    [[ -f "$_SNELL6_CONFIG_FILE" ]] || return 1
+    awk -F'=' -v k="$key" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        {
+            line=$0
+            lower=tolower(line)
+            want=tolower(k)
+            if (lower ~ "^[[:space:]]*" want "[[:space:]]*=") {
+                sub(/^[^=]*=/, "", line)
+                print trim(line)
+                exit
+            }
+        }
+    ' "$_SNELL6_CONFIG_FILE"
+}
+
+_snell6_parse_port_from_listen() {
+    local listen="$1" first_addr candidate
+    listen=$(_mihomoconf_trim "${listen%%#*}")
+    [[ -n "$listen" ]] || return 1
+    first_addr="${listen%%,*}"
+    first_addr=$(_mihomoconf_trim "$first_addr")
+    candidate=$(_mihomoconf_trim "${first_addr##*:}")
+    if _is_valid_port "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+_snell6_port_conflict_with_mihomo() {
+    _snell_port_conflict_with_mihomo "$1"
+}
+
+_snell6_port_usage_line() {
+    _snell_port_usage_line "$1"
+}
+
+_snell6_pick_listen_port() {
+    local default_port="${1:-6160}"
+    local _out_var="${2:-}"
+    local port_input usage_line
+
+    while true; do
+        read -rp "  Snell V6 监听端口 [默认 ${default_port}]: " port_input
+        port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
+        if ! _is_valid_port "$port_input"; then
+            _warn "端口无效，请输入 1-65535 的数字"
+            continue
+        fi
+        if _snell6_port_conflict_with_mihomo "$port_input"; then
+            _warn "端口 ${port_input} 与 mihomo 配置冲突（listeners/port/mixed-port 等），请更换端口"
+            continue
+        fi
+        usage_line=$(_snell6_port_usage_line "$port_input")
+        if [[ -n "$usage_line" && "$usage_line" != *"snell-server"* ]]; then
+            _warn "端口 ${port_input} 已被占用: ${usage_line}"
+            continue
+        fi
+        if [[ -n "$_out_var" ]]; then
+            printf -v "$_out_var" '%s' "$port_input"
+            return 0
+        fi
+        printf '%s' "$port_input"
+        return 0
+    done
+}
+
+_snell6_install_latest_core() {
+    local arch latest_version url tmp_zip tmp_dir extracted_bin ver_out
+
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        _error_no_exit "Snell 仅支持 Linux 系统"
+        return 1
+    fi
+    _ensure_curl || true
+    if ! command -v curl >/dev/null 2>&1; then
+        _error_no_exit "缺少必要命令: curl，请先安装"
+        return 1
+    fi
+    if ! command -v unzip >/dev/null 2>&1; then
+        _warn "未检测到 unzip，尝试自动安装..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq >/dev/null 2>&1 || true
+            apt-get install -y -qq unzip >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y unzip >/dev/null 2>&1 || true
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y unzip >/dev/null 2>&1 || true
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache unzip >/dev/null 2>&1 || true
+        fi
+        if ! command -v unzip >/dev/null 2>&1; then
+            _error_no_exit "缺少必要命令: unzip，请先安装"
+            return 1
+        fi
+    fi
+
+    arch=$(_snell6_detect_arch)
+    if [[ -z "$arch" ]]; then
+        _error_no_exit "不支持的架构: $(uname -m)"
+        return 1
+    fi
+    latest_version=$(_snell6_get_latest_version)
+    if [[ -z "$latest_version" ]]; then
+        _error_no_exit "无法从官方知识库获取 Snell V6 最新版本号"
+        return 1
+    fi
+
+    url="https://dl.nssurge.com/snell/snell-server-${latest_version}-linux-${arch}.zip"
+    tmp_zip=$(_mktemp_file snell6 .zip) || {
+        _error_no_exit "创建临时文件失败"
+        return 1
+    }
+    tmp_dir=$(mktemp -d /tmp/snell6.XXXXXX)
+
+    _info "使用官方 Snell V6 工具安装: ${latest_version} (${arch})"
+    printf "    ${DIM}%s${PLAIN}\n" "$url"
+    if ! _mihomo_download "$url" "$tmp_zip"; then
+        rm -rf "$tmp_zip" "$tmp_dir"
+        _error_no_exit "官方下载失败，请检查网络或架构匹配"
+        return 1
+    fi
+    if [[ ! -s "$tmp_zip" ]]; then
+        rm -rf "$tmp_zip" "$tmp_dir"
+        _error_no_exit "下载文件为空，请稍后重试"
+        return 1
+    fi
+
+    if ! unzip -oq "$tmp_zip" -d "$tmp_dir"; then
+        rm -rf "$tmp_zip" "$tmp_dir"
+        _error_no_exit "解压失败"
+        return 1
+    fi
+    extracted_bin=$(find "$tmp_dir" -type f -name 'snell-server' | head -1)
+    if [[ -z "$extracted_bin" || ! -f "$extracted_bin" ]]; then
+        rm -rf "$tmp_zip" "$tmp_dir"
+        _error_no_exit "安装包中未找到 snell-server 可执行文件"
+        return 1
+    fi
+
+    install -m 0755 "$extracted_bin" "$_SNELL6_BIN"
+    rm -rf "$tmp_zip" "$tmp_dir"
+
+    if [[ ! -x "$_SNELL6_BIN" ]]; then
+        _error_no_exit "snell-server-v6 安装失败"
+        return 1
+    fi
+    ver_out=$(_snell6_bin_version)
+    _success "Snell V6 安装完成"
+    [[ -n "$ver_out" ]] && _info "当前版本: $ver_out"
+    return 0
+}
+
+_snell6_install_latest() {
+    _header "Snell V6 安装/更新"
+    _time_sync_check_and_enable
+    _snell6_install_latest_core
+    _press_any_key
+}
+
+_snell6_enable_now() {
+    if [[ ! -x "$_SNELL6_BIN" ]]; then
+        _error_no_exit "未检测到 snell-server-v6，请先安装"
+        return 1
+    fi
+    if [[ ! -f "$_SNELL6_CONFIG_FILE" ]]; then
+        _error_no_exit "未检测到配置文件: ${_SNELL6_CONFIG_FILE}"
+        return 1
+    fi
+
+    if _has_systemd; then
+        cat > "$_SNELL6_SYSTEMD_SERVICE_FILE" <<EOF
+[Unit]
+Description=Snell V6 Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${_SNELL6_BIN} -c ${_SNELL6_CONFIG_FILE}
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=32768
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if ! systemctl enable "$_SNELL6_SERVICE_NAME" >/dev/null 2>&1; then
+            _error_no_exit "设置 snell6 开机自启失败"
+            return 1
+        fi
+        if ! systemctl restart "$_SNELL6_SERVICE_NAME" >/dev/null 2>&1; then
+            _error_no_exit "snell6 启动失败，请检查: systemctl status ${_SNELL6_SERVICE_NAME}"
+            return 1
+        fi
+        sleep 1
+        if systemctl is-active --quiet "$_SNELL6_SERVICE_NAME"; then
+            _success "snell6 已成功启动"
+            return 0
+        fi
+        _error_no_exit "snell6 启动失败，请检查: systemctl status ${_SNELL6_SERVICE_NAME}"
+        return 1
+    fi
+
+    if _has_openrc; then
+        mkdir -p "$(dirname "$_SNELL6_LOG_FILE")"
+        cat > "$_SNELL6_OPENRC_SERVICE_FILE" <<EOF
+#!/sbin/openrc-run
+name="Snell6"
+description="Snell V6 Proxy Service"
+
+command="${_SNELL6_BIN}"
+command_args="-c ${_SNELL6_CONFIG_FILE}"
+command_background=true
+pidfile="/run/${_SNELL6_SERVICE_NAME}.pid"
+output_log="${_SNELL6_LOG_FILE}"
+error_log="${_SNELL6_ERR_FILE}"
+
+depend() {
+    need net
+}
+EOF
+        chmod 0755 "$_SNELL6_OPENRC_SERVICE_FILE" || {
+            _error_no_exit "写入 OpenRC 服务文件失败: ${_SNELL6_OPENRC_SERVICE_FILE}"
+            return 1
+        }
+        if ! rc-update add "$_SNELL6_SERVICE_NAME" default >/dev/null 2>&1; then
+            if ! _openrc_service_in_default "$_SNELL6_SERVICE_NAME"; then
+                _error_no_exit "设置 snell6 开机自启失败"
+                return 1
+            fi
+        fi
+        if ! rc-service "$_SNELL6_SERVICE_NAME" restart >/dev/null 2>&1; then
+            if ! rc-service "$_SNELL6_SERVICE_NAME" start >/dev/null 2>&1; then
+                _error_no_exit "snell6 启动失败，请检查: rc-service ${_SNELL6_SERVICE_NAME} status"
+                return 1
+            fi
+        fi
+        sleep 1
+        if _snell6_service_is_active; then
+            _success "snell6 已成功启动"
+            return 0
+        fi
+        _error_no_exit "snell6 启动失败，请检查: rc-service ${_SNELL6_SERVICE_NAME} status"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$_SNELL6_LOG_FILE")"
+    pkill -x snell-server-v6 >/dev/null 2>&1 || pkill snell-server-v6 >/dev/null 2>&1 || true
+    nohup "$_SNELL6_BIN" -c "$_SNELL6_CONFIG_FILE" >>"$_SNELL6_LOG_FILE" 2>>"$_SNELL6_ERR_FILE" &
+    sleep 1
+    if _snell6_running_pid >/dev/null 2>&1; then
+        _success "snell6 已成功启动 (非 systemd/OpenRC 模式)"
+        return 0
+    fi
+    _error_no_exit "snell6 启动失败"
+    return 1
+}
+
+_snell6_write_config() {
+    local listen_val="$1" psk="$2" dns_ip_pref="$3" egress_iface="$4"
+    mkdir -p "$_SNELL6_CONFIG_DIR"
+    cat > "$_SNELL6_CONFIG_FILE" <<EOF
+[snell-server]
+listen = ${listen_val}
+psk = ${psk}
+dns-ip-preference = ${dns_ip_pref}
+EOF
+    if [[ -n "$egress_iface" ]]; then
+        printf "egress-interface = %s\n" "$egress_iface" >> "$_SNELL6_CONFIG_FILE"
+    fi
+}
+
+_snell6_configure() {
+    _header "Snell V6 配置"
+
+    local install_confirm current_listen current_port current_psk current_dns_pref current_egress
+    local listen_port psk_input psk_value egress_iface
+    local host_default host_input client_host
+    local node_name
+    local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
+    local GEO_LOOKUP_IP=""
+
+    if [[ ! -x "$_SNELL6_BIN" ]]; then
+        read -rp "  未检测到 snell-server-v6，先安装? [Y/n]: " install_confirm
+        if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
+            _info "已取消"
+            _press_any_key
+            return
+        fi
+        _time_sync_check_and_enable
+        if ! _snell6_install_latest_core; then
+            _press_any_key
+            return
+        fi
+    fi
+
+    current_listen=$(_snell6_conf_get_value "listen" 2>/dev/null || true)
+    current_port=$(_snell6_parse_port_from_listen "$current_listen" 2>/dev/null || true)
+    if ! _is_valid_port "${current_port:-}"; then
+        current_port="6160"
+    fi
+    current_psk=$(_snell6_conf_get_value "psk" 2>/dev/null || true)
+    current_dns_pref=$(_snell6_conf_get_value "dns-ip-preference" 2>/dev/null || true)
+    [[ -z "$current_dns_pref" ]] && current_dns_pref="default"
+    current_egress=$(_snell6_conf_get_value "egress-interface" 2>/dev/null || true)
+
+    _info "将生成 Snell V6 配置并进行端口冲突检查（含 mihomo listeners 与常用监听端口字段）。"
+    local listen_port=""
+    _snell6_pick_listen_port "$current_port" listen_port
+
+    read -rp "  PSK [留空自动生成]: " psk_input
+    psk_input=$(_mihomoconf_trim "${psk_input:-}")
+    if [[ -n "$psk_input" ]]; then
+        psk_value="$psk_input"
+    elif [[ -n "$current_psk" ]]; then
+        psk_value="$current_psk"
+    else
+        psk_value=$(_mihomoconf_gen_anytls_password)
+    fi
+    if [[ -z "$psk_value" ]]; then
+        _error_no_exit "PSK 不能为空"
+        _press_any_key
+        return
+    fi
+    if [[ "$psk_value" == *"|"* ]]; then
+        _error_no_exit "PSK 不能包含字符 |"
+        _press_any_key
+        return
+    fi
+
+    # Choose listen type
+    local listen_type_input listen_value="0.0.0.0:${listen_port},[::]:${listen_port}"
+    echo ""
+    echo "  选择监听 IP 地址类型:"
+    echo "    1) IPv4 & IPv6 双栈 (同时监听) [默认]"
+    echo "    2) 仅监听 IPv4"
+    echo "    3) 仅监听 IPv6"
+    read -rp "  输入选择 [1-3]: " listen_type_input
+    case "$listen_type_input" in
+        2)
+            listen_value="0.0.0.0:${listen_port}"
+            ;;
+        3)
+            listen_value="[::]:${listen_port}"
+            ;;
+        *)
+            listen_value="0.0.0.0:${listen_port},[::]:${listen_port}"
+            ;;
+    esac
+
+    # Choose dns-ip-preference
+    local dns_pref_input dns_pref_value="default"
+    echo ""
+    echo "  选择 DNS 解析 IP 偏好 (dns-ip-preference):"
+    echo "    1) default (系统默认) [默认]"
+    echo "    2) prefer-ipv4 (优先 IPv4)"
+    echo "    3) prefer-ipv6 (优先 IPv6)"
+    echo "    4) ipv4-only (仅 IPv4)"
+    echo "    5) ipv6-only (仅 IPv6)"
+    read -rp "  输入选择 [1-5]: " dns_pref_input
+    case "$dns_pref_input" in
+        2) dns_pref_value="prefer-ipv4" ;;
+        3) dns_pref_value="prefer-ipv6" ;;
+        4) dns_pref_value="ipv4-only" ;;
+        5) dns_pref_value="ipv6-only" ;;
+        *) dns_pref_value="default" ;;
+    esac
+
+    read -rp "  egress-interface [可留空，如 eth0]: " egress_iface
+    egress_iface=$(_mihomoconf_trim "${egress_iface:-$current_egress}")
+    if [[ -n "$egress_iface" ]]; then
+        if ! ip link show "$egress_iface" >/dev/null 2>&1; then
+            _warn "网卡 ${egress_iface} 不存在，已忽略 egress-interface 配置"
+            egress_iface=""
+        fi
+    fi
+
+    _snell6_write_config "$listen_value" "$psk_value" "$dns_pref_value" "$egress_iface"
+    _info "配置文件已写入: ${_SNELL6_CONFIG_FILE}"
+
+    if ! _snell6_enable_now; then
+        _warn "自动启动失败，请检查日志后重试"
+        _press_any_key
+        return
+    fi
+
+    host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
+    [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
+    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
+    if [[ -z "$client_host" ]]; then
+        _error_no_exit "客户端连接地址不能为空"
+        _press_any_key
+        return
+    fi
+
+    GEO_LOOKUP_IP="$client_host"
+    if [[ ! "$GEO_LOOKUP_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        GEO_LOOKUP_IP=$(_mihomoconf_get_server_ip)
+    fi
+    IFS=$'\x1f' read -r NODE_COUNTRY NODE_CITY NODE_COUNTRY_CODE NODE_FLAG < <(_mihomoconf_get_geo_profile "$GEO_LOOKUP_IP")
+    if [[ -n "$NODE_CITY" ]]; then
+        _info "地区识别: ${NODE_COUNTRY} ${NODE_CITY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    else
+        _info "地区识别: ${NODE_COUNTRY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    fi
+    node_name=$(printf '%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+
+    local encoded_name snell_link
+    encoded_name=$(_mihomoconf_urlencode "$node_name")
+    snell_link=$(printf 'snell://%s@%s:%s?version=6&reuse=true&tfo=true#%s' \
+        "$psk_value" "$client_host" "$listen_port" "$encoded_name")
+
+    echo ""
+    _separator
+    printf "  ${BOLD}Snell V6 节点配置与链接${PLAIN}\n"
+    _separator
+    printf "  ${CYAN}Surge V6 配置:${PLAIN}\n"
+    printf "  %s=snell,%s,%s,psk=%s,version=6,reuse=true,tfo=true\n\n" "$node_name" "$client_host" "$listen_port" "$psk_value"
+    printf "  ${CYAN}Mihomo (Clash Meta) 配置:${PLAIN}\n"
+    printf "  - name: \"%s\"\n" "$node_name"
+    printf "    type: snell\n"
+    printf "    server: %s\n" "$client_host"
+    printf "    port: %s\n" "$listen_port"
+    printf "    psk: %s\n" "$psk_value"
+    printf "    version: 6\n"
+    printf "    udp: true\n"
+    printf "    tfo: true\n\n"
+    printf "  ${CYAN}分享链接:${PLAIN}\n"
+    printf "  %s\n" "$snell_link"
+    _separator
+    _press_any_key
+}
+
+_snell6_export_node_config() {
+    _header "导出 Snell V6 节点配置"
+
+    if [[ ! -f "$_SNELL6_CONFIG_FILE" ]]; then
+        _error_no_exit "未找到配置文件: ${_SNELL6_CONFIG_FILE}"
+        _info "请先执行「配置并启动 Snell V6」"
+        _press_any_key
+        return
+    fi
+
+    local listen_port current_listen psk_value
+    local host_default host_input client_host
+    local node_name node_name_input
+    local NODE_COUNTRY="" NODE_CITY="" NODE_COUNTRY_CODE="UN" NODE_FLAG="🏳"
+    local GEO_LOOKUP_IP=""
+
+    current_listen=$(_snell6_conf_get_value "listen" 2>/dev/null || true)
+    listen_port=$(_snell6_parse_port_from_listen "$current_listen" 2>/dev/null || true)
+    psk_value=$(_snell6_conf_get_value "psk" 2>/dev/null || true)
+
+    if ! _is_valid_port "${listen_port:-}"; then
+        _error_no_exit "配置中的端口无效，请先重新配置"
+        _press_any_key
+        return
+    fi
+    if [[ -z "$psk_value" ]]; then
+        _error_no_exit "配置缺少 PSK，请先重新配置"
+        _press_any_key
+        return
+    fi
+
+    host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
+    [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
+    [[ -z "$host_default" ]] && host_default="YOUR_SERVER_IP"
+
+    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
+    if [[ -z "$client_host" ]]; then
+        _error_no_exit "客户端连接地址不能为空"
+        _press_any_key
+        return
+    fi
+
+    GEO_LOOKUP_IP="$client_host"
+    if [[ ! "$GEO_LOOKUP_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        GEO_LOOKUP_IP=$(_mihomoconf_get_server_ip)
+    fi
+    IFS=$'\x1f' read -r NODE_COUNTRY NODE_CITY NODE_COUNTRY_CODE NODE_FLAG < <(_mihomoconf_get_geo_profile "$GEO_LOOKUP_IP")
+    if [[ -n "$NODE_CITY" ]]; then
+        _info "地区识别: ${NODE_COUNTRY} ${NODE_CITY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    else
+        _info "地区识别: ${NODE_COUNTRY} (${NODE_FLAG}${NODE_COUNTRY_CODE})"
+    fi
+
+    node_name=$(printf '%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+    read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
+    node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
+    [[ -z "$node_name" ]] && node_name=$(printf '%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+
+    local encoded_name snell_link
+    encoded_name=$(_mihomoconf_urlencode "$node_name")
+    snell_link=$(printf 'snell://%s@%s:%s?version=6&reuse=true&tfo=true#%s' \
+        "$psk_value" "$client_host" "$listen_port" "$encoded_name")
+
+    echo ""
+    _success "Snell V6 节点配置如下"
+    _separator
+    printf "  ${CYAN}Surge V6 配置:${PLAIN}\n"
+    printf "  %s=snell,%s,%s,psk=%s,version=6,reuse=true,tfo=true\n\n" "$node_name" "$client_host" "$listen_port" "$psk_value"
+    printf "  ${CYAN}Mihomo (Clash Meta) 配置:${PLAIN}\n"
+    printf "  - name: \"%s\"\n" "$node_name"
+    printf "    type: snell\n"
+    printf "    server: %s\n" "$client_host"
+    printf "    port: %s\n" "$listen_port"
+    printf "    psk: %s\n" "$psk_value"
+    printf "    version: 6\n"
+    printf "    udp: true\n"
+    printf "    tfo: true\n\n"
+    printf "  ${CYAN}分享链接:${PLAIN}\n"
+    printf "  %s\n" "$snell_link"
+    _separator
+    _press_any_key
+}
+
+_snell6_restart() {
+    _header "Snell V6 重启"
+
+    if [[ ! -x "$_SNELL6_BIN" ]]; then
+        _error_no_exit "未检测到 snell-server-v6，请先安装"
+        _press_any_key
+        return
+    fi
+
+    if _snell6_systemd_service_configured; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if ! systemctl restart "$_SNELL6_SERVICE_NAME"; then
+            _error_no_exit "snell6 重启失败，请检查: systemctl status ${_SNELL6_SERVICE_NAME}"
+            _press_any_key
+            return
+        fi
+        sleep 1
+        if systemctl is-active --quiet "$_SNELL6_SERVICE_NAME"; then
+            _success "snell6 已成功重启"
+        else
+            _error_no_exit "snell6 重启失败，请检查: systemctl status ${_SNELL6_SERVICE_NAME}"
+        fi
+    elif _snell6_openrc_service_configured; then
+        if ! rc-service "$_SNELL6_SERVICE_NAME" restart >/dev/null 2>&1; then
+            if ! rc-service "$_SNELL6_SERVICE_NAME" start >/dev/null 2>&1; then
+                _error_no_exit "snell6 重启失败，请检查: rc-service ${_SNELL6_SERVICE_NAME} status"
+                _press_any_key
+                return
+            fi
+        fi
+        sleep 1
+        if _snell6_service_is_active; then
+            _success "snell6 已成功重启"
+        else
+            _error_no_exit "snell6 重启失败，请检查: rc-service ${_SNELL6_SERVICE_NAME} status"
+        fi
+    else
+        local pid
+        pid=$(_snell6_running_pid 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+        if [[ ! -f "$_SNELL6_CONFIG_FILE" ]]; then
+            _error_no_exit "未找到配置文件: ${_SNELL6_CONFIG_FILE}"
+            _press_any_key
+            return
+        fi
+        mkdir -p "$(dirname "$_SNELL6_LOG_FILE")"
+        nohup "$_SNELL6_BIN" -c "$_SNELL6_CONFIG_FILE" >>"$_SNELL6_LOG_FILE" 2>>"$_SNELL6_ERR_FILE" &
+        sleep 1
+        if _snell6_running_pid >/dev/null 2>&1; then
+            _success "snell6 已成功启动"
+        else
+            _error_no_exit "snell6 启动失败"
+        fi
+    fi
+    _press_any_key
+}
+
+_snell6_status() {
+    _header "Snell V6 运行状态"
+
+    if _snell6_systemd_service_configured; then
+        echo ""
+        systemctl status "$_SNELL6_SERVICE_NAME" --no-pager
+    elif _snell6_openrc_service_configured; then
+        echo ""
+        rc-service "$_SNELL6_SERVICE_NAME" status || true
+    else
+        local pid
+        pid=$(_snell6_running_pid 2>/dev/null || true)
+        echo ""
+        if [[ -n "$pid" ]]; then
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: %s)\n" "$pid"
+        else
+            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
+        fi
+        if [[ -f "$_SNELL6_CONFIG_FILE" ]]; then
+            _info "配置文件: $_SNELL6_CONFIG_FILE"
+        fi
+    fi
+    _press_any_key
+}
+
+_snell6_log() {
+    _header "Snell V6 日志"
+
+    if _snell6_systemd_service_configured; then
+        _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
+        _separator
+        echo ""
+        journalctl -u "$_SNELL6_SERVICE_NAME" --no-pager -n 50
+        echo ""
+        _separator
+        local follow
+        read -rp "  实时跟踪日志? [y/N]: " follow
+        if [[ "$follow" =~ ^[Yy] ]]; then
+            journalctl -u "$_SNELL6_SERVICE_NAME" -f
+        fi
+    else
+        if ! _tail_log_files_interactive "snell6" "$_SNELL6_LOG_FILE" "$_SNELL6_ERR_FILE" "rc-service ${_SNELL6_SERVICE_NAME} status"; then
+            _warn "snell6 当前未使用 systemd 管理，且未检测到日志文件"
+        fi
+    fi
+    _press_any_key
+}
+
+_snell6_uninstall() {
+    _header "Snell V6 卸载"
+
+    local confirm remove_config removed_count=0
+
+    _warn "将停止并卸载 Snell V6，可删除配置目录。"
+    printf "    systemd 服务文件: %s\n" "$_SNELL6_SYSTEMD_SERVICE_FILE"
+    printf "    OpenRC 服务文件 : %s\n" "$_SNELL6_OPENRC_SERVICE_FILE"
+    printf "    可执行文件: %s\n" "$_SNELL6_BIN"
+    printf "    配置目录: %s\n" "$_SNELL6_CONFIG_DIR"
+    read -rp "  确认卸载 Snell V6? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+
+    if _has_systemd; then
+        systemctl stop "$_SNELL6_SERVICE_NAME" >/dev/null 2>&1 || true
+        systemctl disable "$_SNELL6_SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+    if _has_openrc; then
+        rc-service "$_SNELL6_SERVICE_NAME" stop >/dev/null 2>&1 || true
+        rc-update del "$_SNELL6_SERVICE_NAME" default >/dev/null 2>&1 || true
+    fi
+    pkill -x snell-server-v6 >/dev/null 2>&1 || pkill snell-server-v6 >/dev/null 2>&1 || true
+
+    if [[ -f "$_SNELL6_SYSTEMD_SERVICE_FILE" ]]; then
+        rm -f "$_SNELL6_SYSTEMD_SERVICE_FILE"
+        removed_count=$((removed_count + 1))
+    fi
+    if [[ -f "$_SNELL6_OPENRC_SERVICE_FILE" ]]; then
+        rm -f "$_SNELL6_OPENRC_SERVICE_FILE"
+        removed_count=$((removed_count + 1))
+    fi
+    if _has_systemd; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed "$_SNELL6_SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+
+    if [[ -f "$_SNELL6_BIN" || -L "$_SNELL6_BIN" ]]; then
+        rm -f "$_SNELL6_BIN"
+        removed_count=$((removed_count + 1))
+    fi
+
+    if [[ -f "$_SNELL6_LOG_FILE" || -f "$_SNELL6_ERR_FILE" ]]; then
+        rm -f "$_SNELL6_LOG_FILE" "$_SNELL6_ERR_FILE"
+        removed_count=$((removed_count + 1))
+    fi
+
+    if [[ -d "$_SNELL6_CONFIG_DIR" ]]; then
+        read -rp "  同时删除配置目录 ${_SNELL6_CONFIG_DIR}? [y/N]: " remove_config
+        if [[ "$remove_config" =~ ^[Yy] ]]; then
+            rm -rf "$_SNELL6_CONFIG_DIR"
+            removed_count=$((removed_count + 1))
+        fi
+    fi
+
+    if (( removed_count == 0 )); then
+        _warn "未检测到可删除的 Snell V6 文件，已完成服务清理。"
+    else
+        _success "Snell V6 卸载完成"
+    fi
+    _press_any_key
+}
+
+_snell6_manage_screen() {
+    _header "Snell V6 管理"
+    local snell_ver="未安装"
+    local snell_status="未运行"
+    local snell_status_tone="red"
+    local snell_port="-"
+
+    if [[ -x "$_SNELL6_BIN" ]]; then
+        local ver
+        ver=$(_snell6_bin_version)
+        snell_ver="${ver:-已安装}"
+        if _snell6_service_is_active; then
+            local pid
+            pid=$(_snell6_running_pid 2>/dev/null || true)
+            if [[ -n "$pid" ]]; then
+                snell_status="运行中 (PID: $pid)"
+            else
+                snell_status="运行中"
+            fi
+            snell_status_tone="green"
+        fi
+    fi
+
+    if [[ -f "$_SNELL6_CONFIG_FILE" ]]; then
+        local l
+        l=$(_snell6_conf_get_value "listen" 2>/dev/null || true)
+        local p
+        p=$(_snell6_parse_port_from_listen "$l" 2>/dev/null || true)
+        snell_port="${p:-未知}"
+    fi
+
+    printf "  ${BOLD}状态信息${PLAIN}\n"
+    _separator
+    _status_kv_pair "版本" "$snell_ver" "dim" 8 "状态" "$snell_status" "$snell_status_tone" 8
+    _status_kv_pair "端口" "$snell_port" "cyan" 8 "文件" "$_SNELL6_CONFIG_FILE" "dim" 8
+
+    _separator
+    _menu_pair "1" "安装/更新 Snell V6" "安装服务端" "green" "2" "配置并启动 Snell V6" "检查端口" "green"
+    _menu_pair "3" "重启 Snell V6" "" "green" "4" "查看状态" "" "green"
+    _menu_pair "5" "导出 Snell V6 配置" "输出 Surge/Mihomo/链接" "green" "6" "查看日志" "" "green"
+    _menu_item "7" "卸载 Snell V6" "停止并清理" "yellow"
+    _menu_item "0" "返回上级菜单" "" "red"
+    _separator
+}
+
+_snell6_manage() {
+    while true; do
+        _ui_print_screen _snell6_manage_screen
+
+        local ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        case "$ch" in
+            1) _snell6_install_latest ;;
+            2) _snell6_configure ;;
+            3) _snell6_restart ;;
+            4) _snell6_status ;;
+            5) _snell6_export_node_config ;;
+            6) _snell6_log ;;
+            7) _snell6_uninstall ;;
+            0) return ;;
+            *) _error_no_exit "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
 # --- 12. Realm 端口转发管理 ---
 
 _REALM_CONFIG_DIR="/etc/realm"
@@ -22265,7 +23123,13 @@ _realm_parse_endpoints() {
             return s
         }
         BEGIN { in_endpoint = 0; listen = ""; remote = "" }
-        /^\[\[endpoints\]\]/ {
+        {
+            line = $0
+            sub(/[[:space:]]*#.*/, "", line)
+            gsub(/^[[:space:]]+/, "", line)
+            gsub(/[[:space:]]+$/, "", line)
+        }
+        line == "[[endpoints]]" {
             if (in_endpoint && listen != "" && remote != "")
                 printf "%s\x1f%s\n", listen, remote
             in_endpoint = 1
@@ -22273,17 +23137,17 @@ _realm_parse_endpoints() {
             remote = ""
             next
         }
-        in_endpoint && /^[[:space:]]*listen[[:space:]]*=/ {
-            val = $0; sub(/^[^=]*=/, "", val)
+        in_endpoint && line ~ /^listen[[:space:]]*=/ {
+            val = line; sub(/^[^=]*=/, "", val)
             listen = unquote(trim(val))
             next
         }
-        in_endpoint && /^[[:space:]]*remote[[:space:]]*=/ {
-            val = $0; sub(/^[^=]*=/, "", val)
+        in_endpoint && line ~ /^remote[[:space:]]*=/ {
+            val = line; sub(/^[^=]*=/, "", val)
             remote = unquote(trim(val))
             next
         }
-        /^\[/ && !/^\[\[endpoints\]\]/ {
+        line ~ /^\[/ && line != "[[endpoints]]" {
             if (in_endpoint && listen != "" && remote != "")
                 printf "%s\x1f%s\n", listen, remote
             in_endpoint = 0
@@ -22424,8 +23288,23 @@ _realm_port_conflict_with_mihomo() {
     return 1
 }
 
+_realm_port_in_config() {
+    local target_port="$1"
+    local l r p
+    [[ -f "$_REALM_CONFIG_FILE" ]] || return 1
+    while IFS=$'\x1f' read -r l r; do
+        [[ -z "$l" ]] && continue
+        p="${l##*:}"
+        if [[ "$p" == "$target_port" ]]; then
+            return 0
+        fi
+    done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+    return 1
+}
+
 _realm_pick_listen_port() {
     local default_port="${1:-8000}"
+    local _out_var="${2:-}"
     local port_input usage_line
 
     while true; do
@@ -22433,6 +23312,10 @@ _realm_pick_listen_port() {
         port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
         if ! _is_valid_port "$port_input"; then
             _warn "端口无效，请输入 1-65535 的数字"
+            continue
+        fi
+        if _realm_port_in_config "$port_input"; then
+            _warn "端口 ${port_input} 已在 Realm 配置中被使用，请更换端口"
             continue
         fi
         if _realm_port_conflict_with_mihomo "$port_input"; then
@@ -22443,6 +23326,10 @@ _realm_pick_listen_port() {
         if [[ -n "$usage_line" && "$usage_line" != *"realm"* ]]; then
             _warn "端口 ${port_input} 已被占用: ${usage_line}"
             continue
+        fi
+        if [[ -n "$_out_var" ]]; then
+            printf -v "$_out_var" '%s' "$port_input"
+            return 0
         fi
         printf '%s' "$port_input"
         return 0
@@ -22788,13 +23675,14 @@ _realm_add_rule() {
     _info "配置监听端 → 转发目标"
     echo ""
 
-    listen_port=$(_realm_pick_listen_port "8000")
+    local listen_port
+    _realm_pick_listen_port "8000" listen_port
 
-    echo "  选择监听地址类型:"
-    echo "    1) 同时监听 IPv4 和 IPv6 (0.0.0.0 和 [::]) [默认]"
+    echo "  选择监听 IP 类型:"
+    echo "    1) IPv4 & IPv6 双栈 (同时监听) [默认]"
     echo "    2) 仅监听 IPv4 (0.0.0.0)"
     echo "    3) 仅监听 IPv6 ([::])"
-    echo "    4) 自定义 IP 地址"
+    echo "    4) 自定义监听 IP 地址"
     read -rp "  请选择 [1-4，默认 1]: " addr_type
     addr_type=$(_mihomoconf_trim "${addr_type:-1}")
 
@@ -22909,7 +23797,7 @@ _realm_add_rule() {
             _realm_add_endpoint_to_config "$listen_value2" "$remote_value"
             ((added_count++))
         fi
-        _success "转发规则已添加: (同时监听 IPv4 和 IPv6) → ${remote_value}"
+        _success "转发规则已添加: (IPv4 & IPv6 双栈) → ${remote_value}"
     else
         _realm_add_endpoint_to_config "$listen_value" "$remote_value"
         rc=$?
@@ -22923,7 +23811,7 @@ _realm_add_rule() {
             return
         fi
         if [[ "$listen_addr" == "both" ]]; then
-            _success "转发规则已添加: (同时监听 IPv4 和 IPv6) → ${remote_value}"
+            _success "转发规则已添加: (IPv4 & IPv6 双栈) → ${remote_value}"
         else
             _success "转发规则已添加: ${listen_value} → ${remote_value}"
         fi
@@ -32617,10 +33505,10 @@ _proxy_cipher_benchmark() {
 _proxy_tools_menu_screen() {
     _header "代理工具"
     _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
-    _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
-    _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "Realm 转发" "端口转发管理" "green"
-    _menu_item "7" "ACME 证书" "申请/续期证书" "green"
-    _menu_item "8" "加密吞吐量测试" "常见加解密测试" "green"
+    _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "Snell V6" "配置/导出/日志" "green"
+    _menu_pair "5" "WireGuard" "部署/客户端/状态" "green" "6" "Shadowsocks-Rust" "配置/导出/日志" "green"
+    _menu_pair "7" "Realm 转发" "端口转发管理" "green" "8" "ACME 证书" "申请/续期证书" "green"
+    _menu_item "9" "加密吞吐量测试" "常见加解密测试" "green"
     _menu_item "0" "返回主菜单" "" "red"
     _separator
 }
@@ -32629,16 +33517,17 @@ _proxy_tools_menu() {
     while true; do
         _ui_print_screen _proxy_tools_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-9]: " ch
         case "$ch" in
             1) _mihomo_manage ;;
             2) _singbox_manage ;;
             3) _snell_manage ;;
-            4) _wireguard_manage ;;
-            5) _ssrust_manage ;;
-            6) _realm_manage ;;
-            7) _acme_manage ;;
-            8) _proxy_cipher_benchmark ;;
+            4) _snell6_manage ;;
+            5) _wireguard_manage ;;
+            6) _ssrust_manage ;;
+            7) _realm_manage ;;
+            8) _acme_manage ;;
+            9) _proxy_cipher_benchmark ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
