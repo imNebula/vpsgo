@@ -21414,7 +21414,7 @@ _snell_install_latest_core() {
 }
 
 _snell_install_latest() {
-    _header "Snell V5 安装/更新"
+    _header "Snell V5 (Beta) 安装/更新"
     _time_sync_check_and_enable
     _snell_install_latest_core
     _press_any_key
@@ -21538,7 +21538,7 @@ EOF
 }
 
 _snell_configure() {
-    _header "Snell V5 配置"
+    _header "Snell V5 (Beta) 配置"
 
     local install_confirm current_listen current_port current_psk current_ipv6 current_egress
     local listen_port psk_input psk_value ipv6_input ipv6_flag listen_addr egress_iface
@@ -21671,7 +21671,7 @@ _snell_configure() {
 }
 
 _snell_export_node_config() {
-    _header "导出 Snell 节点配置"
+    _header "导出 Snell V5 (Beta) 节点配置"
 
     if [[ ! -f "$_SNELL_CONFIG_FILE" ]]; then
         _error_no_exit "未找到配置文件: ${_SNELL_CONFIG_FILE}"
@@ -21758,7 +21758,7 @@ _snell_export_node_config() {
 }
 
 _snell_restart() {
-    _header "Snell 重启"
+    _header "Snell V5 (Beta) 重启"
 
     if [[ ! -x "$_SNELL_BIN" ]]; then
         _error_no_exit "未检测到 snell-server，请先安装"
@@ -21818,7 +21818,7 @@ _snell_restart() {
 }
 
 _snell_status() {
-    _header "Snell 运行状态"
+    _header "Snell V5 (Beta) 运行状态"
 
     if _snell_systemd_service_configured; then
         echo ""
@@ -21843,7 +21843,7 @@ _snell_status() {
 }
 
 _snell_log() {
-    _header "Snell 日志"
+    _header "Snell V5 (Beta) 日志"
 
     if _snell_systemd_service_configured; then
         _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
@@ -21866,7 +21866,7 @@ _snell_log() {
 }
 
 _snell_uninstall() {
-    _header "Snell 卸载"
+    _header "Snell V5 (Beta) 卸载"
 
     local confirm remove_config removed_count=0
 
@@ -21932,7 +21932,7 @@ _snell_uninstall() {
 }
 
 _snell_manage_screen() {
-    _header "Snell V5 管理"
+    _header "Snell V5 (Beta) 管理"
     local snell_ver="未安装"
     local snell_status="未运行"
     local snell_status_tone="red"
@@ -21971,10 +21971,10 @@ _snell_manage_screen() {
     _status_kv_pair "端口" "$snell_port" "cyan" 8 "文件" "$_SNELL_CONFIG_FILE" "dim" 8
 
     _separator
-    _menu_pair "1" "安装/更新 Snell V5" "安装服务端" "green" "2" "配置并启动 Snell" "检查端口" "green"
-    _menu_pair "3" "重启 Snell" "" "green" "4" "查看状态" "" "green"
-    _menu_pair "5" "导出 Snell V5 配置" "输出 Surge/Mihomo/链接" "green" "6" "查看日志" "" "green"
-    _menu_item "7" "卸载 Snell" "停止并清理" "yellow"
+    _menu_pair "1" "安装/更新 Snell V5 (Beta)" "安装服务端" "green" "2" "配置并启动 Snell V5 (Beta)" "检查端口" "green"
+    _menu_pair "3" "重启 Snell V5 (Beta)" "" "green" "4" "查看状态" "" "green"
+    _menu_pair "5" "导出 Snell V5 (Beta) 配置" "输出 Surge/Mihomo/链接" "green" "6" "查看日志" "" "green"
+    _menu_item "7" "卸载 Snell V5 (Beta)" "停止并清理" "yellow"
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
 }
@@ -22251,7 +22251,7 @@ _snell6_install_latest_core() {
 }
 
 _snell6_install_latest() {
-    _header "Snell V6 安装/更新"
+    _header "Snell V6 (Beta) 安装/更新"
     _time_sync_check_and_enable
     _snell6_install_latest_core
     _press_any_key
@@ -22373,7 +22373,7 @@ EOF
 }
 
 _snell6_configure() {
-    _header "Snell V6 配置"
+    _header "Snell V6 (Beta) 配置"
 
     local install_confirm current_listen current_port current_psk current_dns_pref current_egress
     local listen_port psk_input psk_value egress_iface
@@ -22535,7 +22535,7 @@ _snell6_configure() {
 }
 
 _snell6_export_node_config() {
-    _header "导出 Snell V6 节点配置"
+    _header "导出 Snell V6 (Beta) 节点配置"
 
     if [[ ! -f "$_SNELL6_CONFIG_FILE" ]]; then
         _error_no_exit "未找到配置文件: ${_SNELL6_CONFIG_FILE}"
@@ -22619,7 +22619,7 @@ _snell6_export_node_config() {
 }
 
 _snell6_restart() {
-    _header "Snell V6 重启"
+    _header "Snell V6 (Beta) 重启"
 
     if [[ ! -x "$_SNELL6_BIN" ]]; then
         _error_no_exit "未检测到 snell-server-v6，请先安装"
@@ -22679,7 +22679,7 @@ _snell6_restart() {
 }
 
 _snell6_status() {
-    _header "Snell V6 运行状态"
+    _header "Snell V6 (Beta) 运行状态"
 
     if _snell6_systemd_service_configured; then
         echo ""
@@ -22704,7 +22704,7 @@ _snell6_status() {
 }
 
 _snell6_log() {
-    _header "Snell V6 日志"
+    _header "Snell V6 (Beta) 日志"
 
     if _snell6_systemd_service_configured; then
         _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
@@ -22727,7 +22727,7 @@ _snell6_log() {
 }
 
 _snell6_uninstall() {
-    _header "Snell V6 卸载"
+    _header "Snell V6 (Beta) 卸载"
 
     local confirm remove_config removed_count=0
 
@@ -22793,7 +22793,7 @@ _snell6_uninstall() {
 }
 
 _snell6_manage_screen() {
-    _header "Snell V6 管理"
+    _header "Snell V6 (Beta) 管理"
     local snell_ver="未安装"
     local snell_status="未运行"
     local snell_status_tone="red"
@@ -22829,10 +22829,10 @@ _snell6_manage_screen() {
     _status_kv_pair "端口" "$snell_port" "cyan" 8 "文件" "$_SNELL6_CONFIG_FILE" "dim" 8
 
     _separator
-    _menu_pair "1" "安装/更新 Snell V6" "安装服务端" "green" "2" "配置并启动 Snell V6" "检查端口" "green"
-    _menu_pair "3" "重启 Snell V6" "" "green" "4" "查看状态" "" "green"
-    _menu_pair "5" "导出 Snell V6 配置" "输出 Surge/Mihomo/链接" "green" "6" "查看日志" "" "green"
-    _menu_item "7" "卸载 Snell V6" "停止并清理" "yellow"
+    _menu_pair "1" "安装/更新 Snell V6 (Beta)" "安装服务端" "green" "2" "配置并启动 Snell V6 (Beta)" "检查端口" "green"
+    _menu_pair "3" "重启 Snell V6 (Beta)" "" "green" "4" "查看状态" "" "green"
+    _menu_pair "5" "导出 Snell V6 (Beta) 配置" "输出 Surge/Mihomo/链接" "green" "6" "查看日志" "" "green"
+    _menu_item "7" "卸载 Snell V6 (Beta)" "停止并清理" "yellow"
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
 }
@@ -23617,6 +23617,28 @@ _realm_uninstall() {
 
 # ---- Realm 规则查看 ----
 
+_realm_get_cached_ip() {
+    if [[ -z "${_REALM_CACHED_IP:-}" ]]; then
+        _REALM_CACHED_IP=$(_mihomoconf_get_server_ip 2>/dev/null || echo "YOUR_SERVER_IP")
+    fi
+    printf '%s' "$_REALM_CACHED_IP"
+}
+
+_realm_format_listen_addr() {
+    local addr="$1"
+    local server_ip="$2"
+    local host="${addr%%:*}"
+    local port="${addr##*:}"
+    
+    if [[ "$addr" == \[::\]:* ]]; then
+        printf "%s:%s" "$server_ip" "$port"
+    elif [[ "$host" == "0.0.0.0" ]]; then
+        printf "%s:%s" "$server_ip" "$port"
+    else
+        printf "%s" "$addr"
+    fi
+}
+
 _realm_list_rules() {
     if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
         _info "暂无转发规则"
@@ -23624,11 +23646,16 @@ _realm_list_rules() {
     fi
 
     local count=0 l r
+    local server_ip
+    server_ip=$(_realm_get_cached_ip)
+
     printf "  ${BOLD}当前转发规则${PLAIN}\n"
     _separator
     while IFS=$'\x1f' read -r l r; do
         [[ -z "$l" ]] && continue
-        printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$l" "$r"
+        local display_l
+        display_l=$(_realm_format_listen_addr "$l" "$server_ip")
+        printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$display_l" "$r"
         ((count++))
     done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
 
@@ -23667,6 +23694,11 @@ _realm_auto_restart_if_active() {
 
 _realm_add_rule() {
     _header "添加转发规则"
+
+    if [[ -f "$_REALM_CONFIG_FILE" ]]; then
+        _realm_list_rules
+        echo ""
+    fi
 
     local listen_input listen_port listen_addr remote_host remote_port
     local listen_value listen_value1 listen_value2 remote_value rc
@@ -23964,10 +23996,14 @@ _realm_manage_screen() {
         fi
     fi
 
+    local server_ip
+    server_ip=$(_realm_get_cached_ip)
+
     printf "  ${BOLD}状态信息${PLAIN}\n"
     _separator
     _status_kv_pair "版本" "$realm_ver" "dim" 8 "状态" "$realm_status" "$realm_status_tone" 8
     _status_kv_pair "配置" "$realm_file" "$realm_file_tone" 8 "规则" "$realm_rules" "$realm_rules_tone" 8
+    _status_kv_pair "本机 IP" "$server_ip" "cyan" 8 "" "" "" 8
 
     if [[ -f "$_REALM_CONFIG_FILE" ]]; then
         while IFS=$'\x1f' read -r l r; do
@@ -23978,7 +24014,9 @@ _realm_manage_screen() {
                 _separator
                 has_rules=1
             fi
-            printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$l" "$r"
+            local display_l
+            display_l=$(_realm_format_listen_addr "$l" "$server_ip")
+            printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$display_l" "$r"
             ((count++))
         done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
     fi
@@ -33505,7 +33543,7 @@ _proxy_cipher_benchmark() {
 _proxy_tools_menu_screen() {
     _header "代理工具"
     _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
-    _menu_pair "3" "Snell V5" "配置/导出/日志" "green" "4" "Snell V6" "配置/导出/日志" "green"
+    _menu_pair "3" "Snell V5 (Beta)" "配置/导出/日志" "green" "4" "Snell V6 (Beta)" "配置/导出/日志" "green"
     _menu_pair "5" "WireGuard" "部署/客户端/状态" "green" "6" "Shadowsocks-Rust" "配置/导出/日志" "green"
     _menu_pair "7" "Realm 转发" "端口转发管理" "green" "8" "ACME 证书" "申请/续期证书" "green"
     _menu_item "9" "加密吞吐量测试" "常见加解密测试" "green"
