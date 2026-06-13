@@ -13104,7 +13104,12 @@ MIHOMO_SOCKS_YAML
                     "$password" "$server_ip" "$port" "$snell_ver_val" "$snell_reuse_val" "$snell_link_opts" "$_encoded_snell_name")
                 
                 if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
-                    printf "%s\n" "$snell_link"
+                    local _surge_obfs=""
+                    if [[ "$snell_obfs_val" != "none" ]]; then
+                        _surge_obfs=",obfs=${snell_obfs_val},obfs-host=${snell_obfs_host_val}"
+                    fi
+                    printf "%s=snell,%s,%s,psk=%s,version=%s,reuse=%s%s,tfo=true\n" \
+                        "$snell_name" "$server_ip" "$port" "$password" "$snell_ver_val" "$snell_reuse_val" "$_surge_obfs"
                 else
                     _separator
                     printf "  ${BOLD}[Snell] %s${PLAIN}\n" "$snell_name"
