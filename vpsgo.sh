@@ -39,7 +39,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.2"
+VERSION="5.3"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -23127,19 +23127,27 @@ _realm_parse_endpoints() {
             gsub(/'\''$/, "", s)
             return s
         }
-        BEGIN { in_endpoint = 0; listen = ""; remote = "" }
+        BEGIN { in_endpoint = 0; listen = ""; remote = ""; remark = "" }
         {
+            orig_line = $0
             line = $0
             sub(/[[:space:]]*#.*/, "", line)
             gsub(/^[[:space:]]+/, "", line)
             gsub(/[[:space:]]+$/, "", line)
+
+            match_str = orig_line
+            if (match_str ~ /#[[:space:]]*remark:/) {
+                sub(/^.*#[[:space:]]*remark:[[:space:]]*/, "", match_str)
+                remark = trim(match_str)
+            }
         }
         line == "[[endpoints]]" {
             if (in_endpoint && listen != "" && remote != "")
-                printf "%s\x1f%s\n", listen, remote
+                printf "%s\x1f%s\x1f%s\n", listen, remote, remark
             in_endpoint = 1
             listen = ""
             remote = ""
+            remark = ""
             next
         }
         in_endpoint && line ~ /^listen[[:space:]]*=/ {
@@ -23154,31 +23162,36 @@ _realm_parse_endpoints() {
         }
         line ~ /^\[/ && line != "[[endpoints]]" {
             if (in_endpoint && listen != "" && remote != "")
-                printf "%s\x1f%s\n", listen, remote
+                printf "%s\x1f%s\x1f%s\n", listen, remote, remark
             in_endpoint = 0
             listen = ""
             remote = ""
+            remark = ""
             next
         }
         END {
             if (in_endpoint && listen != "" && remote != "")
-                printf "%s\x1f%s\n", listen, remote
+                printf "%s\x1f%s\x1f%s\n", listen, remote, remark
         }
     ' "$config_file"
 }
 
 _realm_add_endpoint_to_config() {
-    local listen="$1" remote="$2"
+    local listen="$1" remote="$2" remark="${3:-}"
     local -a lines=()
-    local found=0 l r
+    local found=0 l r rmK
 
     if [[ -f "$_REALM_CONFIG_FILE" ]]; then
-        while IFS=$'\x1f' read -r l r; do
+        while IFS=$'\x1f' read -r l r rmK; do
             [[ -z "$l" ]] && continue
             if [[ "$l" == "$listen" ]]; then
                 found=1
             fi
-            lines+=("${l}|${r}")
+            if [[ -n "$rmK" ]]; then
+                lines+=("${l}|${r}|${rmK}")
+            else
+                lines+=("${l}|${r}")
+            fi
         done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
     fi
 
@@ -23186,23 +23199,31 @@ _realm_add_endpoint_to_config() {
         return 2
     fi
 
-    lines+=("${listen}|${remote}")
+    if [[ -n "$remark" ]]; then
+        lines+=("${listen}|${remote}|${remark}")
+    else
+        lines+=("${listen}|${remote}")
+    fi
     _realm_write_config_from_lines "${lines[@]}"
 }
 
 _realm_delete_endpoint_from_config() {
     local index="$1"
     local -a lines=()
-    local i=0 l r
+    local i=0 l r rmK
 
     if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
         return 1
     fi
 
-    while IFS=$'\x1f' read -r l r; do
+    while IFS=$'\x1f' read -r l r rmK; do
         [[ -z "$l" ]] && continue
         if (( i != index )); then
-            lines+=("${l}|${r}")
+            if [[ -n "$rmK" ]]; then
+                lines+=("${l}|${r}|${rmK}")
+            else
+                lines+=("${l}|${r}")
+            fi
         fi
         ((i++))
     done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
@@ -23216,14 +23237,25 @@ _realm_delete_endpoint_from_config() {
 }
 
 _realm_write_config_from_lines() {
-    local line listen remote
+    local line listen remote remark remainder
     mkdir -p "$_REALM_CONFIG_DIR"
     {
         printf '[log]\nlevel = "warn"\n\n'
         for line in "$@"; do
             listen="${line%%|*}"
-            remote="${line##*|}"
-            printf '[[endpoints]]\nlisten = "%s"\nremote = "%s"\n\n' "$listen" "$remote"
+            remainder="${line#*|}"
+            if [[ "$remainder" == *"|"* ]]; then
+                remote="${remainder%%|*}"
+                remark="${remainder#*|}"
+            else
+                remote="$remainder"
+                remark=""
+            fi
+            if [[ -n "$remark" ]]; then
+                printf '[[endpoints]]\n# remark: %s\nlisten = "%s"\nremote = "%s"\n\n' "$remark" "$listen" "$remote"
+            else
+                printf '[[endpoints]]\nlisten = "%s"\nremote = "%s"\n\n' "$listen" "$remote"
+            fi
         done
     } > "$_REALM_CONFIG_FILE"
 }
@@ -23295,9 +23327,9 @@ _realm_port_conflict_with_mihomo() {
 
 _realm_port_in_config() {
     local target_port="$1"
-    local l r p
+    local l r rmK p
     [[ -f "$_REALM_CONFIG_FILE" ]] || return 1
-    while IFS=$'\x1f' read -r l r; do
+    while IFS=$'\x1f' read -r l r rmK; do
         [[ -z "$l" ]] && continue
         p="${l##*:}"
         if [[ "$p" == "$target_port" ]]; then
@@ -23650,17 +23682,21 @@ _realm_list_rules() {
         return
     fi
 
-    local count=0 l r
+    local count=0 l r rmK
     local server_ip
     server_ip=$(_realm_get_cached_ip)
 
     printf "  ${BOLD}当前转发规则${PLAIN}\n"
     _separator
-    while IFS=$'\x1f' read -r l r; do
+    while IFS=$'\x1f' read -r l r rmK; do
         [[ -z "$l" ]] && continue
         local display_l
         display_l=$(_realm_format_listen_addr "$l" "$server_ip")
-        printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$display_l" "$r"
+        if [[ -n "$rmK" ]]; then
+            printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %-24s ${DIM}(%s)${PLAIN}\n" "$count" "$display_l" "$r" "$rmK"
+        else
+            printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$display_l" "$r"
+        fi
         ((count++))
     done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
 
@@ -23810,11 +23846,22 @@ _realm_add_rule() {
         remote_value="${remote_host}:${remote_port}"
     fi
 
+    local remark_input
+    while true; do
+        read -rp "  规则备注 (可选，例如: 落地机 A，回车跳过): " remark_input
+        remark_input=$(_mihomoconf_trim "${remark_input:-}")
+        if [[ "$remark_input" == *"|"* ]]; then
+            _warn "备注不能包含 '|' 字符"
+            continue
+        fi
+        break
+    done
+
     if [[ -n "${listen_value1:-}" && -n "${listen_value2:-}" ]]; then
         found1=0
         found2=0
         if [[ -f "$_REALM_CONFIG_FILE" ]]; then
-            while IFS=$'\x1f' read -r l r; do
+            while IFS=$'\x1f' read -r l r rmK; do
                 [[ "$l" == "$listen_value1" ]] && found1=1
                 [[ "$l" == "$listen_value2" ]] && found2=1
             done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
@@ -23827,16 +23874,16 @@ _realm_add_rule() {
 
         added_count=0
         if (( found1 == 0 )); then
-            _realm_add_endpoint_to_config "$listen_value1" "$remote_value"
+            _realm_add_endpoint_to_config "$listen_value1" "$remote_value" "$remark_input"
             ((added_count++))
         fi
         if (( found2 == 0 )); then
-            _realm_add_endpoint_to_config "$listen_value2" "$remote_value"
+            _realm_add_endpoint_to_config "$listen_value2" "$remote_value" "$remark_input"
             ((added_count++))
         fi
         _success "转发规则已添加: (IPv4 & IPv6 双栈) → ${remote_value}"
     else
-        _realm_add_endpoint_to_config "$listen_value" "$remote_value"
+        _realm_add_endpoint_to_config "$listen_value" "$remote_value" "$remark_input"
         rc=$?
         if [[ $rc -eq 2 ]]; then
             _error_no_exit "监听地址 ${listen_value} 已存在，请先删除旧规则"
@@ -23870,8 +23917,8 @@ _realm_delete_rule() {
     _realm_list_rules
     echo ""
 
-    local count=0 l r
-    while IFS=$'\x1f' read -r l r; do
+    local count=0 l r rmK
+    while IFS=$'\x1f' read -r l r rmK; do
         [[ -z "$l" ]] && continue
         ((count++))
     done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
@@ -23896,6 +23943,275 @@ _realm_delete_rule() {
 
     _realm_delete_endpoint_from_config "$index"
     _success "规则已删除"
+    _realm_auto_restart_if_active
+    _press_any_key
+}
+
+_realm_edit_rule() {
+    _header "修改转发规则"
+
+    if [[ ! -f "$_REALM_CONFIG_FILE" ]]; then
+        _info "暂无转发规则"
+        _press_any_key
+        return
+    fi
+
+    _realm_list_rules
+    echo ""
+
+    local count=0 l r rmK
+    local -a raw_rules=()
+    while IFS=$'\x1f' read -r l r rmK; do
+        [[ -z "$l" ]] && continue
+        if [[ -n "$rmK" ]]; then
+            raw_rules+=("${l}|${r}|${rmK}")
+        else
+            raw_rules+=("${l}|${r}")
+        fi
+        ((count++))
+    done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+
+    if (( count == 0 )); then
+        _press_any_key
+        return
+    fi
+
+    local index
+    read -rp "  输入要修改的规则编号 [0-$((count - 1))，或按 Enter 取消]: " index
+    if [[ -z "${index:-}" ]]; then
+        _info "已取消"
+        _press_any_key
+        return
+    fi
+    if ! _is_digit "${index:-}" || (( index < 0 || index >= count )); then
+        _error_no_exit "无效的编号"
+        _press_any_key
+        return
+    fi
+
+    local target_rule="${raw_rules[index]}"
+    local old_listen old_remote old_remark
+    old_listen="${target_rule%%|*}"
+    local remainder="${target_rule#*|}"
+    if [[ "$remainder" == *"|"* ]]; then
+        old_remote="${remainder%%|*}"
+        old_remark="${remainder#*|}"
+    else
+        old_remote="$remainder"
+        old_remark=""
+    fi
+
+    # Extract port and IP from old_listen
+    local old_port="${old_listen##*:}"
+    local old_ip="${old_listen%:*}"
+    # Remove brackets from IPv6 IP if any
+    old_ip="${old_ip#[}"
+    old_ip="${old_ip%]}"
+
+    # Extract remote host and port
+    local old_remote_port="${old_remote##*:}"
+    local old_remote_host="${old_remote%:*}"
+    old_remote_host="${old_remote_host#[}"
+    old_remote_host="${old_remote_host%]}"
+
+    _info "开始修改规则 [${index}]: ${old_listen} → ${old_remote}"
+    echo ""
+
+    # 1. New listening port
+    local new_port
+    while true; do
+        read -rp "  监听端口 [当前 ${old_port}，回车保持不变]: " new_port
+        new_port=$(_mihomoconf_trim "${new_port:-$old_port}")
+        if ! _is_valid_port "$new_port"; then
+            _warn "端口无效，请输入 1-65535 的数字"
+            continue
+        fi
+
+        # Check conflict with other rules (not the current index)
+        local port_conflict=0
+        local i=0 l_tmp r_tmp rmK_tmp p_tmp
+        while IFS=$'\x1f' read -r l_tmp r_tmp rmK_tmp; do
+            [[ -z "$l_tmp" ]] && continue
+            if (( i != index )); then
+                p_tmp="${l_tmp##*:}"
+                if [[ "$p_tmp" == "$new_port" ]]; then
+                    port_conflict=1
+                    break
+                fi
+            fi
+            ((i++))
+        done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
+
+        if (( port_conflict == 1 )); then
+            _warn "端口 ${new_port} 已在其他 Realm 规则中被使用，请更换端口"
+            continue
+        fi
+
+        if [[ "$new_port" != "$old_port" ]]; then
+            if _realm_port_conflict_with_mihomo "$new_port"; then
+                _warn "端口 ${new_port} 与 mihomo 配置冲突，请更换端口"
+                continue
+            fi
+            local usage_line
+            usage_line=$(_realm_port_usage_line "$new_port")
+            if [[ -n "$usage_line" && "$usage_line" != *"realm"* ]]; then
+                _warn "端口 ${new_port} 已被占用: ${usage_line}"
+                continue
+            fi
+        fi
+        break
+    done
+
+    # 2. IP type / address
+    local new_ip="$old_ip"
+    local addr_type
+    echo "  选择监听 IP 类型 (当前为: ${old_ip}):"
+    echo "    1) IPv4 & IPv6 双栈 (同时监听)"
+    echo "    2) 仅监听 IPv4 (0.0.0.0)"
+    echo "    3) 仅监听 IPv6 ([::])"
+    echo "    4) 自定义监听 IP 地址"
+    echo "    5) 保持当前 IP 类型 [默认]"
+    read -rp "  请选择 [1-5，默认 5]: " addr_type
+    addr_type=$(_mihomoconf_trim "${addr_type:-5}")
+
+    case "$addr_type" in
+        1)
+            new_ip="both"
+            ;;
+        2)
+            new_ip="0.0.0.0"
+            ;;
+        3)
+            new_ip="::"
+            ;;
+        4)
+            local listen_input
+            read -rp "  请输入自定义监听 IP 地址 [当前 ${old_ip}]: " listen_input
+            new_ip=$(_mihomoconf_trim "${listen_input:-$old_ip}")
+            if [[ -z "$new_ip" ]]; then
+                _error_no_exit "监听地址不能为空"
+                _press_any_key
+                return
+            fi
+            ;;
+        5)
+            ;;
+        *)
+            _error_no_exit "无效选择"
+            _press_any_key
+            return
+            ;;
+    esac
+
+    local new_listen_value new_listen_value1 new_listen_value2
+    if [[ "$new_ip" == "both" ]]; then
+        local ipv6_enabled=0
+        if [[ -f "/proc/net/if_inet6" && -s "/proc/net/if_inet6" ]]; then
+            ipv6_enabled=1
+        elif [[ -d "/proc/sys/net/ipv6" ]]; then
+            local disable_all="0"
+            if [[ -f "/proc/sys/net/ipv6/conf/all/disable_ipv6" ]]; then
+                disable_all=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo "0")
+            fi
+            if [[ "$disable_all" != "1" ]]; then
+                ipv6_enabled=1
+            fi
+        fi
+
+        if [[ "$ipv6_enabled" == "1" ]]; then
+            local bind_v6_only="0"
+            if [[ -f "/proc/sys/net/ipv6/bindv6only" ]]; then
+                bind_v6_only=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo "0")
+            fi
+
+            if [[ "$bind_v6_only" == "1" ]]; then
+                new_listen_value1="0.0.0.0:${new_port}"
+                new_listen_value2="[::]:${new_port}"
+            else
+                new_listen_value="[::]:${new_port}"
+            fi
+        else
+            new_listen_value="0.0.0.0:${new_port}"
+        fi
+    elif [[ "$new_ip" == *:* ]]; then
+        new_listen_value="[${new_ip}]:${new_port}"
+    else
+        new_listen_value="${new_ip}:${new_port}"
+    fi
+
+    # 3. New remote target host
+    local new_remote_host
+    while true; do
+        read -rp "  转发目标 IP/域名 [当前 ${old_remote_host}]: " new_remote_host
+        new_remote_host=$(_mihomoconf_trim "${new_remote_host:-$old_remote_host}")
+        if [[ -z "$new_remote_host" ]]; then
+            _warn "转发目标不能为空"
+            continue
+        fi
+        break
+    done
+
+    # 4. New remote target port
+    local new_remote_port
+    while true; do
+        read -rp "  转发目标端口 [当前 ${old_remote_port}]: " new_remote_port
+        new_remote_port=$(_mihomoconf_trim "${new_remote_port:-$old_remote_port}")
+        if ! _is_valid_port "$new_remote_port"; then
+            _warn "端口无效，请输入 1-65535 的数字"
+            continue
+        fi
+        break
+    done
+
+    local new_remote_value
+    if [[ "$new_remote_host" == *:* ]]; then
+        new_remote_value="[${new_remote_host}]:${new_remote_port}"
+    else
+        new_remote_value="${new_remote_host}:${new_remote_port}"
+    fi
+
+    # 5. New remark
+    local new_remark
+    while true; do
+        read -rp "  规则备注 [当前: ${old_remark:-无}，回车保持不变，输入 clear 清空]: " new_remark
+        new_remark=$(_mihomoconf_trim "${new_remark:-$old_remark}")
+        if [[ "$new_remark" == "clear" ]]; then
+            new_remark=""
+        fi
+        if [[ "$new_remark" == *"|"* ]]; then
+            _warn "备注不能包含 '|' 字符"
+            continue
+        fi
+        break
+    done
+
+    local -a new_lines=()
+    local i=0
+    for rule in "${raw_rules[@]}"; do
+        if (( i == index )); then
+            if [[ -n "${new_listen_value1:-}" && -n "${new_listen_value2:-}" ]]; then
+                if [[ -n "$new_remark" ]]; then
+                    new_lines+=("${new_listen_value1}|${new_remote_value}|${new_remark}")
+                    new_lines+=("${new_listen_value2}|${new_remote_value}|${new_remark}")
+                else
+                    new_lines+=("${new_listen_value1}|${new_remote_value}")
+                    new_lines+=("${new_listen_value2}|${new_remote_value}")
+                fi
+            else
+                if [[ -n "$new_remark" ]]; then
+                    new_lines+=("${new_listen_value}|${new_remote_value}|${new_remark}")
+                else
+                    new_lines+=("${new_listen_value}|${new_remote_value}")
+                fi
+            fi
+        else
+            new_lines+=("$rule")
+        fi
+        ((i++))
+    done
+
+    _realm_write_config_from_lines "${new_lines[@]}"
+    _success "规则修改成功"
     _realm_auto_restart_if_active
     _press_any_key
 }
@@ -23936,10 +24252,11 @@ _realm_configure() {
         _ui_print_screen _realm_configure_screen
 
         local ch
-        read -rp "  选择 [0-2]: " ch
+        read -rp "  选择 [0-3]: " ch
         case "$ch" in
             1) _realm_add_rule ;;
             2) _realm_delete_rule ;;
+            3) _realm_edit_rule ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
@@ -23960,6 +24277,7 @@ _realm_configure_screen() {
     _separator
     _menu_item "1" "添加转发规则" "监听端口 → 目标地址" "green"
     _menu_item "2" "删除转发规则" "" "yellow"
+    _menu_item "3" "修改转发规则" "" "blue"
     _menu_item "0" "返回" "" "red"
     _separator
 }
@@ -23974,7 +24292,7 @@ _realm_manage_screen() {
     local realm_file_tone="red"
     local realm_rules="0 条"
     local realm_rules_tone="dim"
-    local count=0 l r has_rules=0
+    local count=0 l r rmK has_rules=0
 
     if [[ -x "$_REALM_BIN" ]]; then
         local ver
@@ -23991,7 +24309,7 @@ _realm_manage_screen() {
         realm_file="$_REALM_CONFIG_FILE"
         realm_file_tone="dim"
         local rule_count=0
-        while IFS=$'\x1f' read -r l r; do
+        while IFS=$'\x1f' read -r l r rmK; do
             [[ -z "$l" ]] && continue
             ((rule_count++))
         done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
@@ -24011,7 +24329,7 @@ _realm_manage_screen() {
     _status_kv_pair "本机 IP" "$server_ip" "cyan" 8 "" "" "" 8
 
     if [[ -f "$_REALM_CONFIG_FILE" ]]; then
-        while IFS=$'\x1f' read -r l r; do
+        while IFS=$'\x1f' read -r l r rmK; do
             [[ -z "$l" ]] && continue
             if (( has_rules == 0 )); then
                 echo ""
@@ -24021,7 +24339,11 @@ _realm_manage_screen() {
             fi
             local display_l
             display_l=$(_realm_format_listen_addr "$l" "$server_ip")
-            printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$display_l" "$r"
+            if [[ -n "$rmK" ]]; then
+                printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %-24s ${DIM}(%s)${PLAIN}\n" "$count" "$display_l" "$r" "$rmK"
+            else
+                printf "  ${GREEN}%2d${PLAIN}  %-24s ${DIM}→${PLAIN} %s\n" "$count" "$display_l" "$r"
+            fi
             ((count++))
         done < <(_realm_parse_endpoints "$_REALM_CONFIG_FILE")
     fi

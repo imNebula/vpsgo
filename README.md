@@ -85,11 +85,16 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 | 8 | NextTrace | 安装/更新 nexttrace、nexttrace-tiny、ntr，并支持常用参数向导、快速回程、自定义列表、MTR、MTU、CDN Speed |
 | 9 | Linux DNS 管理 | 修改 DNS、验证解析、测速 |
 | 10 | Docker 日志轮转 | 限制容器日志大小 |
-| 11 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站)、读取配置导出节点、自启动、重启、查看日志；支持出口管理（含链式代理）、iOS rule 模糊搜索分流、Google/Netflix/端口出站分流、规则优先级、自定义远程规则集 (yaml/text/mrs)、socks5 链接导入 |
+| 11 | Mihomo 管理 | 安装/更新、可选定时自动更新、生成配置 (SS/AnyTLS/HY2/WireGuard 入站/MASQUE/Mieru/Sudoku 等)、读取配置导出节点、自启动、重启、查看日志；支持出口管理（含链式代理）、iOS rule 模糊搜索分流、出站分流、自定义远程规则集、socks5 导入 |
 | 12 | sing-box 安装 | 安装、启动、查看状态和日志 |
-| 13 | Snell V5 管理 | 安装、配置、导出、查看日志和状态 |
+| 13 | Snell V5/V6 管理 | 安装、配置、导出、查看日志和状态（支持 Snell V6 Beta） |
 | 14 | WireGuard 原生节点 | 部署节点、管理客户端、查看状态 |
 | 15 | Shadowsocks-Rust 管理 | 安装、配置、导出、查看日志和状态 |
+| - | Realm 转发 | Realm 端口转发工具管理，支持快捷添加、删除和查看端口转发规则 |
+| - | ACME 证书 | 集成 acme.sh 脚本，支持申请、自动续期 SSL 证书 |
+| - | 加密吞吐量测试 | 对常见对称加密算法进行吞吐量基准测试，评估设备转发性能 |
+| - | SSH 代理管理 | 创建用于 SSH SOCKS 代理的受限用户（高安全性，禁用 Shell 交互/端口伪终端） |
+| - | Proxy Control | 自动故障转移与控制面板部署及后台服务管理 |
 
 ### 系统
 
