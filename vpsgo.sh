@@ -30358,6 +30358,365 @@ _ssh_manage_keys() {
     done
 }
 
+_mihomoconf_get_port_val() {
+    local key="$1"
+    local config_file="$_MIHOMOCONF_CONFIG_FILE"
+    [ -f "$config_file" ] || return 1
+    awk -F: -v target="$key" '
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function unquote(s) {
+            gsub(/^"/, "", s)
+            gsub(/"$/, "", s)
+            return s
+        }
+        /^[^[:space:]#][^:]*:[[:space:]]*.*$/ {
+            k=$0
+            sub(/:.*/, "", k)
+            k=trim(k)
+            if (k == target) {
+                v=$0
+                sub(/^[^:]*:[[:space:]]*/, "", v)
+                sub(/[[:space:]]+#.*/, "", v)
+                print trim(unquote(v))
+                exit 0
+            }
+        }
+    ' "$config_file" 2>/dev/null
+}
+
+_ssh_proxy_get_users() {
+    local gid u g
+    gid=$(awk -F: '$1 == "sshproxy" {print $3}' /etc/group)
+    [ -z "$gid" ] && return
+    
+    # Primary group is sshproxy
+    while IFS=: read -r u _ _ g _; do
+        if [ "$g" = "$gid" ]; then
+            printf '%s\n' "$u"
+        fi
+    done < /etc/passwd
+
+    # Supplementary group is sshproxy
+    local supplementary
+    supplementary=$(awk -F: '$1 == "sshproxy" {print $4}' /etc/group | tr ',' ' ')
+    for u in $supplementary; do
+        printf '%s\n' "$u"
+    done
+}
+
+_ssh_proxy_apply_sshd_config() {
+    local sshd_cfg="/etc/ssh/sshd_config"
+    local d="/etc/ssh/sshd_config.d"
+    local f="${d}/50-vpsgo-ssh-proxy.conf"
+    
+    # 1. Ensure group exists
+    if ! grep -q "^sshproxy:" /etc/group; then
+        if command -v groupadd >/dev/null 2>&1; then
+            groupadd sshproxy
+        elif command -v addgroup >/dev/null 2>&1; then
+            addgroup sshproxy
+        else
+            _error_no_exit "无法创建 sshproxy 用户组"
+            return 1
+        fi
+    fi
+
+    # 2. Write configuration
+    local config_content
+    config_content=$(cat <<'EOF'
+# VPSGO SSH PROXY MATCH BEGIN
+Match Group sshproxy
+    AllowTcpForwarding yes
+    X11Forwarding no
+    PermitTTY no
+    ForceCommand /bin/false
+# VPSGO SSH PROXY MATCH END
+EOF
+)
+
+    local use_d=0
+    if [ -d "$d" ] && grep -qE "^[[:space:]]*Include[[:space:]]+" "$sshd_cfg"; then
+        use_d=1
+    fi
+
+    # Clean up old blocks from sshd_config first
+    local tmp_cfg
+    tmp_cfg=$(mktemp) || return 1
+    awk '
+        /# VPSGO SSH PROXY MATCH BEGIN/ { skip=1; next }
+        /# VPSGO SSH PROXY MATCH END/ { skip=0; next }
+        !skip { print }
+    ' "$sshd_cfg" > "$tmp_cfg"
+    
+    if [ "$use_d" -eq 1 ]; then
+        # Use sshd_config.d
+        cat > "$f" <<EOF
+$config_content
+EOF
+        chmod 644 "$f"
+        cat "$tmp_cfg" > "$sshd_cfg"
+    else
+        # Append directly to sshd_config at the very end
+        cat "$tmp_cfg" > "$sshd_cfg"
+        echo "" >> "$sshd_cfg"
+        echo "$config_content" >> "$sshd_cfg"
+    fi
+    rm -f "$tmp_cfg"
+
+    # 3. Test and reload SSHD
+    if command -v sshd >/dev/null 2>&1; then
+        mkdir -p /run/sshd 2>/dev/null || true
+        if ! sshd -t -f "$sshd_cfg" >/dev/null 2>&1; then
+            _error_no_exit "sshd 配置验证失败"
+            return 1
+        fi
+    fi
+
+    if ! _restart_first_available_service ssh sshd; then
+        _warn "重启 SSH 服务失败，请手动重启"
+    fi
+    return 0
+}
+
+_ssh_proxy_user_manage() {
+    while true; do
+        _header "SSH 代理管理"
+        _info "此功能创建权限极低且无法登录 Shell 的受限用户，仅用于 SSH SOCKS 动态代理。"
+        _separator
+
+        local -a proxy_users=()
+        local u
+        while read -r u; do
+            [[ -z "$u" ]] && continue
+            local exists=0 x
+            for x in "${proxy_users[@]:-}"; do
+                [[ "$x" == "$u" ]] && exists=1 && break
+            done
+            [[ "$exists" -eq 1 ]] || proxy_users+=("$u")
+        done < <(_ssh_proxy_get_users)
+
+        if [ "${#proxy_users[@]}" -eq 0 ]; then
+            _info "当前没有 SSH 代理受限用户。"
+        else
+            _info "已创建的 SSH 代理受限用户:"
+            local i=0
+            for u in "${proxy_users[@]}"; do
+                ((i++))
+                printf "  ${GREEN}[%d]${PLAIN} %s\n" "$i" "$u"
+            done
+        fi
+
+        _separator
+        _menu_pair "1" "创建受限代理用户" "" "green" "2" "删除代理用户" "" "red"
+        _menu_pair "3" "配置 Mihomo 接管流量" "使用 iptables NAT 转发" "green" "0" "返回" "" "cyan"
+        _separator
+
+        local choice
+        read -rp "  选择 [0-3]: " choice
+        choice=$(_mihomoconf_trim "${choice:-}")
+
+        case "$choice" in
+            0) return ;;
+            1)
+                _header "创建受限代理用户"
+                local username password
+                while true; do
+                    read -rp "  请输入新用户名: " username
+                    username=$(_mihomoconf_trim "$username")
+                    [[ -z "$username" ]] && continue
+                    if ! [[ "$username" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                        _warn "用户名无效，仅支持字母、数字、下划线和减号"
+                        continue
+                    fi
+                    if id "$username" >/dev/null 2>&1; then
+                        _warn "用户 ${username} 已存在，请更换名称"
+                        continue
+                    fi
+                    break
+                done
+
+                read -rp "  请输入密码 (留空随机生成): " password
+                password=$(_mihomoconf_trim "$password")
+                if [ -z "$password" ]; then
+                    password=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+                    _info "已自动生成密码: ${GREEN}${password}${PLAIN}"
+                fi
+
+                # 4. Determine shell
+                local shell_bin="/bin/false"
+                [ -x "/usr/sbin/nologin" ] && shell_bin="/usr/sbin/nologin"
+                [ -x "/sbin/nologin" ] && shell_bin="/sbin/nologin"
+                [ -x "/bin/false" ] && shell_bin="/bin/false"
+
+                # 5. Create user
+                _info "正在创建用户 ${username}..."
+                if ! grep -q "^sshproxy:" /etc/group; then
+                    if command -v groupadd >/dev/null 2>&1; then
+                        groupadd sshproxy
+                    elif command -v addgroup >/dev/null 2>&1; then
+                        addgroup sshproxy
+                    fi
+                fi
+
+                local success=0
+                if command -v useradd >/dev/null 2>&1; then
+                    useradd -m -g sshproxy -s "$shell_bin" "$username" && success=1
+                elif command -v adduser >/dev/null 2>&1; then
+                    # Alpine support
+                    adduser -G sshproxy -s "$shell_bin" -D "$username" && success=1
+                fi
+
+                if [ "$success" -eq 1 ]; then
+                    echo "${username}:${password}" | chpasswd
+                    _success "用户 ${username} 创建成功！"
+                    
+                    _info "正在配置 SSHD 服务限制..."
+                    _ssh_proxy_apply_sshd_config
+                    
+                    local server_ip
+                    server_ip=$(_mihomoconf_get_server_ip)
+                    _separator
+                    printf "  ${BOLD}SSH SOCKS5 代理使用指南:${PLAIN}\n"
+                    printf "    在您的客户端 (例如 macOS/Linux 终端或 Windows CMD) 执行以下命令:\n"
+                    printf "      ${GREEN}ssh -N -D 1080 -p $(_ssh_current_ports | cut -d',' -f1) %s@%s${PLAIN}\n\n" "$username" "$server_ip"
+                    printf "    参数解释:\n"
+                    printf "      -N: 不执行远程命令 (不登录 Shell)\n"
+                    printf "      -D: 本地 SOCKS 监听端口 (如 1080)\n\n"
+                    printf "    此命令执行后，在您的本地浏览器/软件中配置 SOCKS5 代理为 127.0.0.1:1080 即可。\n"
+                    _separator
+                else
+                    _error_no_exit "创建用户失败！"
+                fi
+                _press_any_key
+                ;;
+            2)
+                _header "删除代理用户"
+                if [ "${#proxy_users[@]}" -eq 0 ]; then
+                    _warn "没有可删除的用户。"
+                    _press_any_key
+                    continue
+                fi
+
+                local del_user=""
+                local del_input
+                read -rp "  请输入要删除 of 用户名或编号: " del_input
+                del_input=$(_mihomoconf_trim "$del_input")
+                if [[ "$del_input" =~ ^[0-9]+$ ]] && [ "$del_input" -ge 1 ] && [ "$del_input" -le "${#proxy_users[@]}" ]; then
+                    del_user="${proxy_users[$((del_input - 1))]}"
+                else
+                    # check if name exists in list
+                    local u
+                    for u in "${proxy_users[@]}"; do
+                        if [ "$u" = "$del_input" ]; then
+                            del_user="$u"
+                            break
+                        fi
+                    done
+                fi
+
+                if [ -z "$del_user" ]; then
+                    _error_no_exit "找不到该用户！"
+                    _press_any_key
+                    continue
+                fi
+
+                local confirm
+                read -rp "  确认删除代理用户 ${del_user} 及其主目录吗？[y/N]: " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    if command -v userdel >/dev/null 2>&1; then
+                        userdel -r "$del_user"
+                    elif command -v deluser >/dev/null 2>&1; then
+                        deluser --remove-home "$del_user" 2>/dev/null || deluser "$del_user"
+                    fi
+                    _success "用户 ${del_user} 已删除。"
+                else
+                    _info "已取消删除。"
+                fi
+                _press_any_key
+                ;;
+            3)
+                _header "配置 Mihomo 接管 SSH 代理流量"
+                local config_file="$_MIHOMOCONF_CONFIG_FILE"
+                if [[ ! -f "$config_file" ]]; then
+                    _error_no_exit "未找到 Mihomo 配置文件: ${config_file}"
+                    _info "请先安装并生成 Mihomo 配置。"
+                    _press_any_key
+                    continue
+                fi
+
+                if ! command -v iptables >/dev/null 2>&1; then
+                    _error_no_exit "系统缺少 iptables，无法完成自动转发配置。"
+                    _press_any_key
+                    continue
+                fi
+
+                # Check or update redir-port in config.yaml
+                local redir_port
+                redir_port=$(_mihomoconf_get_port_val "redir-port")
+                if [[ -z "$redir_port" ]]; then
+                    redir_port="7892"
+                    _info "未检测到 redir-port，正在自动写入: ${redir_port}"
+                    local tmp_yaml
+                    tmp_yaml=$(mktemp) || {
+                        _error_no_exit "创建临时文件失败"
+                        _press_any_key
+                        continue
+                    }
+                    echo "redir-port: ${redir_port}" > "$tmp_yaml"
+                    cat "$config_file" >> "$tmp_yaml"
+                    mv "$tmp_yaml" "$config_file"
+                else
+                    _info "检测到已配置的 redir-port: ${redir_port}"
+                fi
+
+                # Enable sniffer to ensure domain name resolution/routing rules works
+                if ! grep -q "^sniffer:" "$config_file"; then
+                    _info "正在配置 sniffer 嗅探器以支持域名分流..."
+                    cat >> "$config_file" <<'EOF'
+
+sniffer:
+  enable: true
+  sniff:
+    TLS:
+      ports: [443, 8443]
+    HTTP:
+      ports: [80, 8080-8880]
+EOF
+                fi
+
+                # Apply iptables redirect rules
+                _info "正在配置 iptables 流量转发..."
+                iptables -t nat -C OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 || \
+                iptables -t nat -A OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port"
+
+                if command -v ip6tables >/dev/null 2>&1; then
+                    ip6tables -t nat -C OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 || \
+                    ip6tables -t nat -A OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 || true
+                fi
+
+                _onepanel_save_iptables_if_possible
+
+                _info "正在重启 Mihomo 服务使配置生效..."
+                if ! _restart_first_available_service mihomo; then
+                    _warn "Mihomo 重启失败，请手动重启"
+                fi
+
+                _success "配置完成！所有属于 sshproxy 组的受限用户的 SSH 代理流量已成功接入 Mihomo。"
+                _info "分流说明: 流量接管后，Mihomo 会自动根据您配置的「分流规则」和「落地出口」进行处理。"
+                _press_any_key
+                ;;
+            *)
+                _error_no_exit "无效选项: ${choice}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 # --- 1Panel iptables 代理链 ---
 
 _onepanel_iptables_chain_exists() {
@@ -33873,7 +34232,7 @@ _proxy_tools_menu_screen() {
     _menu_pair "3" "Snell V5 (Beta)" "配置/导出/日志" "green" "4" "Snell V6 (Beta)" "配置/导出/日志" "green"
     _menu_pair "5" "WireGuard" "部署/客户端/状态" "green" "6" "Shadowsocks-Rust" "配置/导出/日志" "green"
     _menu_pair "7" "Realm 转发" "端口转发管理" "green" "8" "ACME 证书" "申请/续期证书" "green"
-    _menu_item "9" "加密吞吐量测试" "常见加解密测试" "green"
+    _menu_pair "9" "加密吞吐量测试" "常见加解密测试" "green" "10" "SSH 代理管理" "受限代理用户管理" "green"
     _menu_item "0" "返回主菜单" "" "red"
     _separator
 }
@@ -33882,7 +34241,7 @@ _proxy_tools_menu() {
     while true; do
         _ui_print_screen _proxy_tools_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-9]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-10]: " ch
         case "$ch" in
             1) _mihomo_manage ;;
             2) _singbox_manage ;;
@@ -33893,6 +34252,7 @@ _proxy_tools_menu() {
             7) _realm_manage ;;
             8) _acme_manage ;;
             9) _proxy_cipher_benchmark ;;
+            10) _ssh_proxy_user_manage ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
