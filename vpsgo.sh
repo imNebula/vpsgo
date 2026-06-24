@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.11"
+VERSION="5.12"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -14578,7 +14578,16 @@ _mihomochain_list_outbounds() {
 _mihomochain_read_rules_from_config() {
     local config_file="${1:-$_MIHOMOCONF_CONFIG_FILE}"
     [[ -f "$config_file" ]] || return 1
-    awk '
+    local kind left right
+    while IFS=$'\x1f' read -r kind left right; do
+        [[ -z "$kind" ]] && continue
+        if [[ "$kind" == "RULE_SYS_USER" ]]; then
+            if [[ "$left" =~ ^[0-9]+$ ]]; then
+                left=$(id -nu "$left" 2>/dev/null || echo "$left")
+            fi
+        fi
+        printf '%s\037%s\037%s\n' "$kind" "$left" "$right"
+    done < <(awk '
         function trim(s) {
             sub(/^[[:space:]]+/, "", s)
             sub(/[[:space:]]+$/, "", s)
@@ -14598,7 +14607,7 @@ _mihomochain_read_rules_from_config() {
             if (line ~ /^IN-USER,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "RULE_USER\037%s\037%s\n", a[2], a[3]
-            } else if (line ~ /^(PROCESS-USER|USER),[^,]+,[^,]+$/) {
+            } else if (line ~ /^(PROCESS-USER|USER|UID),[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "RULE_SYS_USER\037%s\037%s\n", a[2], a[3]
             } else if (line ~ /^IN-NAME,[^,]+,[^,]+$/) {
@@ -14606,7 +14615,7 @@ _mihomochain_read_rules_from_config() {
                 printf "RULE_NAME\037%s\037%s\n", a[2], a[3]
             }
         }
-    ' "$config_file"
+    ' "$config_file")
 }
 
 _mihomochain_listener_name_by_user() {
@@ -17248,7 +17257,7 @@ _mihomochain_rule_split_parts() {
             if (line ~ /^IN-USER,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "%s\037%s\n", a[2], a[3] >> uf
-            } else if (line ~ /^(PROCESS-USER|USER),[^,]+,[^,]+$/) {
+            } else if (line ~ /^(PROCESS-USER|USER|UID),[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "SYS:%s\037%s\n", a[2], a[3] >> uf
             } else if (line ~ /^IN-NAME,[^,]+,[^,]+$/) {
@@ -17262,6 +17271,27 @@ _mihomochain_rule_split_parts() {
             next
         }
     ' "$config_file"
+
+    if [[ -f "$user_file" ]]; then
+        local tmp_uf
+        tmp_uf=$(mktemp)
+        while IFS=$'\x1f' read -r user out; do
+            [[ -z "$user" ]] && continue
+            if [[ "$user" == SYS:* ]]; then
+                local val="${user#SYS:}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    local uname
+                    uname=$(id -nu "$val" 2>/dev/null || echo "$val")
+                    printf 'SYS:%s\037%s\n' "$uname" "$out" >> "$tmp_uf"
+                else
+                    printf 'SYS:%s\037%s\n' "$val" "$out" >> "$tmp_uf"
+                fi
+            else
+                printf '%s\037%s\n' "$user" "$out" >> "$tmp_uf"
+            fi
+        done < "$user_file"
+        mv "$tmp_uf" "$user_file"
+    fi
 }
 
 _mihomochain_rule_write_parts() {
@@ -17286,7 +17316,18 @@ _mihomochain_rule_write_parts() {
         while IFS=$'\x1f' read -r user out; do
             [[ -z "${user:-}" || -z "${out:-}" ]] && continue
             if [[ "$user" == SYS:* ]]; then
-                printf "  - PROCESS-USER,%s,%s\n" "${user#SYS:}" "$out"
+                local uname="${user#SYS:}"
+                local uid=""
+                if [[ "$uname" =~ ^[0-9]+$ ]]; then
+                    uid="$uname"
+                else
+                    uid=$(id -u "$uname" 2>/dev/null || true)
+                fi
+                if [[ -n "$uid" ]]; then
+                    printf "  - UID,%s,%s\n" "$uid" "$out"
+                else
+                    printf "  - PROCESS-USER,%s,%s\n" "$uname" "$out"
+                fi
             else
                 printf "  - IN-USER,%s,%s\n" "$user" "$out"
             fi
