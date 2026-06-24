@@ -30575,54 +30575,64 @@ EOF
 }
 
 _ssh_proxy_export_config() {
-    _header "导出/显示受限代理用户配置"
-
-    local -a proxy_users=()
-    local u
-    while read -r u; do
-        [[ -z "$u" ]] && continue
-        local exists=0 x
-        for x in "${proxy_users[@]:-}"; do
-            [[ "$x" == "$u" ]] && exists=1 && break
-        done
-        [[ "$exists" -eq 1 ]] || proxy_users+=("$u")
-    done < <(_ssh_proxy_get_users)
-
-    if [ "${#proxy_users[@]}" -eq 0 ]; then
-        _warn "当前没有可导出的 SSH 代理用户。"
-        _press_any_key
-        return
-    fi
-
-    _info "可用的受限代理用户列表:"
-    local i=0
-    for u in "${proxy_users[@]}"; do
-        ((i++))
-        printf "  ${GREEN}[%d]${PLAIN} %s\n" "$i" "$u"
-    done
-    _separator
-
-    local sel_user=""
-    local sel_input
-    read -rp "  请输入要导出的用户名或编号: " sel_input
-    sel_input=$(_mihomoconf_trim "$sel_input")
-    if [[ "$sel_input" =~ ^[0-9]+$ ]] && [ "$sel_input" -ge 1 ] && [ "$sel_input" -le "${#proxy_users[@]}" ]; then
-        sel_user="${proxy_users[$((sel_input - 1))]}"
-    else
-        # check if name exists in list
-        local u
-        for u in "${proxy_users[@]}"; do
-            if [ "$u" = "$sel_input" ]; then
-                sel_user="$u"
-                break
-            fi
-        done
-    fi
+    local sel_user="${1:-}"
 
     if [ -z "$sel_user" ]; then
-        _error_no_exit "找不到该用户！"
-        _press_any_key
-        return
+        _header "导出/显示受限代理用户配置"
+
+        local -a proxy_users=()
+        local u
+        while read -r u; do
+            [[ -z "$u" ]] && continue
+            local exists=0 x
+            for x in "${proxy_users[@]:-}"; do
+                [[ "$x" == "$u" ]] && exists=1 && break
+            done
+            [[ "$exists" -eq 1 ]] || proxy_users+=("$u")
+        done < <(_ssh_proxy_get_users)
+
+        if [ "${#proxy_users[@]}" -eq 0 ]; then
+            _warn "当前没有可导出的 SSH 代理用户。"
+            _press_any_key
+            return
+        fi
+
+        _info "可用的受限代理用户列表:"
+        local i=0
+        for u in "${proxy_users[@]}"; do
+            ((i++))
+            printf "  ${GREEN}[%d]${PLAIN} %s\n" "$i" "$u"
+        done
+        _separator
+
+        local sel_input
+        read -rp "  请输入要导出的用户名或编号: " sel_input
+        sel_input=$(_mihomoconf_trim "$sel_input")
+        if [[ "$sel_input" =~ ^[0-9]+$ ]] && [ "$sel_input" -ge 1 ] && [ "$sel_input" -le "${#proxy_users[@]}" ]; then
+            sel_user="${proxy_users[$((sel_input - 1))]}"
+        else
+            # check if name exists in list
+            local u
+            for u in "${proxy_users[@]}"; do
+                if [ "$u" = "$sel_input" ]; then
+                    sel_user="$u"
+                    break
+                fi
+            done
+        fi
+
+        if [ -z "$sel_user" ]; then
+            _error_no_exit "找不到该用户！"
+            _press_any_key
+            return
+        fi
+    else
+        _header "配置/导出受限代理用户: ${sel_user}"
+        if ! id "$sel_user" >/dev/null 2>&1; then
+            _error_no_exit "用户 ${sel_user} 不存在！"
+            _press_any_key
+            return
+        fi
     fi
 
     local host_default host_input client_host
@@ -30641,11 +30651,45 @@ _ssh_proxy_export_config() {
     client_port=$(_mihomoconf_trim "${port_input:-$port_default}")
     [[ -z "$client_port" ]] && client_port="22"
 
-    local password
-    _info "说明：由于系统密码为哈希存储，无法直接解密提取密码。"
-    read -rp "  请输入密码 (留空则生成包含 <PASSWORD> 占位符的配置): " password
-    password=$(_mihomoconf_trim "$password")
-    [[ -z "$password" ]] && password="<PASSWORD>"
+    local password=""
+    local db_file="/etc/mihomo/ssh_proxy_passwords.txt"
+    local key_file="/etc/mihomo/ssh_proxy_keys/${sel_user}.key"
+    local stored_password=""
+    local is_key_mode=0
+
+    # 检测是否为密钥模式（检查备份的私钥或是否有 authorized_keys 文件）
+    local user_home
+    user_home=$(eval echo "~${sel_user}")
+    local has_auth_keys=0
+    if [[ -f "${user_home}/.ssh/authorized_keys" ]]; then
+        has_auth_keys=1
+    fi
+
+    if [[ -f "$key_file" ]]; then
+        is_key_mode=1
+        password=$(cat "$key_file")
+    elif [[ "$has_auth_keys" -eq 1 ]]; then
+        is_key_mode=1
+        password="<PRIVATE_KEY>"
+    elif [[ -f "$db_file" ]]; then
+        stored_password=$(awk -F: -v user="$sel_user" '$1 == user {print $2}' "$db_file" 2>/dev/null)
+    fi
+
+    if [[ "$is_key_mode" -eq 1 ]]; then
+        if [[ "$password" != "<PRIVATE_KEY>" ]]; then
+            _info "已自动从本地读取该用户的存储密钥。"
+        else
+            _info "此用户配置为密钥登录，但本地未备份私钥内容。"
+        fi
+    elif [[ -n "$stored_password" ]]; then
+        _info "已自动从本地读取该用户的存储密码。"
+        password="$stored_password"
+    else
+        _info "说明：由于系统密码为哈希存储，无法直接解密提取密码。"
+        read -rp "  请输入密码 (留空则生成包含 <PASSWORD> 占位符的配置): " password
+        password=$(_mihomoconf_trim "$password")
+        [[ -z "$password" ]] && password="<PASSWORD>"
+    fi
 
     local node_name node_name_input
     node_name="SSH-Proxy-${sel_user}"
@@ -30654,10 +30698,14 @@ _ssh_proxy_export_config() {
     [[ -z "$node_name" ]] && node_name="SSH-Proxy-${sel_user}"
 
     local ssh_link
-    if [[ "$password" == "<PASSWORD>" ]]; then
+    if [[ "$is_key_mode" -eq 1 ]]; then
         ssh_link="ssh://$(_mihomoconf_urlencode "$sel_user")@${client_host}:${client_port}#$(_mihomoconf_urlencode "$node_name")"
     else
-        ssh_link="ssh://$(_mihomoconf_urlencode "$sel_user"):$(_mihomoconf_urlencode "$password")@${client_host}:${client_port}#$(_mihomoconf_urlencode "$node_name")"
+        if [[ "$password" == "<PASSWORD>" ]]; then
+            ssh_link="ssh://$(_mihomoconf_urlencode "$sel_user")@${client_host}:${client_port}#$(_mihomoconf_urlencode "$node_name")"
+        else
+            ssh_link="ssh://$(_mihomoconf_urlencode "$sel_user"):$(_mihomoconf_urlencode "$password")@${client_host}:${client_port}#$(_mihomoconf_urlencode "$node_name")"
+        fi
     fi
 
     local q_name q_server q_user q_pass
@@ -30668,9 +30716,13 @@ _ssh_proxy_export_config() {
 
     _separator
     printf "  ${BOLD}1. SSH SOCKS5 代理命令行 (本地直接执行):${PLAIN}\n"
-    printf "    ${GREEN}ssh -N -D 1080 -p %s %s@%s${PLAIN}\n" "$client_port" "$sel_user" "$client_host"
-    if [[ "$password" == "<PASSWORD>" ]]; then
-        printf "    (提示: 执行后请输入该用户的实际密码)\n"
+    if [[ "$is_key_mode" -eq 1 ]]; then
+        printf "    ${GREEN}ssh -N -D 1080 -p %s -i ~/.ssh/%s_proxy.key %s@%s${PLAIN}\n" "$client_port" "$sel_user" "$sel_user" "$client_host"
+    else
+        printf "    ${GREEN}ssh -N -D 1080 -p %s %s@%s${PLAIN}\n" "$client_port" "$sel_user" "$client_host"
+        if [[ "$password" == "<PASSWORD>" ]]; then
+            printf "    (提示: 执行后请输入该用户的实际密码)\n"
+        fi
     fi
 
     _separator
@@ -30679,7 +30731,19 @@ _ssh_proxy_export_config() {
 
     _separator
     printf "  ${BOLD}3. Mihomo (Clash) 节点配置 (YAML 格式):${PLAIN}\n"
-    cat <<EOF
+    if [[ "$is_key_mode" -eq 1 ]]; then
+        cat <<EOF
+proxies:
+  - name: "${q_name}"
+    type: ssh
+    server: "${q_server}"
+    port: ${client_port}
+    username: "${q_user}"
+    private-key: |
+$(printf '%s\n' "$password" | sed 's/^/      /')
+EOF
+    else
+        cat <<EOF
 proxies:
   - name: "${q_name}"
     type: ssh
@@ -30688,10 +30752,25 @@ proxies:
     username: "${q_user}"
     password: "${q_pass}"
 EOF
+    fi
 
     _separator
     printf "  ${BOLD}4. Sing-Box 节点配置 (JSON 格式):${PLAIN}\n"
-    cat <<EOF
+    if [[ "$is_key_mode" -eq 1 ]]; then
+        local escaped_key
+        escaped_key=$(printf '%s\n' "$password" | awk '{printf "%s\\n", $0}' | sed 's/\\n$//' | sed 's/"/\\"/g')
+        cat <<EOF
+{
+  "type": "ssh",
+  "tag": "${q_name}",
+  "server": "${q_server}",
+  "server_port": ${client_port},
+  "user": "${q_user}",
+  "private_key": "${escaped_key}"
+}
+EOF
+    else
+        cat <<EOF
 {
   "type": "ssh",
   "tag": "${q_name}",
@@ -30701,6 +30780,22 @@ EOF
   "password": "${q_pass}"
 }
 EOF
+    fi
+
+    if [[ "$is_key_mode" -eq 1 ]]; then
+        _separator
+        if [[ "$password" != "<PRIVATE_KEY>" ]]; then
+            printf "  ${BOLD}5. 快捷保存私钥至另一台客户端/服务器的命令:${PLAIN}\n"
+            printf "    直接在其他机器的终端执行以下这行命令（会自动创建目录并写入私钥）:\n"
+            printf "    ${GREEN}mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat << 'EOF' > ~/.ssh/%s_proxy.key\n%s\nEOF\nchmod 600 ~/.ssh/%s_proxy.key${PLAIN}\n"                    "$sel_user" "$password" "$sel_user"
+            printf "    \n"
+            printf "    私钥在当前服务端的备份路径为: ${GREEN}%s${PLAIN}\n" "$key_file"
+        else
+            printf "  ${BOLD}5. 私钥提示:${PLAIN}\n"
+            printf "    由于此用户在创建时未备份配对的私钥，无法直接生成保存脚本。\n"
+            printf "    请在客户端配置中手动将私钥内容替换为您的实际私钥文件/内容。\n"
+        fi
+    fi
     _separator
 
     local safe_host export_dir base_name
@@ -30722,8 +30817,44 @@ EOF
     mihomo_file="${export_dir}/ssh-${base_name}.mihomo.yaml"
     singbox_file="${export_dir}/ssh-${base_name}.singbox.json"
 
-    cat > "$txt_file" <<EOF
-# SSH Proxy Node Export
+    if [[ "$is_key_mode" -eq 1 ]]; then
+        cat > "$txt_file" <<EOF
+# SSH Proxy Node Export (Key Mode)
+name=${node_name}
+server=${client_host}
+port=${client_port}
+username=${sel_user}
+private_key_path=${key_file}
+uri=${ssh_link}
+command=ssh -N -D 1080 -p ${client_port} -i ~/.ssh/${sel_user}_proxy.key ${sel_user}@${client_host}
+EOF
+
+        cat > "$mihomo_file" <<EOF
+proxies:
+  - name: "${q_name}"
+    type: ssh
+    server: "${q_server}"
+    port: ${client_port}
+    username: "${q_user}"
+    private-key: |
+$(printf '%s\n' "$password" | sed 's/^/      /')
+EOF
+
+        local escaped_key
+        escaped_key=$(printf '%s\n' "$password" | awk '{printf "%s\\n", $0}' | sed 's/\\n$//' | sed 's/"/\\"/g')
+        cat > "$singbox_file" <<EOF
+{
+  "type": "ssh",
+  "tag": "${q_name}",
+  "server": "${q_server}",
+  "server_port": ${client_port},
+  "user": "${q_user}",
+  "private_key": "${escaped_key}"
+}
+EOF
+    else
+        cat > "$txt_file" <<EOF
+# SSH Proxy Node Export (Password Mode)
 name=${node_name}
 server=${client_host}
 port=${client_port}
@@ -30733,7 +30864,7 @@ uri=${ssh_link}
 command=ssh -N -D 1080 -p ${client_port} ${sel_user}@${client_host}
 EOF
 
-    cat > "$mihomo_file" <<EOF
+        cat > "$mihomo_file" <<EOF
 proxies:
   - name: "${q_name}"
     type: ssh
@@ -30743,7 +30874,7 @@ proxies:
     password: "${q_pass}"
 EOF
 
-    cat > "$singbox_file" <<EOF
+        cat > "$singbox_file" <<EOF
 {
   "type": "ssh",
   "tag": "${q_name}",
@@ -30753,12 +30884,66 @@ EOF
   "password": "${q_pass}"
 }
 EOF
+    fi
 
     echo ""
     _success "节点配置文件已导出:"
     printf "    文本参数   : %s\n" "$txt_file"
     printf "    Mihomo 配置: %s\n" "$mihomo_file"
     printf "    Sing-Box 配置: %s\n" "$singbox_file"
+    
+    # 快速导入 Mihomo 功能
+    echo ""
+    local import_confirm
+    read -rp "  是否将该节点自动导入/更新到本地的 Mihomo 配置中？[y/N]: " import_confirm
+    import_confirm=$(_mihomoconf_trim "${import_confirm:-n}")
+    if [[ "$import_confirm" =~ ^[Yy]$ ]]; then
+        local config_file="$_MIHOMOCONF_CONFIG_FILE"
+        if [[ ! -f "$config_file" ]]; then
+            _error_no_exit "未找到 Mihomo 配置文件: ${config_file}"
+        else
+            local tmp_block
+            tmp_block=$(mktemp) || {
+                _error_no_exit "创建临时文件失败"
+                _press_any_key
+                return
+            }
+            
+            if [[ "$is_key_mode" -eq 1 ]]; then
+                cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: ssh
+    server: "${q_server}"
+    port: ${client_port}
+    username: "${q_user}"
+    private-key: |
+$(printf '%s\n' "$password" | sed 's/^/      /')
+EOF
+            else
+                cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: ssh
+    server: "${q_server}"
+    port: ${client_port}
+    username: "${q_user}"
+    password: "${q_pass}"
+EOF
+            fi
+            
+            if _mihomochain_upsert_proxy_block "$config_file" "$node_name" "$tmp_block"; then
+                _success "已成功将节点 [${node_name}] 导入/更新到 Mihomo 配置文件: ${config_file}"
+                _info "正在重启 Mihomo 服务以应用新配置..."
+                if systemctl restart mihomo >/dev/null 2>&1 || service mihomo restart >/dev/null 2>&1; then
+                    _success "Mihomo 服务重启成功！"
+                else
+                    _warn "Mihomo 服务重启失败，请尝试手动执行 'systemctl restart mihomo'。"
+                fi
+            else
+                _error_no_exit "导入 Mihomo 配置文件失败。"
+            fi
+            rm -f "$tmp_block"
+        fi
+    fi
     echo ""
     _press_any_key
 }
@@ -30793,7 +30978,7 @@ _ssh_proxy_user_manage() {
 
         _separator
         _menu_pair "1" "创建受限代理用户" "" "green" "2" "删除代理用户" "" "red"
-        _menu_pair "3" "配置 Mihomo 接管流量" "使用 iptables NAT 转发" "green" "4" "导出/显示用户配置" "输出 SSH/Mihomo/Sing-Box 格式" "green"
+        _menu_pair "3" "配置 Mihomo 接管流量" "开启/关闭 iptables 转发" "green" "4" "导出/显示用户配置" "输出 SSH/Mihomo/Sing-Box 格式" "green"
         _menu_pair "0" "返回" "" "cyan" "" "" "" ""
         _separator
 
@@ -30821,11 +31006,81 @@ _ssh_proxy_user_manage() {
                     break
                 done
 
-                read -rp "  请输入密码 (留空随机生成): " password
-                password=$(_mihomoconf_trim "$password")
-                if [ -z "$password" ]; then
-                    password=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
-                    _info "已自动生成密码: ${GREEN}${password}${PLAIN}"
+                _separator
+                _info "选择身份验证方式:"
+                printf "  [1] 密码验证 (Password Authentication)\n"
+                printf "  [2] 密钥验证 (SSH Key Authentication)\n"
+                local auth_mode="1"
+                read -rp "  选择 [1-2, 默认 1]: " auth_mode
+                auth_mode=$(_mihomoconf_trim "${auth_mode:-1}")
+
+                local password=""
+                local private_key=""
+                local public_key=""
+                local is_key_mode=0
+
+                if [[ "$auth_mode" == "2" ]]; then
+                    is_key_mode=1
+                    _separator
+                    _info "选择密钥生成方式:"
+                    printf "  [1] 自动生成新密钥对 (将自动配置登录并备份私钥)\n"
+                    printf "  [2] 导入已有公钥 (手动粘贴已有的公钥)\n"
+                    local key_choice="1"
+                    read -rp "  选择 [1-2, 默认 1]: " key_choice
+                    key_choice=$(_mihomoconf_trim "${key_choice:-1}")
+
+                    if [[ "$key_choice" == "2" ]]; then
+                        while true; do
+                            read -rp "  请粘贴您的 SSH 公钥 (例如 ssh-rsa/ssh-ed25519 开头的内容): " public_key
+                            public_key=$(_mihomoconf_trim "$public_key")
+                            [[ -n "$public_key" ]] && break
+                            _warn "公钥不能为空！"
+                        done
+                        
+                        local paste_pk_confirm
+                        read -rp "  是否粘贴配对的私钥以支持一键导出客户端配置？[y/N]: " paste_pk_confirm
+                        paste_pk_confirm=$(_mihomoconf_trim "${paste_pk_confirm:-n}")
+                        if [[ "$paste_pk_confirm" =~ ^[Yy]$ ]]; then
+                            _info "请在一行或多行中粘贴私钥内容，完成后在新行按 Ctrl+D 结束输入:"
+                            local temp_pk
+                            temp_pk=$(cat)
+                            temp_pk=$(_mihomoconf_trim "$temp_pk")
+                            if [[ -n "$temp_pk" ]]; then
+                                private_key="$temp_pk"
+                                _success "私钥已导入。"
+                            else
+                                _warn "未输入私钥内容。"
+                            fi
+                        else
+                            _info "已跳过私钥粘贴备份。"
+                        fi
+                    else
+                        _info "正在自动生成 ED25519 密钥对..."
+                        local temp_key_file
+                        temp_key_file=$(mktemp)
+                        rm -f "$temp_key_file"
+                        if ssh-keygen -t ed25519 -N "" -f "$temp_key_file" >/dev/null 2>&1; then
+                            private_key=$(cat "$temp_key_file")
+                            public_key=$(cat "${temp_key_file}.pub")
+                            rm -f "$temp_key_file" "${temp_key_file}.pub"
+                            _success "成功生成密钥对！"
+                        else
+                            _error_no_exit "生成密钥对失败，回退到密码方式"
+                            is_key_mode=0
+                        fi
+                    fi
+                fi
+
+                if [[ "$is_key_mode" -eq 0 ]]; then
+                    read -rp "  请输入密码 (留空随机生成): " password
+                    password=$(_mihomoconf_trim "$password")
+                    if [ -z "$password" ]; then
+                        password=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+                        _info "已自动生成密码: ${GREEN}${password}${PLAIN}"
+                    fi
+                else
+                    # 生成一个长随机密码给该受限账户加锁，以保证账户可用但密码防暴力破解
+                    password=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
                 fi
 
                 # 4. Determine shell
@@ -30856,24 +31111,83 @@ _ssh_proxy_user_manage() {
                     echo "${username}:${password}" | chpasswd
                     _success "用户 ${username} 创建成功！"
                     
+                    if [[ "$is_key_mode" -eq 1 ]]; then
+                        local user_home
+                        user_home=$(eval echo "~${username}")
+                        if [[ -d "$user_home" ]]; then
+                            mkdir -p "${user_home}/.ssh"
+                            echo "$public_key" > "${user_home}/.ssh/authorized_keys"
+                            chmod 700 "${user_home}/.ssh"
+                            chmod 600 "${user_home}/.ssh/authorized_keys"
+                            chown -R "${username}:sshproxy" "${user_home}/.ssh"
+                            _success "已配置公钥登录并写入 ${user_home}/.ssh/authorized_keys"
+                        else
+                            _warn "未找到用户主目录 ${user_home}，密钥配置写入失败"
+                        fi
+                    fi
+
+                    # 存储密码/密钥以供后续自动导出配置
+                    local db_dir="/etc/mihomo"
+                    mkdir -p "$db_dir" 2>/dev/null
+                    if [[ "$is_key_mode" -eq 1 ]]; then
+                        # 备份私钥到 /etc/mihomo/ssh_proxy_keys/
+                        if [[ -n "$private_key" ]]; then
+                            local key_dir="${db_dir}/ssh_proxy_keys"
+                            mkdir -p "$key_dir" 2>/dev/null
+                            chmod 700 "$key_dir" 2>/dev/null
+                            local key_file="${key_dir}/${username}.key"
+                            echo "$private_key" > "$key_file"
+                            chmod 600 "$key_file" 2>/dev/null
+                            _success "私钥已成功备份至: ${key_file}"
+                        fi
+                        # 删除密码备份（如有旧的数据）
+                        local db_file="${db_dir}/ssh_proxy_passwords.txt"
+                        if [[ -f "$db_file" ]]; then
+                            sed -i "/^${username}:/d" "$db_file" 2>/dev/null || sed -i "" "/^${username}:/d" "$db_file" 2>/dev/null
+                        fi
+                    else
+                        # 备份密码到 /etc/mihomo/ssh_proxy_passwords.txt
+                        local db_file="${db_dir}/ssh_proxy_passwords.txt"
+                        if [[ -f "$db_file" ]]; then
+                            sed -i "/^${username}:/d" "$db_file" 2>/dev/null || sed -i "" "/^${username}:/d" "$db_file" 2>/dev/null
+                        fi
+                        echo "${username}:${password}" >> "$db_file"
+                        chmod 600 "$db_file" 2>/dev/null
+                        # 删除密钥备份（如有旧的数据）
+                        rm -f "${db_dir}/ssh_proxy_keys/${username}.key" 2>/dev/null
+                    fi
+                    
                     _info "正在配置 SSHD 服务限制..."
                     _ssh_proxy_apply_sshd_config
                     
-                    local server_ip
-                    server_ip=$(_mihomoconf_get_server_ip)
                     _separator
-                    printf "  ${BOLD}SSH SOCKS5 代理使用指南:${PLAIN}\n"
-                    printf "    在您的客户端 (例如 macOS/Linux 终端或 Windows CMD) 执行以下命令:\n"
-                    printf "      ${GREEN}ssh -N -D 1080 -p $(_ssh_current_ports | cut -d',' -f1) %s@%s${PLAIN}\n\n" "$username" "$server_ip"
-                    printf "    参数解释:\n"
-                    printf "      -N: 不执行远程命令 (不登录 Shell)\n"
-                    printf "      -D: 本地 SOCKS 监听端口 (如 1080)\n\n"
-                    printf "    此命令执行后，在您的本地浏览器/软件中配置 SOCKS5 代理为 127.0.0.1:1080 即可。\n"
-                    _separator
+                    local show_export
+                    read -rp "  是否立即配置并导出该用户的完整客户端配置(支持一键导入Mihomo)？[Y/n]: " show_export
+                    show_export=$(_mihomoconf_trim "${show_export:-y}")
+                    if [[ "$show_export" =~ ^[Yy]$ ]]; then
+                        _ssh_proxy_export_config "$username"
+                    else
+                        local server_ip
+                        server_ip=$(_mihomoconf_get_server_ip)
+                        printf "  ${BOLD}SSH 代理使用指南:${PLAIN}\n"
+                        if [[ "$is_key_mode" -eq 1 ]]; then
+                            printf "    在您的客户端执行以下命令连接代理:\n"
+                            printf "      ${GREEN}ssh -N -D 1080 -p $(_ssh_current_ports | cut -d',' -f1) -i ~/.ssh/%s_proxy.key %s@%s${PLAIN}\n\n" "$username" "$username" "$server_ip"
+                        else
+                            printf "    在您的客户端执行以下命令连接代理:\n"
+                            printf "      ${GREEN}ssh -N -D 1080 -p $(_ssh_current_ports | cut -d',' -f1) %s@%s${PLAIN}\n\n" "$username" "$server_ip"
+                        fi
+                        printf "    参数解释:\n"
+                        printf "      -N: 不执行远程命令 (不登录 Shell)\n"
+                        printf "      -D: 本地 SOCKS 监听端口 (如 1080)\n\n"
+                        printf "    此命令执行后，在您的本地浏览器/软件中配置 SOCKS5 代理为 127.0.0.1:1080 即可。\n"
+                        _separator
+                        _press_any_key
+                    fi
                 else
                     _error_no_exit "创建用户失败！"
+                    _press_any_key
                 fi
-                _press_any_key
                 ;;
             2)
                 _header "删除代理用户"
@@ -30914,6 +31228,14 @@ _ssh_proxy_user_manage() {
                     elif command -v deluser >/dev/null 2>&1; then
                         deluser --remove-home "$del_user" 2>/dev/null || deluser "$del_user"
                     fi
+                    
+                    # 删除本地存储的密码与密钥
+                    local db_file="/etc/mihomo/ssh_proxy_passwords.txt"
+                    if [[ -f "$db_file" ]]; then
+                        sed -i "/^${del_user}:/d" "$db_file" 2>/dev/null || sed -i "" "/^${del_user}:/d" "$db_file" 2>/dev/null
+                    fi
+                    rm -f "/etc/mihomo/ssh_proxy_keys/${del_user}.key" 2>/dev/null
+                    
                     _success "用户 ${del_user} 已删除。"
                 else
                     _info "已取消删除。"
@@ -30932,6 +31254,41 @@ _ssh_proxy_user_manage() {
 
                 if ! command -v iptables >/dev/null 2>&1; then
                     _error_no_exit "系统缺少 iptables，无法完成自动转发配置。"
+                    _press_any_key
+                    continue
+                fi
+
+                _info "请选择流量接管操作:"
+                printf "  [1] 开启流量接管 (通过 iptables 将 sshproxy 组的流量转发至 Mihomo)\n"
+                printf "  [2] 关闭流量接管 (清除相关 iptables 转发规则)\n"
+                local take_choice="1"
+                read -rp "  选择 [1-2, 默认 1]: " take_choice
+                take_choice=$(_mihomoconf_trim "${take_choice:-1}")
+
+                if [[ "$take_choice" == "2" ]]; then
+                    _info "正在清除 iptables 流量转发规则..."
+                    local sshproxy_gid
+                    sshproxy_gid=$(getent group sshproxy | cut -d: -f3 2>/dev/null)
+                    [[ -z "$sshproxy_gid" ]] && sshproxy_gid=$(grep "^sshproxy:" /etc/group | cut -d: -f3 2>/dev/null)
+                    
+                    local rule
+                    if command -v iptables-save >/dev/null 2>&1; then
+                        iptables-save -t nat | grep -E "sshproxy|${sshproxy_gid:-NOTFOUND}" | while read -r rule; do
+                            local clean_rule
+                            clean_rule=$(echo "$rule" | sed 's/^-A/-D/')
+                            iptables -t nat $clean_rule >/dev/null 2>&1
+                        done
+                    fi
+                    if command -v ip6tables-save >/dev/null 2>&1; then
+                        ip6tables-save -t nat | grep -E "sshproxy|${sshproxy_gid:-NOTFOUND}" | while read -r rule; do
+                            local clean_rule
+                            clean_rule=$(echo "$rule" | sed 's/^-A/-D/')
+                            ip6tables -t nat $clean_rule >/dev/null 2>&1
+                        done
+                    fi
+                    
+                    _onepanel_save_iptables_if_possible
+                    _success "流量接管已关闭，转发规则已清除。"
                     _press_any_key
                     continue
                 fi
@@ -30972,12 +31329,10 @@ EOF
 
                 # Apply iptables redirect rules
                 _info "正在配置 iptables 流量转发..."
-                iptables -t nat -C OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 || \
-                iptables -t nat -A OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port"
+                iptables -t nat -C OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 ||                 iptables -t nat -A OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port"
 
                 if command -v ip6tables >/dev/null 2>&1; then
-                    ip6tables -t nat -C OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 || \
-                    ip6tables -t nat -A OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 || true
+                    ip6tables -t nat -C OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 ||                     ip6tables -t nat -A OUTPUT -m owner --gid-owner sshproxy -p tcp -j REDIRECT --to-ports "$redir_port" >/dev/null 2>&1 || true
                 fi
 
                 _onepanel_save_iptables_if_possible
