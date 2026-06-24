@@ -18148,6 +18148,7 @@ _mihomo_chain_proxy_manage() {
                                             break
                                         fi
                                         if IFS= read -r line; then
+                                            line=$(_mihomoconf_trim "$line")
                                             out_wg_private_key="${out_wg_private_key}"$'\n'"$line"
                                         else
                                             break
