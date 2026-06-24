@@ -13,16 +13,15 @@
 #   8. NextTrace 安装与快速路由检测
 #   9. Docker 日志轮转配置
 #  10. Mihomo 管理 (安装/配置/重启/卸载)
-#  11. Sing-Box 管理 (安装/自启/重启/日志/卸载)
-#  12. Snell V5 管理 (官方安装/配置/重启/日志/卸载)
-#  13. WireGuard 原生节点 (安装/部署/重启/状态/卸载)
-#  14. Shadowsocks-Rust 管理 (安装/配置/重启/日志/卸载)
-#  15. Akile DNS 解锁检测与配置
-#  16. Linux DNS 管理 (临时/永久修改)
-#  17. Swap 管理
-#  18. 1Panel iptables 代理链快速应用
-#  19. WARP 管理
-#  20. IPQuality 测试 (IP 质量与流媒体解锁检测)
+#  11. Snell V5 管理 (官方安装/配置/重启/日志/卸载)
+#  12. WireGuard 原生节点 (安装/部署/重启/状态/卸载)
+#  13. Shadowsocks-Rust 管理 (安装/配置/重启/日志/卸载)
+#  14. Akile DNS 解锁检测与配置
+#  15. Linux DNS 管理 (临时/永久修改)
+#  16. Swap 管理
+#  17. 1Panel iptables 代理链快速应用
+#  18. WARP 管理
+#  19. IPQuality 测试 (IP 质量与流媒体解锁检测)
 #
 # 使用方法: bash vpsgo.sh
 #
@@ -39,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.3"
+VERSION="5.4"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -5200,6 +5199,20 @@ _mihomoconf_gen_reality_keypair() {
     printf '%s\t%s\n' "$private_key" "$public_key"
 }
 
+_mihomoconf_gen_masque_keypair() {
+    local ecpriv pem_priv base64_priv pem_pub base64_pub
+    if command -v openssl >/dev/null 2>&1; then
+        ecpriv=$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null) || return 1
+        pem_priv=$(printf '%s\n' "$ecpriv" | openssl ec -outform PEM 2>/dev/null) || return 1
+        base64_priv=$(printf '%s\n' "$pem_priv" | grep -v '^-' | tr -d '\n\r')
+        pem_pub=$(printf '%s\n' "$pem_priv" | openssl ec -pubout -outform PEM 2>/dev/null) || return 1
+        base64_pub=$(printf '%s\n' "$pem_pub" | grep -v '^-' | tr -d '\n\r')
+        printf '%s\t%s\n' "$base64_priv" "$base64_pub"
+        return 0
+    fi
+    return 1
+}
+
 _mihomoconf_gen_vless_keys() {
     local output_x25519 output_mlkem
     local x25519_priv x25519_pub mlkem_seed mlkem_client
@@ -5845,6 +5858,31 @@ _mihomoconf_gen_socks_link() {
     echo "socks5://${userinfo}${server}:${port}#${encoded_name}"
 }
 
+_mihomoconf_gen_ssh_link() {
+    local server="$1" port="$2" username="$3" password="$4" name="$5" private_key="$6" passphrase="$7"
+    local encoded_name encoded_user encoded_pass userinfo="" query=""
+    encoded_name=$(_mihomoconf_urlencode "${name}")
+    encoded_user=$(_mihomoconf_urlencode "${username}")
+    if [[ -n "$password" ]]; then
+        encoded_pass=$(_mihomoconf_urlencode "${password}")
+        userinfo="${encoded_user}:${encoded_pass}@"
+    else
+        userinfo="${encoded_user}@"
+    fi
+    local -a params=()
+    if [[ -n "$private_key" ]]; then
+        params+=("private-key=$(_mihomoconf_urlencode "$private_key")")
+    fi
+    if [[ -n "$passphrase" ]]; then
+        params+=("private-key-passphrase=$(_mihomoconf_urlencode "$passphrase")")
+    fi
+    if (( ${#params[@]} > 0 )); then
+        local IFS='&'
+        query="?${params[*]}"
+    fi
+    echo "ssh://${userinfo}${server}:${port}${query}#${encoded_name}"
+}
+
 
 _mihomoconf_port_in_list() {
     local port="$1"
@@ -6317,6 +6355,8 @@ _mihomoconf_read_listener_rows() {
             users_indent=-1
             in_obfs_opts=0
             obfs_opts_indent=-1
+            in_httpmask=0
+            httpmask_indent=-1
             current_vless_username=current_vless_uuid=current_vless_flow=""
         }
         function emit() {
@@ -6378,6 +6418,8 @@ _mihomoconf_read_listener_rows() {
             users_indent=-1
             in_obfs_opts=0
             obfs_opts_indent=-1
+            in_httpmask=0
+            httpmask_indent=-1
             next
         }
         in_obfs_opts {
@@ -6630,6 +6672,22 @@ _mihomoconf_read_listener_rows() {
             sni=unquote(trim(line))
             next
         }
+        in_httpmask {
+            curr_indent=lindent($0)
+            if (curr_indent <= httpmask_indent) {
+                in_httpmask=0
+            } else if ($0 ~ /^[[:space:]]+disable:/) {
+                line=$0
+                sub(/^[[:space:]]+disable:[[:space:]]*/, "", line)
+                vless_ws_tls=unquote(trim(line))
+                next
+            } else if ($0 ~ /^[[:space:]]+mode:/) {
+                line=$0
+                sub(/^[[:space:]]+mode:[[:space:]]*/, "", line)
+                vless_type=unquote(trim(line))
+                next
+            }
+        }
         /^[[:space:]]+version:/ {
             if (lindent($0) != item_indent + 2) next
             line=$0
@@ -6649,6 +6707,90 @@ _mihomoconf_read_listener_rows() {
             line=$0
             sub(/^[[:space:]]+psk:[[:space:]]*/, "", line)
             password=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+private-key:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+private-key:[[:space:]]*/, "", line)
+            password=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+public-key:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+public-key:[[:space:]]*/, "", line)
+            vless_public_key=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+ip:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+ip:[[:space:]]*/, "", line)
+            vless_ws_path=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+ipv6:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+ipv6:[[:space:]]*/, "", line)
+            vless_ws_host=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+mtu:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+mtu:[[:space:]]*/, "", line)
+            vless_grpc_service_name=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+udp:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+udp:[[:space:]]*/, "", line)
+            vless_ws_tls=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+network:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+network:[[:space:]]*/, "", line)
+            vless_type=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+key:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+key:[[:space:]]*/, "", line)
+            password=unquote(trim(line))
+            next
+        }
+        /^[[:space:]]+aead-method:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+aead-method:[[:space:]]*/, "", line)
+            cipher=trim(line)
+            next
+        }
+        /^[[:space:]]+padding-min:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+padding-min:[[:space:]]*/, "", line)
+            vless_ws_path=trim(line)
+            next
+        }
+        /^[[:space:]]+padding-max:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+padding-max:[[:space:]]*/, "", line)
+            vless_ws_host=trim(line)
+            next
+        }
+        /^[[:space:]]+table-type:/ {
+            if (lindent($0) != item_indent + 2) next
+            line=$0
+            sub(/^[[:space:]]+table-type:[[:space:]]*/, "", line)
+            vless_grpc_service_name=unquote(trim(line))
             next
         }
         /^[[:space:]]+type:/ {
@@ -6725,6 +6867,12 @@ _mihomoconf_read_listener_rows() {
             if (lindent($0) != item_indent + 2) next
             in_users=1
             users_indent=lindent($0)
+            next
+        }
+        /^[[:space:]]+httpmask:[[:space:]]*$/ {
+            if (lindent($0) != item_indent + 2) next
+            in_httpmask=1
+            httpmask_indent=lindent($0)
             next
         }
         /^[[:space:]]+obfs-opts:[[:space:]]*$/ {
@@ -8409,16 +8557,19 @@ _mihomoconf_setup() {
     local ENABLE_VMESS="n" ENABLE_VMESS_WS="n" ENABLE_VMESS_GRPC="n"
     local ENABLE_VLESS_GRPC="n" ENABLE_VLESS_PURE_GRPC="n" ENABLE_VLESS_ENC="n"
     local ENABLE_TROJAN="n" ENABLE_TROJAN_WS="n" ENABLE_TROJAN_GRPC="n"
+    local ENABLE_MASQUE="n" ENABLE_SUDOKU="n"
 
     local SS_COUNT=0 ANYTLS_COUNT=0 VLESS_COUNT=0 HY2_COUNT=0 TUIC_COUNT=0 SOCKS_COUNT=0 VLESS_WS_COUNT=0 SNELL_COUNT=0
     local VMESS_COUNT=0 VMESS_WS_COUNT=0 VMESS_GRPC_COUNT=0
     local VLESS_GRPC_COUNT=0 VLESS_PURE_GRPC_COUNT=0 VLESS_ENC_COUNT=0
     local TROJAN_COUNT=0 TROJAN_WS_COUNT=0 TROJAN_GRPC_COUNT=0
+    local MASQUE_COUNT=0 SUDOKU_COUNT=0
 
     local SS_REPLACE="n" ANYTLS_REPLACE="n" VLESS_REPLACE="n" HY2_REPLACE="n" TUIC_REPLACE="n" SOCKS_REPLACE="n" VLESS_WS_REPLACE="n" SNELL_REPLACE="n"
     local VMESS_REPLACE="n" VMESS_WS_REPLACE="n" VMESS_GRPC_REPLACE="n"
     local VLESS_GRPC_REPLACE="n" VLESS_ENC_REPLACE="n"
     local TROJAN_REPLACE="n" TROJAN_WS_REPLACE="n" TROJAN_GRPC_REPLACE="n"
+    local MASQUE_REPLACE="n" SUDOKU_REPLACE="n"
 
     local -a SS_PORTS=() SS_TAGS=() SS_USER_ROWS=()
     local SS_CIPHER=""
@@ -8426,6 +8577,8 @@ _mihomoconf_setup() {
     local -a SNELL_PORTS=() SNELL_TAGS=() SNELL_PSKS=() SNELL_VERSIONS=() SNELL_REUSES=() SNELL_OBFS_MODES=() SNELL_OBFS_HOSTS=()
     local -a ANYTLS_PORTS=() ANYTLS_TAGS=() ANYTLS_USER_ROWS=()
     local ANYTLS_SNI=""
+    local -a MASQUE_PORTS=() MASQUE_TAGS=() MASQUE_IP_CIDRS=() MASQUE_IPV6_CIDRS=() MASQUE_MTUS=() MASQUE_UDPS=() MASQUE_NETWORKS=() MASQUE_PRIVATE_KEYS=() MASQUE_PUBLIC_KEYS=()
+    local -a SUDOKU_PORTS=() SUDOKU_TAGS=() SUDOKU_KEYS=() SUDOKU_AEADS=() SUDOKU_PADDING_MINS=() SUDOKU_PADDING_MAXS=() SUDOKU_TABLES=() SUDOKU_HTTPMASK_DISABLES=() SUDOKU_HTTPMASK_MODES=()
     
     local -a VMESS_PORTS=() VMESS_TAGS=() VMESS_USER_ROWS=()
     local -a VMESS_WS_PORTS=() VMESS_WS_TAGS=() VMESS_WS_USER_ROWS=() VMESS_WS_PATHS=() VMESS_WS_TLS_OPTS=() VMESS_WS_HOSTS=()
@@ -8501,10 +8654,11 @@ _mihomoconf_setup() {
     _menu_pair "3" "VLESS (含 Reality / WS / gRPC)" "" "green" "4" "Trojan (含 TCP / WS / gRPC)" "" "green"
     _menu_pair "5" "Hysteria 2 (HY2)" "" "green" "6" "TUIC" "" "green"
     _menu_pair "7" "AnyTLS" "" "green" "8" "Socks5" "" "green"
-    _menu_pair "9" "Snell (v5)" "" "green" "" "" "" ""
+    _menu_pair "9" "Snell (v5)" "" "green" "10" "MASQUE" "" "green"
+    _menu_pair "11" "Sudoku" "" "green" "" "" "" ""
     _separator
     local PROTOCOL_CHOICES
-    read -rp "  选择 (如 \"1 1 2\" 表示 2 个 SS + 1 个 VMess): " -a PROTOCOL_CHOICES
+    read -rp "  选择 (如 \"1 1 10\" 表示 2 个 SS + 1 个 MASQUE): " -a PROTOCOL_CHOICES
 
     for ch in "${PROTOCOL_CHOICES[@]}"; do
         case "$ch" in
@@ -8560,10 +8714,12 @@ _mihomoconf_setup() {
             7) ENABLE_ANYTLS="y"; ANYTLS_COUNT=$((ANYTLS_COUNT + 1)) ;;
             8) ENABLE_SOCKS="y"; SOCKS_COUNT=$((SOCKS_COUNT + 1)) ;;
             9) ENABLE_SNELL="y"; SNELL_COUNT=$((SNELL_COUNT + 1)) ;;
+            10) ENABLE_MASQUE="y"; MASQUE_COUNT=$((MASQUE_COUNT + 1)) ;;
+            11) ENABLE_SUDOKU="y"; SUDOKU_COUNT=$((SUDOKU_COUNT + 1)) ;;
             *) _warn "忽略无效选项: $ch" ;;
         esac
     done
-    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VLESS_PURE_GRPC_COUNT" -eq 0 && "$VLESS_ENC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 && "$SNELL_COUNT" -eq 0 ]]; then
+    if [[ "$SS_COUNT" -eq 0 && "$ANYTLS_COUNT" -eq 0 && "$VLESS_COUNT" -eq 0 && "$HY2_COUNT" -eq 0 && "$TUIC_COUNT" -eq 0 && "$SOCKS_COUNT" -eq 0 && "$VLESS_WS_COUNT" -eq 0 && "$VLESS_GRPC_COUNT" -eq 0 && "$VLESS_PURE_GRPC_COUNT" -eq 0 && "$VLESS_ENC_COUNT" -eq 0 && "$VMESS_COUNT" -eq 0 && "$VMESS_WS_COUNT" -eq 0 && "$VMESS_GRPC_COUNT" -eq 0 && "$TROJAN_COUNT" -eq 0 && "$TROJAN_WS_COUNT" -eq 0 && "$TROJAN_GRPC_COUNT" -eq 0 && "$SNELL_COUNT" -eq 0 && "$MASQUE_COUNT" -eq 0 && "$SUDOKU_COUNT" -eq 0 ]]; then
         _error_no_exit "未选择任何协议"
         _press_any_key
         return
@@ -8585,6 +8741,8 @@ _mihomoconf_setup() {
     _status_kv "Tuic 数量" "${TUIC_COUNT}" "cyan" 10
     _status_kv "Socks5 数量" "${SOCKS_COUNT}" "cyan" 10
     _status_kv "Snell 数量" "${SNELL_COUNT}" "cyan" 10
+    _status_kv "MASQUE 数量" "${MASQUE_COUNT}" "cyan" 10
+    _status_kv "Sudoku 数量" "${SUDOKU_COUNT}" "cyan" 10
 
     # ---- 追加模式: 检查已有同协议节点 ----
     if [[ "$WRITE_MODE" == "append" ]]; then
@@ -8667,6 +8825,26 @@ _mihomoconf_setup() {
             local snell_action
             read -rp "  选择 [1/2]（默认 2）: " snell_action
             [[ "${snell_action:-2}" == "1" ]] && SNELL_REPLACE="y"
+        fi
+        if [[ "$ENABLE_MASQUE" == "y" ]] && _mihomoconf_has_listener_type "masque"; then
+            _warn "配置中已存在 MASQUE 节点:"
+            _mihomoconf_list_listeners "masque"
+            _separator
+            _menu_pair "1" "覆盖已有 MASQUE 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local masque_action
+            read -rp "  选择 [1/2]（默认 2）: " masque_action
+            [[ "${masque_action:-2}" == "1" ]] && MASQUE_REPLACE="y"
+        fi
+        if [[ "$ENABLE_SUDOKU" == "y" ]] && _mihomoconf_has_listener_type "sudoku"; then
+            _warn "配置中已存在 Sudoku 节点:"
+            _mihomoconf_list_listeners "sudoku"
+            _separator
+            _menu_pair "1" "覆盖已有 Sudoku 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
+            _separator
+            local sudoku_action
+            read -rp "  选择 [1/2]（默认 2）: " sudoku_action
+            [[ "${sudoku_action:-2}" == "1" ]] && SUDOKU_REPLACE="y"
         fi
         if [[ "$ENABLE_VMESS" == "y" ]] && _mihomoconf_has_listener_type "vmess"; then
             _warn "配置中已存在 VMess TCP 节点:"
@@ -8780,6 +8958,8 @@ _mihomoconf_setup() {
                 tuic) [[ "$TUIC_REPLACE" == "y" ]] && continue ;;
                 socks) [[ "$SOCKS_REPLACE" == "y" ]] && continue ;;
                 snell) [[ "$SNELL_REPLACE" == "y" ]] && continue ;;
+                masque) [[ "$MASQUE_REPLACE" == "y" ]] && continue ;;
+                sudoku) [[ "$SUDOKU_REPLACE" == "y" ]] && continue ;;
             esac
             _mihomoconf_port_in_list "$_e_port" "${RESERVED_PORTS[@]}" || RESERVED_PORTS+=("$_e_port")
         done < <(_mihomoconf_read_listener_rows "$CONFIG_FILE")
@@ -9874,6 +10054,178 @@ _mihomoconf_setup() {
         _info "Snell 已生成 ${#SNELL_PORTS[@]} 个入站节点"
     fi
 
+    # ---- MASQUE 配置 ----
+    if [[ "$ENABLE_MASQUE" == "y" ]]; then
+        printf "  ${BOLD}MASQUE 配置${PLAIN}\n"
+        _separator
+        local _masque_idx masque_port_input
+        for ((_masque_idx=1; _masque_idx<=MASQUE_COUNT; _masque_idx++)); do
+            while true; do
+                read -rp "    MASQUE #${_masque_idx} 监听端口 [默认 443]: " masque_port_input
+                masque_port_input=$(_mihomoconf_trim "${masque_port_input:-443}")
+                if _is_valid_port "$masque_port_input"; then
+                    if _mihomoconf_port_in_list "$masque_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${masque_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$masque_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${masque_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    MASQUE_PORTS+=("$masque_port_input")
+                    NEW_PORTS+=("$masque_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local i _keypair _masque_priv _masque_pub
+        local _ip_input _ipv6_input _mtu_input _udp_input _network_choice
+        for i in "${!MASQUE_PORTS[@]}"; do
+            MASQUE_TAGS+=("$(_mihomoconf_gen_listener_tag "masque_relay")")
+            if ! _keypair=$(_mihomoconf_gen_masque_keypair); then
+                _error_no_exit "生成 MASQUE 密钥对失败，请确保已安装 openssl"
+                _press_any_key
+                return 1
+            fi
+            IFS=$'\t' read -r _masque_priv _masque_pub <<< "$_keypair"
+            MASQUE_PRIVATE_KEYS+=("$_masque_priv")
+            MASQUE_PUBLIC_KEYS+=("$_masque_pub")
+
+            local rand_octet=$(( RANDOM % 254 + 1 ))
+            local default_ip="172.16.${rand_octet}.2/32"
+            read -rp "    MASQUE #$((i + 1)) tunnel IPv4 地址 [默认 ${default_ip}]: " _ip_input
+            _ip_input=$(_mihomoconf_trim "${_ip_input:-$default_ip}")
+            MASQUE_IP_CIDRS+=("$_ip_input")
+
+            local rand_hex=$(printf '%x' $(( RANDOM % 65535 + 1 )))
+            local default_ipv6="fd00::${rand_hex}/128"
+            read -rp "    MASQUE #$((i + 1)) tunnel IPv6 地址 [默认 ${default_ipv6}]: " _ipv6_input
+            _ipv6_input=$(_mihomoconf_trim "${_ipv6_input:-$default_ipv6}")
+            MASQUE_IPV6_CIDRS+=("$_ipv6_input")
+
+            read -rp "    MASQUE #$((i + 1)) MTU 大小 [默认 1280]: " _mtu_input
+            _mtu_input=$(_mihomoconf_trim "${_mtu_input:-1280}")
+            MASQUE_MTUS+=("$_mtu_input")
+
+            read -rp "    MASQUE #$((i + 1)) 是否启用 UDP 隧道? [Y/n]: " _udp_input
+            _udp_input=$(_mihomoconf_trim "${_udp_input:-Y}")
+            if [[ "$_udp_input" =~ ^[Nn]$ ]]; then
+                MASQUE_UDPS+=("false")
+            else
+                MASQUE_UDPS+=("true")
+            fi
+
+            printf "    MASQUE #$((i + 1)) 传输层网络 (network):\n"
+            printf "      ${GREEN}1${PLAIN}) quic (HTTP/3 over QUIC，默认)\n"
+            printf "      ${GREEN}2${PLAIN}) h2 (HTTP/2 over TCP/TLS)\n"
+            read -rp "      选择 [1-2]（默认 1）: " _network_choice
+            _network_choice=$(_mihomoconf_trim "${_network_choice:-1}")
+            if [[ "$_network_choice" == "2" ]]; then
+                MASQUE_NETWORKS+=("h2")
+            else
+                MASQUE_NETWORKS+=("quic")
+            fi
+        done
+        _info "MASQUE 已生成 ${#MASQUE_PORTS[@]} 个入站节点"
+    fi
+
+    # ---- Sudoku 配置 ----
+    if [[ "$ENABLE_SUDOKU" == "y" ]]; then
+        printf "  ${BOLD}Sudoku 配置${PLAIN}\n"
+        _separator
+        local _sudoku_idx sudoku_port_input
+        for ((_sudoku_idx=1; _sudoku_idx<=SUDOKU_COUNT; _sudoku_idx++)); do
+            while true; do
+                read -rp "    Sudoku #${_sudoku_idx} 监听端口 [默认 8443]: " sudoku_port_input
+                sudoku_port_input=$(_mihomoconf_trim "${sudoku_port_input:-8443}")
+                if _is_valid_port "$sudoku_port_input"; then
+                    if _mihomoconf_port_in_list "$sudoku_port_input" "${NEW_PORTS[@]}"; then
+                        _warn "端口 ${sudoku_port_input} 与本次新增节点冲突，请更换端口"
+                        continue
+                    fi
+                    if _mihomoconf_port_in_list "$sudoku_port_input" "${RESERVED_PORTS[@]}"; then
+                        _warn "端口 ${sudoku_port_input} 已被现有 listeners 占用，请更换端口"
+                        continue
+                    fi
+                    SUDOKU_PORTS+=("$sudoku_port_input")
+                    NEW_PORTS+=("$sudoku_port_input")
+                    break
+                fi
+                _warn "端口无效，请输入 1-65535 的数字"
+            done
+        done
+
+        local i _sudoku_key_input _aead_choice _pad_min_input _pad_max_input _table_choice _mask_disable_input _mask_mode_choice
+        for i in "${!SUDOKU_PORTS[@]}"; do
+            SUDOKU_TAGS+=("$(_mihomoconf_gen_listener_tag "sudoku_relay")")
+            read -rp "    Sudoku #$((i + 1)) Key/密匙 [留空自动生成 UUID]: " _sudoku_key_input
+            _sudoku_key_input=$(_mihomoconf_trim "${_sudoku_key_input:-}")
+            if [[ -z "$_sudoku_key_input" ]]; then
+                _sudoku_key_input=$(_mihomoconf_gen_uuid)
+                _info "已自动生成 Key: ${_sudoku_key_input}"
+            fi
+            SUDOKU_KEYS+=("$_sudoku_key_input")
+
+            printf "    选择加密方法 (aead-method):\n"
+            printf "      ${GREEN}1${PLAIN}) chacha20-poly1305 (默认)\n"
+            printf "      ${GREEN}2${PLAIN}) aes-128-gcm\n"
+            printf "      ${GREEN}3${PLAIN}) none\n"
+            read -rp "      选择 [1-3]（默认 1）: " _aead_choice
+            _aead_choice=$(_mihomoconf_trim "${_aead_choice:-1}")
+            case "$_aead_choice" in
+                2) SUDOKU_AEADS+=("aes-128-gcm") ;;
+                3) SUDOKU_AEADS+=("none") ;;
+                *) SUDOKU_AEADS+=("chacha20-poly1305") ;;
+            esac
+
+            read -rp "    Sudoku #$((i + 1)) 最小混淆填充 padding-min [默认 1]: " _pad_min_input
+            _pad_min_input=$(_mihomoconf_trim "${_pad_min_input:-1}")
+            SUDOKU_PADDING_MINS+=("$_pad_min_input")
+
+            read -rp "    Sudoku #$((i + 1)) 最大混淆填充 padding-max [默认 15]: " _pad_max_input
+            _pad_max_input=$(_mihomoconf_trim "${_pad_max_input:-15}")
+            SUDOKU_PADDING_MAXS+=("$_pad_max_input")
+
+            printf "    选择混淆表类型 (table-type):\n"
+            printf "      ${GREEN}1${PLAIN}) prefer_ascii (伪装为文本，默认)\n"
+            printf "      ${GREEN}2${PLAIN}) prefer_entropy (高熵随机)\n"
+            read -rp "      选择 [1-2]（默认 1）: " _table_choice
+            _table_choice=$(_mihomoconf_trim "${_table_choice:-1}")
+            if [[ "$_table_choice" == "2" ]]; then
+                SUDOKU_TABLES+=("prefer_entropy")
+            else
+                SUDOKU_TABLES+=("prefer_ascii")
+            fi
+
+            read -rp "    是否禁用 HTTP 伪装 httpmask.disable? [y/N]: " _mask_disable_input
+            _mask_disable_input=$(_mihomoconf_trim "${_mask_disable_input:-N}")
+            if [[ "$_mask_disable_input" =~ ^[Yy]$ ]]; then
+                SUDOKU_HTTPMASK_DISABLES+=("true")
+                SUDOKU_HTTPMASK_MODES+=("none")
+            else
+                SUDOKU_HTTPMASK_DISABLES+=("false")
+                printf "    选择 HTTP 伪装模式 (httpmask.mode):\n"
+                printf "      ${GREEN}1${PLAIN}) auto (自动，默认)\n"
+                printf "      ${GREEN}2${PLAIN}) legacy\n"
+                printf "      ${GREEN}3${PLAIN}) stream\n"
+                printf "      ${GREEN}4${PLAIN}) poll\n"
+                printf "      ${GREEN}5${PLAIN}) ws\n"
+                read -rp "      选择 [1-5]（默认 1）: " _mask_mode_choice
+                _mask_mode_choice=$(_mihomoconf_trim "${_mask_mode_choice:-1}")
+                case "$_mask_mode_choice" in
+                    2) SUDOKU_HTTPMASK_MODES+=("legacy") ;;
+                    3) SUDOKU_HTTPMASK_MODES+=("stream") ;;
+                    4) SUDOKU_HTTPMASK_MODES+=("poll") ;;
+                    5) SUDOKU_HTTPMASK_MODES+=("ws") ;;
+                    *) SUDOKU_HTTPMASK_MODES+=("auto") ;;
+                esac
+            fi
+        done
+        _info "Sudoku 已生成 ${#SUDOKU_PORTS[@]} 个入站节点"
+    fi
+
     # ---- TLS 证书检查 (AnyTLS / HY2 / Tuic / TLS-enabled VMess/VLESS/Trojan 共用) ----
     local _any_tls_enabled="n"
     if [[ "$ENABLE_ANYTLS" == "y" || "$ENABLE_HY2" == "y" || "$ENABLE_TUIC" == "y" ]]; then
@@ -9941,6 +10293,8 @@ _mihomoconf_setup() {
         local _vless_ws_port _vless_ws_tag _vless_ws_path _vless_ws_tls _vless_ws_host
         local _row _li _u_name _u_pass _u_uuid
         local _snell_port _snell_tag _snell_psk _snell_ver _snell_reuse _snell_obfs_mode _snell_obfs_host
+        local _masque_port _masque_tag _masque_priv _masque_pub _masque_ip _masque_ipv6 _masque_mtu _masque_udp _masque_net
+        local _sudoku_port _sudoku_tag _sudoku_key _sudoku_aead _sudoku_pad_min _sudoku_pad_max _sudoku_table _sudoku_mask_dis _sudoku_mask_mode
         if [[ "$ENABLE_SS" == "y" ]]; then
             for i in "${!SS_PORTS[@]}"; do
                 _ss_port="${SS_PORTS[$i]}"
@@ -10561,6 +10915,63 @@ MIHOMOCONF_SNELL_EOF
       mode: ${_snell_obfs_mode}
       host: "${_snell_obfs_host}"
 MIHOMOCONF_SNELL_OBFS_EOF
+                fi
+            done
+        fi
+        if [[ "$ENABLE_MASQUE" == "y" ]]; then
+            for i in "${!MASQUE_PORTS[@]}"; do
+                _masque_port="${MASQUE_PORTS[$i]}"
+                _masque_tag="${MASQUE_TAGS[$i]}"
+                _masque_priv="${MASQUE_PRIVATE_KEYS[$i]}"
+                _masque_pub="${MASQUE_PUBLIC_KEYS[$i]}"
+                _masque_ip="${MASQUE_IP_CIDRS[$i]}"
+                _masque_ipv6="${MASQUE_IPV6_CIDRS[$i]}"
+                _masque_mtu="${MASQUE_MTUS[$i]}"
+                _masque_udp="${MASQUE_UDPS[$i]}"
+                _masque_net="${MASQUE_NETWORKS[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_MASQUE_EOF
+  - name: masque-in-${_masque_port}
+    tag: "${_masque_tag}"
+    type: masque
+    port: ${_masque_port}
+    listen: "::"
+    private-key: "${_masque_priv}"
+    public-key: "${_masque_pub}"
+    ip: "${_masque_ip}"
+    ipv6: "${_masque_ipv6}"
+    mtu: ${_masque_mtu}
+    udp: ${_masque_udp}
+    network: ${_masque_net}
+MIHOMOCONF_MASQUE_EOF
+            done
+        fi
+        if [[ "$ENABLE_SUDOKU" == "y" ]]; then
+            for i in "${!SUDOKU_PORTS[@]}"; do
+                _sudoku_port="${SUDOKU_PORTS[$i]}"
+                _sudoku_tag="${SUDOKU_TAGS[$i]}"
+                _sudoku_key="${SUDOKU_KEYS[$i]}"
+                _sudoku_aead="${SUDOKU_AEADS[$i]}"
+                _sudoku_pad_min="${SUDOKU_PADDING_MINS[$i]}"
+                _sudoku_pad_max="${SUDOKU_PADDING_MAXS[$i]}"
+                _sudoku_table="${SUDOKU_TABLES[$i]}"
+                _sudoku_mask_dis="${SUDOKU_HTTPMASK_DISABLES[$i]}"
+                _sudoku_mask_mode="${SUDOKU_HTTPMASK_MODES[$i]}"
+                cat >> "$_target_file" <<MIHOMOCONF_SUDOKU_EOF
+  - name: sudoku-in-${_sudoku_port}
+    tag: "${_sudoku_tag}"
+    type: sudoku
+    port: ${_sudoku_port}
+    listen: "::"
+    key: "${_sudoku_key}"
+    aead-method: ${_sudoku_aead}
+    padding-min: ${_sudoku_pad_min}
+    padding-max: ${_sudoku_pad_max}
+    table-type: ${_sudoku_table}
+    httpmask:
+      disable: ${_sudoku_mask_dis}
+MIHOMOCONF_SUDOKU_EOF
+                if [[ "$_sudoku_mask_dis" == "false" ]]; then
+                    printf "      mode: %s\n" "$_sudoku_mask_mode" >> "$_target_file"
                 fi
             done
         fi
@@ -11563,6 +11974,100 @@ MIHOMOCONF_SNELL_YAML_OBFS
             
             printf "\n  ${CYAN}分享链接:${PLAIN}\n"
             printf "  %s\n" "$SNELL_LINK"
+        done
+    fi
+
+    # MASQUE 输出
+    if [[ "$ENABLE_MASQUE" == "y" ]]; then
+        printf "  ${BOLD}MASQUE 连接信息 (%s 个)${PLAIN}\n" "${#MASQUE_PORTS[@]}"
+        local i _masque_port _masque_tag _masque_name _masque_client_name _masque_priv _masque_pub _masque_ip _masque_ipv6 _masque_mtu _masque_udp _masque_net
+        for i in "${!MASQUE_PORTS[@]}"; do
+            _masque_port="${MASQUE_PORTS[$i]}"
+            _masque_tag="${MASQUE_TAGS[$i]}"
+            _masque_priv="${MASQUE_PRIVATE_KEYS[$i]}"
+            _masque_pub="${MASQUE_PUBLIC_KEYS[$i]}"
+            _masque_ip="${MASQUE_IP_CIDRS[$i]}"
+            _masque_ipv6="${MASQUE_IPV6_CIDRS[$i]}"
+            _masque_mtu="${MASQUE_MTUS[$i]}"
+            _masque_udp="${MASQUE_UDPS[$i]}"
+            _masque_net="${MASQUE_NETWORKS[$i]}"
+
+            _masque_name=$(_mihomoconf_make_node_name "MASQUE" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _masque_client_name="${_masque_name}-${_masque_net}"
+
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_masque_client_name"
+            printf "      入站tag : ${GREEN}%s${PLAIN}\n" "$_masque_tag"
+            printf "      服务器  : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口    : ${GREEN}%s${PLAIN}\n" "$_masque_port"
+            printf "      传输网络: ${GREEN}%s${PLAIN}\n" "$_masque_net"
+            printf "      私钥    : ${GREEN}%s${PLAIN}\n" "$_masque_priv"
+            printf "      公钥    : ${GREEN}%s${PLAIN}\n" "$_masque_pub"
+            printf "      IPv4/v6 : ${GREEN}%s / %s${PLAIN}\n" "$_masque_ip" "$_masque_ipv6"
+            printf "      MTU/UDP : ${GREEN}%s / %s${PLAIN}\n" "$_masque_mtu" "$_masque_udp"
+
+            printf "  ${CYAN}Clash Meta / Mihomo 客户端 YAML (作为 Outbound Proxy):${PLAIN}\n"
+            cat <<MIHOMOCONF_MASQUE_YAML
+      - name: "${_masque_client_name}"
+        type: masque
+        server: ${SERVER_HOST}
+        port: ${_masque_port}
+        public-key: "${_masque_pub}"
+        ip: "${_masque_ip}"
+        ipv6: "${_masque_ipv6}"
+        mtu: ${_masque_mtu}
+        udp: ${_masque_udp}
+        network: ${_masque_net}
+MIHOMOCONF_MASQUE_YAML
+        done
+    fi
+
+    # Sudoku 输出
+    if [[ "$ENABLE_SUDOKU" == "y" ]]; then
+        printf "  ${BOLD}Sudoku 连接信息 (%s 个)${PLAIN}\n" "${#SUDOKU_PORTS[@]}"
+        local i _sudoku_port _sudoku_tag _sudoku_name _sudoku_client_name _sudoku_key _sudoku_aead _sudoku_pad_min _sudoku_pad_max _sudoku_table _sudoku_mask_dis _sudoku_mask_mode
+        for i in "${!SUDOKU_PORTS[@]}"; do
+            _sudoku_port="${SUDOKU_PORTS[$i]}"
+            _sudoku_tag="${SUDOKU_TAGS[$i]}"
+            _sudoku_key="${SUDOKU_KEYS[$i]}"
+            _sudoku_aead="${SUDOKU_AEADS[$i]}"
+            _sudoku_pad_min="${SUDOKU_PADDING_MINS[$i]}"
+            _sudoku_pad_max="${SUDOKU_PADDING_MAXS[$i]}"
+            _sudoku_table="${SUDOKU_TABLES[$i]}"
+            _sudoku_mask_dis="${SUDOKU_HTTPMASK_DISABLES[$i]}"
+            _sudoku_mask_mode="${SUDOKU_HTTPMASK_MODES[$i]}"
+
+            _sudoku_name=$(_mihomoconf_make_node_name "Sudoku" "$NODE_FLAG" "$NODE_COUNTRY_CODE")
+            _sudoku_client_name="${_sudoku_name}"
+
+            _separator
+            printf "    [%s] 节点名: ${GREEN}%s${PLAIN}\n" "$((i + 1))" "$_sudoku_client_name"
+            printf "      入站tag : ${GREEN}%s${PLAIN}\n" "$_sudoku_tag"
+            printf "      服务器  : ${GREEN}%s${PLAIN}\n" "$SERVER_HOST"
+            printf "      端口    : ${GREEN}%s${PLAIN}\n" "$_sudoku_port"
+            printf "      密匙    : ${GREEN}%s${PLAIN}\n" "$_sudoku_key"
+            printf "      AEAD加密: ${GREEN}%s${PLAIN}\n" "$_sudoku_aead"
+            printf "      混淆填充: ${GREEN}%s - %s${PLAIN}\n" "$_sudoku_pad_min" "$_sudoku_pad_max"
+            printf "      混淆表型: ${GREEN}%s${PLAIN}\n" "$_sudoku_table"
+            printf "      HTTP伪装: ${GREEN}禁用:%s / 模式:%s${PLAIN}\n" "$_sudoku_mask_dis" "$_sudoku_mask_mode"
+
+            printf "  ${CYAN}Clash Meta / Mihomo 客户端 YAML:${PLAIN}\n"
+            cat <<MIHOMOCONF_SUDOKU_YAML
+      - name: "${_sudoku_client_name}"
+        type: sudoku
+        server: ${SERVER_HOST}
+        port: ${_sudoku_port}
+        key: "${_sudoku_key}"
+        aead-method: ${_sudoku_aead}
+        padding-min: ${_sudoku_pad_min}
+        padding-max: ${_sudoku_pad_max}
+        table-type: ${_sudoku_table}
+        httpmask:
+          disable: ${_sudoku_mask_dis}
+MIHOMOCONF_SUDOKU_YAML
+            if [[ "$_sudoku_mask_dis" == "false" ]]; then
+                printf "          mode: %s\n" "$_sudoku_mask_mode"
+            fi
         done
     fi
 
@@ -13150,6 +13655,104 @@ MIHOMO_SNELL_YAML_OBFS
                     printf "\n    分享链接: ${GREEN}%s${PLAIN}\n" "$snell_link"
                 fi
                 ;;
+            masque)
+                if [[ -z "$port" || -z "$password" || -z "$vless_public_key" ]]; then
+                    _warn "跳过 ${name}: MASQUE 字段不完整(port/private-key/public-key)"
+                    continue
+                fi
+                export_count=$((export_count + 1))
+                listener_export=$((listener_export + 1))
+
+                local _masque_priv="$password"
+                local _masque_pub="$vless_public_key"
+                local _masque_ip="${vless_ws_path:-172.16.0.2/32}"
+                local _masque_ipv6="${vless_ws_host:-fd00::2/128}"
+                local _masque_mtu="${vless_grpc_service_name:-1280}"
+                local _masque_udp="${vless_ws_tls:-true}"
+                local _masque_net="${vless_type:-quic}"
+
+                local masque_name
+                masque_name="$(_mihomoconf_make_node_name "MASQUE" "$NODE_FLAG" "$NODE_COUNTRY_CODE")-${_masque_net}"
+
+                if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                    printf "MASQUE 节点: %s | Server: %s:%s | Network: %s | PublicKey: %s\n" "$masque_name" "$server_ip" "$port" "$_masque_net" "$_masque_pub"
+                else
+                    _separator
+                    printf "  ${BOLD}[MASQUE] %s${PLAIN}\n" "$masque_name"
+                    printf "    入站tag : ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                    printf "    端口     : ${GREEN}%s${PLAIN}\n" "$port"
+                    printf "    私钥     : ${GREEN}%s${PLAIN}\n" "$_masque_priv"
+                    printf "    公钥     : ${GREEN}%s${PLAIN}\n" "$_masque_pub"
+                    printf "    IPv4/v6  : ${GREEN}%s / %s${PLAIN}\n" "$_masque_ip" "$_masque_ipv6"
+                    printf "    MTU/UDP  : ${GREEN}%s / %s${PLAIN}\n" "$_masque_mtu" "$_masque_udp"
+                    printf "    传输网络 : ${GREEN}%s${PLAIN}\n" "$_masque_net"
+
+                    printf "    YAML:\n"
+                    cat <<MIHOMO_MASQUE_YAML
+      - name: "${masque_name}"
+        type: masque
+        server: ${server_ip}
+        port: ${port}
+        public-key: "${_masque_pub}"
+        ip: "${_masque_ip}"
+        ipv6: "${_masque_ipv6}"
+        mtu: ${_masque_mtu}
+        udp: ${_masque_udp}
+        network: ${_masque_net}
+MIHOMO_MASQUE_YAML
+                fi
+                ;;
+            sudoku)
+                if [[ -z "$port" || -z "$password" ]]; then
+                    _warn "跳过 ${name}: Sudoku 字段不完整(port/key)"
+                    continue
+                fi
+                export_count=$((export_count + 1))
+                listener_export=$((listener_export + 1))
+
+                local _sudoku_key="$password"
+                local _sudoku_aead="${cipher:-chacha20-poly1305}"
+                local _sudoku_pad_min="${vless_ws_path:-1}"
+                local _sudoku_pad_max="${vless_ws_host:-15}"
+                local _sudoku_table="${vless_grpc_service_name:-prefer_ascii}"
+                local _sudoku_mask_dis="${vless_ws_tls:-false}"
+                local _sudoku_mask_mode="${vless_type:-auto}"
+
+                local sudoku_name
+                sudoku_name="$(_mihomoconf_make_node_name "Sudoku" "$NODE_FLAG" "$NODE_COUNTRY_CODE")"
+
+                if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                    printf "Sudoku 节点: %s | Server: %s:%s | Key: %s\n" "$sudoku_name" "$server_ip" "$port" "$_sudoku_key"
+                else
+                    _separator
+                    printf "  ${BOLD}[Sudoku] %s${PLAIN}\n" "$sudoku_name"
+                    printf "    入站tag : ${GREEN}%s${PLAIN}\n" "$listener_tag"
+                    printf "    端口     : ${GREEN}%s${PLAIN}\n" "$port"
+                    printf "    密匙     : ${GREEN}%s${PLAIN}\n" "$_sudoku_key"
+                    printf "    AEAD加密 : ${GREEN}%s${PLAIN}\n" "$_sudoku_aead"
+                    printf "    混淆填充 : ${GREEN}%s - %s${PLAIN}\n" "$_sudoku_pad_min" "$_sudoku_pad_max"
+                    printf "    混淆表型 : ${GREEN}%s${PLAIN}\n" "$_sudoku_table"
+                    printf "    HTTP伪装 : ${GREEN}禁用:%s / 模式:%s${PLAIN}\n" "$_sudoku_mask_dis" "$_sudoku_mask_mode"
+
+                    printf "    YAML:\n"
+                    cat <<MIHOMO_SUDOKU_YAML
+      - name: "${sudoku_name}"
+        type: sudoku
+        server: ${server_ip}
+        port: ${port}
+        key: "${_sudoku_key}"
+        aead-method: ${_sudoku_aead}
+        padding-min: ${_sudoku_pad_min}
+        padding-max: ${_sudoku_pad_max}
+        table-type: ${_sudoku_table}
+        httpmask:
+          disable: ${_sudoku_mask_dis}
+MIHOMO_SUDOKU_YAML
+                    if [[ "$_sudoku_mask_dis" == "false" ]]; then
+                        printf "          mode: %s\n" "$_sudoku_mask_mode"
+                    fi
+                fi
+                ;;
             *)
                 _warn "跳过 ${name}: 暂不支持类型 ${type}"
                 ;;
@@ -13371,6 +13974,52 @@ MIHOMO_VLESS_PROXY_YAML
                         fi
                     fi
                     ;;
+                ssh)
+                    if [[ -z "$p_server" || -z "$p_port" || -z "$p_user" ]]; then
+                        _warn "跳过 ${p_name}: ssh 出站字段不完整(server/port/username)"
+                        continue
+                    fi
+                    local ssh_proxy_link
+                    if [[ -n "$p_pass" ]]; then
+                        ssh_proxy_link="ssh://$(_mihomoconf_urlencode "$p_user"):$(_mihomoconf_urlencode "$p_pass")@$p_server:$p_port"
+                    else
+                        ssh_proxy_link="ssh://$(_mihomoconf_urlencode "$p_user")@$p_server:$p_port"
+                    fi
+                    proxy_export=$((proxy_export + 1))
+                    export_count=$((export_count + 1))
+                    if [[ "$OUTPUT_LINK_ONLY" == "1" ]]; then
+                        printf "%s\n" "$ssh_proxy_link"
+                    else
+                        _separator
+                        printf "  ${BOLD}[SSH 出站] %s${PLAIN}\n" "$p_name"
+                        printf "    地址: ${GREEN}%s:%s${PLAIN}\n" "$p_server" "$p_port"
+                        printf "    用户: ${GREEN}%s${PLAIN}\n" "$p_user"
+                        printf "    链接: ${GREEN}%s${PLAIN}\n" "$ssh_proxy_link"
+                        printf "    YAML:\n"
+                        cat <<MIHOMO_SSH_PROXY_YAML
+    proxies:
+      - name: "${p_name}"
+        type: ssh
+        server: "${p_server}"
+        port: ${p_port}
+        username: "${p_user}"
+MIHOMO_SSH_PROXY_YAML
+                        if [[ -n "$p_pass" ]]; then
+                            printf '        password: "%s"\n' "$p_pass"
+                        fi
+                        if [[ -n "$p_wg_private_key" ]]; then
+                            if [[ "$p_wg_private_key" == *$'\n'* ]]; then
+                                echo "        private-key: |"
+                                printf '%s\n' "$p_wg_private_key" | sed 's/^/          /'
+                            else
+                                printf '        private-key: "%s"\n' "$p_wg_private_key"
+                            fi
+                        fi
+                        if [[ -n "$p_wg_public_key" ]]; then
+                            printf '        private-key-passphrase: "%s"\n' "$p_wg_public_key"
+                        fi
+                    fi
+                    ;;
             esac
         done < <(_mihomochain_read_proxy_rows "$config_file")
     fi
@@ -13380,11 +14029,11 @@ MIHOMO_VLESS_PROXY_YAML
         if [[ "$total_count" -eq 0 ]]; then
             _warn "未在配置中检测到可读节点 (listeners/proxies)"
         elif [[ "$export_count" -eq 0 ]]; then
-            _warn "共读取 ${total_count} 个节点，但没有可导出的 Shadowsocks/AnyTLS/VLESS/HY2/SS出站/WireGuard(Beta) 节点"
+            _warn "共读取 ${total_count} 个节点，但没有可导出的 Shadowsocks/AnyTLS/VLESS/HY2/SS出站/WireGuard(Beta)/SSH 节点"
         else
             _info "listeners: 读取 ${listener_total}，导出 ${listener_export}"
             if [[ "$EXPORT_PROXIES" == "1" ]]; then
-                _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta / VLESS)"
+                _info "proxies: 读取 ${proxy_total}，导出 ${proxy_export} (SS / WireGuard Beta / VLESS / SSH)"
             fi
             _info "总计: 读取 ${total_count}，导出 ${export_count}"
         fi
@@ -13694,6 +14343,12 @@ _mihomochain_read_proxy_rows() {
         /^    public-key:/ {
             line=$0
             sub(/^    public-key:[[:space:]]*/, "", line)
+            wg_public_key=unquote(trim(line))
+            next
+        }
+        /^    private-key-passphrase:/ {
+            line=$0
+            sub(/^    private-key-passphrase:[[:space:]]*/, "", line)
             wg_public_key=unquote(trim(line))
             next
         }
@@ -14662,6 +15317,29 @@ EOF
             fi
             if [[ -n "$q_obfs" ]]; then
                 printf '    obfs: "%s"\n' "$q_obfs" >> "$tmp_block"
+            fi
+            ;;
+        ssh)
+            cat > "$tmp_block" <<EOF
+  - name: "${q_name}"
+    type: ssh
+    server: "${q_server}"
+    port: ${port}
+    username: "${q_user}"
+EOF
+            if [[ -n "$q_pass" ]]; then
+                printf '    password: "%s"\n' "$q_pass" >> "$tmp_block"
+            fi
+            if [[ -n "$wg_private_key" ]]; then
+                if [[ "$wg_private_key" == *$'\n'* ]]; then
+                    echo "    private-key: |" >> "$tmp_block"
+                    printf '%s\n' "$wg_private_key" | sed 's/^/      /' >> "$tmp_block"
+                else
+                    printf '    private-key: "%s"\n' "$q_wg_private_key" >> "$tmp_block"
+                fi
+            fi
+            if [[ -n "$q_wg_public_key" ]]; then
+                printf '    private-key-passphrase: "%s"\n' "$q_wg_public_key" >> "$tmp_block"
             fi
             ;;
         *)
@@ -16517,7 +17195,7 @@ _mihomo_chain_proxy_manage() {
             2)
                 printf "  ${BOLD}添加出口节点${PLAIN}\n"
                 _separator
-                _menu_pair "1" "通过链接导入" "ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks/http/anytls" "green" "2" "手动录入" "各协议详细参数配置" "green"
+                _menu_pair "1" "通过链接导入" "ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks/http/anytls/ssh" "green" "2" "手动录入" "各协议详细参数配置" "green"
                 _separator
                 local import_mode out_name out_tag out_type out_server out_port out_cipher out_user out_pass
                 local out_sni out_insecure out_obfs out_obfs_pass out_mport
@@ -16580,7 +17258,7 @@ _mihomo_chain_proxy_manage() {
                         local ss_decoded kv k v
                         local -a _qarr
 
-                        read -rp "  输入节点链接/配置 (支持 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls): " in_link
+                        read -rp "  输入节点链接/配置 (支持 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls/ssh): " in_link
                         in_link=$(_mihomoconf_trim "${in_link:-}")
                         if [[ -z "$in_link" ]]; then
                             _error_no_exit "链接不能为空"
@@ -17198,6 +17876,55 @@ _mihomo_chain_proxy_manage() {
                                     done
                                 fi
                                 ;;
+                            ssh://*)
+                                link_body="${in_link#ssh://}"
+                                link_body="${link_body%%#*}"
+                                link_query=""
+                                if [[ "$link_body" == *\?* ]]; then
+                                    link_query="${link_body#*\?}"
+                                    link_body="${link_body%%\?*}"
+                                fi
+                                link_body="${link_body%%/}"
+                                out_user=""
+                                out_pass=""
+                                if [[ "$link_body" == *@* ]]; then
+                                    link_userinfo="${link_body%@*}"
+                                    link_hostport="${link_body#*@}"
+                                    if [[ "$link_userinfo" == *:* ]]; then
+                                        out_user=$(_mihomochain_urldecode "${link_userinfo%%:*}")
+                                        out_pass=$(_mihomochain_urldecode "${link_userinfo#*:}")
+                                    else
+                                        out_user=$(_mihomochain_urldecode "$link_userinfo")
+                                    fi
+                                else
+                                    link_hostport="$link_body"
+                                fi
+                                link_hostport="${link_hostport%%/*}"
+                                out_server="${link_hostport%:*}"
+                                out_port="${link_hostport##*:}"
+                                if [[ -z "$out_server" ]]; then
+                                    _error_no_exit "ssh 链接解析失败，缺少 server"
+                                    _press_any_key
+                                    continue
+                               fi
+                                if ! _is_valid_port "$out_port"; then
+                                    out_port="22"
+                                fi
+                                out_type="ssh"
+                                if [[ -n "$link_query" ]]; then
+                                    IFS='&' read -r -a _qarr <<< "$link_query"
+                                    for kv in "${_qarr[@]}"; do
+                                        k="${kv%%=*}"
+                                        [[ "$kv" == *=* ]] && v="${kv#*=}" || v=""
+                                        k=$(_mihomochain_urldecode "$k")
+                                        v=$(_mihomochain_urldecode "$v")
+                                        case "$k" in
+                                            private-key|private_key) out_wg_private_key="$v" ;;
+                                            private-key-passphrase|private_key_passphrase|passphrase) out_wg_public_key="$v" ;;
+                                        esac
+                                    done
+                                fi
+                                ;;
                             http://*|https://*)
                                 if [[ "$in_link" == http://* ]]; then
                                     link_body="${in_link#http://}"
@@ -17254,7 +17981,7 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                             *)
-                                _error_no_exit "暂不支持该链接类型，请使用 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls 协议链接"
+                                _error_no_exit "暂不支持该链接类型，请使用 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls/ssh 协议链接"
                                 _press_any_key
                                 continue
                                 ;;
@@ -17275,9 +18002,10 @@ _mihomo_chain_proxy_manage() {
                         _menu_pair "3" "anytls" "" "green" "4" "vless" "" "green"
                         _menu_pair "5" "socks5" "" "green" "6" "http" "" "green"
                         _menu_pair "7" "wireguard (Beta)" "" "green" "8" "tuic" "" "green"
+                        _menu_pair "9" "ssh" "" "green" "" "" "" ""
                         _separator
                         local type_choice
-                        read -rp "  出站类型 [1-8]: " type_choice
+                        read -rp "  出站类型 [1-9]: " type_choice
                         case "$type_choice" in
                             1) out_type="ss" ;;
                             2) out_type="hysteria2" ;;
@@ -17287,6 +18015,7 @@ _mihomo_chain_proxy_manage() {
                             6) out_type="http" ;;
                             7) out_type="wireguard" ;;
                             8) out_type="tuic" ;;
+                            9) out_type="ssh" ;;
                             *) _error_no_exit "无效类型"; _press_any_key; continue ;;
                         esac
                         read -rp "  出口节点名称: " out_name
@@ -17398,6 +18127,32 @@ _mihomo_chain_proxy_manage() {
                                     _error_no_exit "tuic password 不能为空"
                                     _press_any_key
                                     continue
+                                fi
+                                ;;
+                            ssh)
+                                read -rp "  username: " out_user
+                                out_user=$(_mihomoconf_trim "${out_user:-}")
+                                if [[ -z "$out_user" ]]; then
+                                    _error_no_exit "ssh username 不能为空"
+                                    _press_any_key
+                                    continue
+                                fi
+                                read -rp "  password [可留空，若使用密钥认证]: " out_pass
+                                out_pass=$(_mihomoconf_trim "${out_pass:-}")
+                                read -rp "  private-key (密钥文件绝对路径，或直接回车留空/跳过): " out_wg_private_key
+                                out_wg_private_key=$(_mihomoconf_trim "${out_wg_private_key:-}")
+                                if [[ -n "$out_wg_private_key" && -f "$out_wg_private_key" ]]; then
+                                    _info "正在读取密钥文件: ${out_wg_private_key}..."
+                                    out_wg_private_key=$(cat "$out_wg_private_key")
+                                fi
+                                if [[ -z "$out_pass" && -z "$out_wg_private_key" ]]; then
+                                    _error_no_exit "ssh 密码与密钥不能同时为空"
+                                    _press_any_key
+                                    continue
+                                fi
+                                if [[ -n "$out_wg_private_key" ]]; then
+                                    read -rp "  private-key-passphrase [密匙密码，可留空]: " out_wg_public_key
+                                    out_wg_public_key=$(_mihomoconf_trim "${out_wg_public_key:-}")
                                 fi
                                 ;;
                             wireguard)
@@ -20363,670 +21118,7 @@ _ntrace_setup() {
     done
 }
 
-# --- 10. Sing-Box 管理 ---
-
-_SINGBOX_SERVICE_NAME="sing-box"
-_SINGBOX_SYSTEMD_SERVICE_FILE="/etc/systemd/system/${_SINGBOX_SERVICE_NAME}.service"
-_SINGBOX_OPENRC_SERVICE_FILE="/etc/init.d/${_SINGBOX_SERVICE_NAME}"
-_SINGBOX_LOG_FILE="/var/log/sing-box.log"
-_SINGBOX_ERR_FILE="/var/log/sing-box.error.log"
-
-_singbox_running_pid() {
-    local pid=""
-    local pid_file="/run/${_SINGBOX_SERVICE_NAME}.pid"
-
-    if [[ -f "$pid_file" ]]; then
-        pid=$(tr -cd '0-9' < "$pid_file" 2>/dev/null || true)
-        if _is_digit "${pid:-}" && kill -0 "$pid" >/dev/null 2>&1; then
-            printf '%s' "$pid"
-            return 0
-        fi
-    fi
-
-    if command -v pgrep >/dev/null 2>&1; then
-        pid=$(pgrep -x sing-box 2>/dev/null | head -n1 || true)
-        [[ -z "$pid" ]] && pid=$(pgrep sing-box 2>/dev/null | head -n1 || true)
-        if _is_digit "${pid:-}" && kill -0 "$pid" >/dev/null 2>&1; then
-            printf '%s' "$pid"
-            return 0
-        fi
-    fi
-    return 1
-}
-
-_singbox_systemd_service_configured() {
-    _has_systemd || return 1
-    systemctl is-enabled "${_SINGBOX_SERVICE_NAME}.service" &>/dev/null \
-        || systemctl is-active "${_SINGBOX_SERVICE_NAME}.service" &>/dev/null \
-        || [[ -f "$_SINGBOX_SYSTEMD_SERVICE_FILE" ]]
-}
-
-_singbox_openrc_service_configured() {
-    _has_openrc || return 1
-    [[ -x "$_SINGBOX_OPENRC_SERVICE_FILE" ]] || _openrc_service_in_default "$_SINGBOX_SERVICE_NAME"
-}
-
-_singbox_service_is_active() {
-    if _has_systemd && systemctl is-active --quiet "$_SINGBOX_SERVICE_NAME" 2>/dev/null; then
-        return 0
-    fi
-    if _has_openrc && [[ -x "$_SINGBOX_OPENRC_SERVICE_FILE" ]] && rc-service "$_SINGBOX_SERVICE_NAME" status >/dev/null 2>&1; then
-        return 0
-    fi
-    _singbox_running_pid >/dev/null 2>&1
-}
-
-
-_singbox_install_apt() {
-    _info "使用 APT 官方仓库安装..."
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc
-    chmod a+r /etc/apt/keyrings/sagernet.asc
-
-    cat > /etc/apt/sources.list.d/sagernet.sources <<'SINGBOX_APT'
-Types: deb
-URIs: https://deb.sagernet.org/
-Suites: *
-Components: *
-Enabled: yes
-Signed-By: /etc/apt/keyrings/sagernet.asc
-SINGBOX_APT
-
-    apt-get update -qq || true
-    printf "  ${BOLD}选择版本${PLAIN}\n"
-    _separator
-    _menu_pair "1" "sing-box" "稳定版" "green" "2" "sing-box-beta" "测试版" "yellow"
-    _separator
-    local ver_choice
-    read -rp "  选择 [1/2]（默认 1）: " ver_choice
-    case "${ver_choice:-1}" in
-        1) apt-get install -y sing-box ;;
-        2) apt-get install -y sing-box-beta ;;
-        *) _error_no_exit "无效选项"; return 1 ;;
-    esac
-}
-
-_singbox_install_generic() {
-    _info "使用官方安装脚本..."
-    bash <(curl -fsSL https://sing-box.app/install.sh)
-}
-
-_singbox_install_alpine() {
-    _info "Alpine 检测到，使用二进制安装..."
-
-    local goarch
-    case "$(uname -m)" in
-        x86_64|amd64)        goarch="amd64" ;;
-        aarch64|arm64)       goarch="arm64" ;;
-        armv7*|armhf)        goarch="armv7" ;;
-        i386|i486|i586|i686) goarch="386" ;;
-        *)
-            _error_no_exit "不支持的架构: $(uname -m)"
-            return 1
-            ;;
-    esac
-
-    local version latest_json api_url
-    api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    api_url=$(_github_proxy_url "$api_url")
-    latest_json=$(curl -fsSL "$api_url" 2>/dev/null) || {
-        _error_no_exit "获取 sing-box 最新版本失败"
-        return 1
-    }
-    version=$(printf '%s' "$latest_json" | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/')
-    if [[ -z "$version" ]]; then
-        _error_no_exit "解析 sing-box 版本号失败"
-        return 1
-    fi
-    _info "最新版本: v${version}"
-
-    local tarball="sing-box-${version}-linux-${goarch}.tar.gz"
-    local url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${tarball}"
-    url=$(_github_proxy_url "$url")
-
-    local tmp_dir
-    tmp_dir=$(mktemp -d /tmp/singbox_install.XXXXXX) || return 1
-
-    _info "下载 ${tarball} ..."
-    if ! curl -fSL -o "${tmp_dir}/${tarball}" "$url"; then
-        _error_no_exit "下载失败: ${url}"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    _info "解压并安装..."
-    if ! tar -xzf "${tmp_dir}/${tarball}" -C "$tmp_dir"; then
-        _error_no_exit "解压失败"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    local bin_path="${tmp_dir}/sing-box-${version}-linux-${goarch}/sing-box"
-    if [[ ! -f "$bin_path" ]]; then
-        _error_no_exit "未在压缩包中找到 sing-box 二进制文件"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    install -m 0755 "$bin_path" /usr/local/bin/sing-box || {
-        _error_no_exit "安装 sing-box 到 /usr/local/bin 失败"
-        rm -rf "$tmp_dir"
-        return 1
-    }
-
-    rm -rf "$tmp_dir"
-    _info "sing-box v${version} 安装成功"
-}
-
-_singbox_setup() {
-    _header "sing-box 安装"
-
-    _ensure_curl || true
-    if ! command -v curl >/dev/null 2>&1; then
-        _error_no_exit "需要 curl 命令，请先安装"
-        _press_any_key
-        return
-    fi
-
-    echo ""
-    if command -v sing-box >/dev/null 2>&1; then
-        local cur_ver
-        cur_ver=$(sing-box version 2>/dev/null | head -1)
-        [[ -z "$cur_ver" ]] && cur_ver="未知"
-        _info "当前已安装: ${cur_ver}"
-    else
-        _info "当前未安装 sing-box"
-    fi
-
-    printf "  ${BOLD}选择操作${PLAIN}\n"
-    _separator
-    _menu_pair "1" "安装/更新 sing-box" "" "green" "0" "返回主菜单" "" "red"
-    _separator
-    local choice
-    read -rp "  选择 [0-1]: " choice
-    case "$choice" in
-        1) ;;
-        0) return ;;
-        *) _error_no_exit "无效选项"; _press_any_key; return ;;
-    esac
-
-    _time_sync_check_and_enable
-
-    echo ""
-    if command -v apt-get >/dev/null 2>&1; then
-        if ! _singbox_install_apt; then
-            _error_no_exit "sing-box 安装/更新失败"
-            _press_any_key
-            return
-        fi
-    elif command -v apk >/dev/null 2>&1; then
-        if ! _singbox_install_alpine; then
-            _error_no_exit "sing-box 安装/更新失败"
-            _press_any_key
-            return
-        fi
-    else
-        if ! _singbox_install_generic; then
-            _error_no_exit "sing-box 安装/更新失败"
-            _press_any_key
-            return
-        fi
-    fi
-
-    echo ""
-    if command -v sing-box >/dev/null 2>&1; then
-        _info "sing-box 安装成功!"
-        _info "版本: $(sing-box version 2>/dev/null | head -1)"
-    else
-        _error_no_exit "sing-box 安装失败"
-    fi
-
-    _press_any_key
-}
-
-# --- Sing-Box 管理子菜单 ---
-
-_singbox_enable() {
-    _header "Sing-Box 自启动配置"
-
-    if ! command -v sing-box >/dev/null 2>&1; then
-        _error_no_exit "未检测到 sing-box，请先安装"
-        _press_any_key
-        return
-    fi
-
-    local service_file=""
-    local service_name=""
-    local force_rewrite="0"
-
-    if _has_systemd; then
-        service_file="$_SINGBOX_SYSTEMD_SERVICE_FILE"
-        service_name="systemd"
-    elif _has_openrc; then
-        service_file="$_SINGBOX_OPENRC_SERVICE_FILE"
-        service_name="OpenRC"
-    fi
-
-    if [[ -n "$service_file" && -f "$service_file" ]]; then
-        _warn "${service_name} 服务文件已存在"
-        local overwrite
-        read -rp "  覆盖? [y/N]: " overwrite
-        if [[ ! "$overwrite" =~ ^[Yy] ]]; then
-            _press_any_key
-            return
-        fi
-        force_rewrite="1"
-    fi
-
-    local config_file="/etc/sing-box/config.json"
-    local singbox_bin
-    singbox_bin=$(command -v sing-box 2>/dev/null || true)
-
-    if [[ -z "$singbox_bin" || ! -x "$singbox_bin" ]]; then
-        _error_no_exit "未检测到 sing-box，请先安装"
-        _press_any_key
-        return
-    fi
-    if [[ ! -f "$config_file" ]]; then
-        _error_no_exit "未找到配置文件: ${config_file}"
-        _press_any_key
-        return
-    fi
-
-    if _has_systemd; then
-        if [[ "$force_rewrite" == "1" || ! -f "$_SINGBOX_SYSTEMD_SERVICE_FILE" ]]; then
-            _info "生成 systemd 服务文件..."
-            cat > "$_SINGBOX_SYSTEMD_SERVICE_FILE" <<SINGBOX_SERVICE
-[Unit]
-Description=Sing-box Service
-After=network.target
-
-[Service]
-User=root
-ExecStart=${singbox_bin} run -c ${config_file}
-Restart=on-failure
-RestartSec=5s
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-SINGBOX_SERVICE
-        fi
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        if ! systemctl enable "$_SINGBOX_SERVICE_NAME" >/dev/null 2>&1; then
-            _error_no_exit "设置开机自启失败，请检查 systemctl 状态"
-            _press_any_key
-            return
-        fi
-        _info "已设置开机自启"
-        if ! systemctl restart "$_SINGBOX_SERVICE_NAME" >/dev/null 2>&1; then
-            _error_no_exit "sing-box 启动失败，请检查: systemctl status ${_SINGBOX_SERVICE_NAME}"
-            _press_any_key
-            return
-        fi
-        sleep 1
-        if systemctl is-active --quiet "$_SINGBOX_SERVICE_NAME"; then
-            _info "sing-box 已成功启动"
-        else
-            _error_no_exit "sing-box 启动失败，请检查: systemctl status ${_SINGBOX_SERVICE_NAME}"
-        fi
-        _press_any_key
-        return
-    fi
-
-    if _has_openrc; then
-        mkdir -p "$(dirname "$_SINGBOX_LOG_FILE")"
-        if [[ "$force_rewrite" == "1" || ! -f "$_SINGBOX_OPENRC_SERVICE_FILE" ]]; then
-            _info "生成 OpenRC 服务文件..."
-            cat > "$_SINGBOX_OPENRC_SERVICE_FILE" <<SINGBOX_SERVICE
-#!/sbin/openrc-run
-name="Sing-box"
-description="Sing-box Service"
-
-command="${singbox_bin}"
-command_args="run -c ${config_file}"
-command_background=true
-pidfile="/run/${_SINGBOX_SERVICE_NAME}.pid"
-output_log="${_SINGBOX_LOG_FILE}"
-error_log="${_SINGBOX_ERR_FILE}"
-
-depend() {
-    need net
-}
-SINGBOX_SERVICE
-            chmod 0755 "$_SINGBOX_OPENRC_SERVICE_FILE" || {
-                _error_no_exit "写入 OpenRC 服务文件失败: ${_SINGBOX_OPENRC_SERVICE_FILE}"
-                _press_any_key
-                return
-            }
-        fi
-        if ! rc-update add "$_SINGBOX_SERVICE_NAME" default >/dev/null 2>&1; then
-            if ! _openrc_service_in_default "$_SINGBOX_SERVICE_NAME"; then
-                _error_no_exit "设置开机自启失败，请检查 rc-update 状态"
-                _press_any_key
-                return
-            fi
-        fi
-        _info "已设置开机自启 (OpenRC)"
-        if ! rc-service "$_SINGBOX_SERVICE_NAME" restart >/dev/null 2>&1; then
-            if ! rc-service "$_SINGBOX_SERVICE_NAME" start >/dev/null 2>&1; then
-                _error_no_exit "sing-box 启动失败，请检查: rc-service ${_SINGBOX_SERVICE_NAME} status"
-                _press_any_key
-                return
-            fi
-        fi
-        sleep 1
-        if _singbox_service_is_active; then
-            _info "sing-box 已成功启动"
-        else
-            _error_no_exit "sing-box 启动失败，请检查: rc-service ${_SINGBOX_SERVICE_NAME} status"
-        fi
-        _press_any_key
-        return
-    fi
-
-    mkdir -p "$(dirname "$_SINGBOX_LOG_FILE")"
-    _warn "当前系统未检测到 systemd/OpenRC，无法配置开机自启，仅尝试立即启动"
-    pkill -x sing-box >/dev/null 2>&1 || true
-    nohup "$singbox_bin" run -c "$config_file" >>"$_SINGBOX_LOG_FILE" 2>>"$_SINGBOX_ERR_FILE" &
-    sleep 1
-    if _singbox_running_pid >/dev/null 2>&1; then
-        _info "sing-box 已成功启动"
-    else
-        _error_no_exit "sing-box 启动失败"
-    fi
-
-    _press_any_key
-}
-
-_singbox_restart() {
-    _header "Sing-Box 重启"
-
-    if ! command -v sing-box >/dev/null 2>&1; then
-        _error_no_exit "未检测到 sing-box，请先安装"
-        _press_any_key
-        return
-    fi
-
-    if _singbox_systemd_service_configured; then
-        _info "通过 systemd 重启 sing-box..."
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl restart "$_SINGBOX_SERVICE_NAME"
-        sleep 1
-        if systemctl is-active --quiet "$_SINGBOX_SERVICE_NAME"; then
-            _info "sing-box 已成功重启"
-        else
-            _error_no_exit "sing-box 重启失败，请检查 systemctl status ${_SINGBOX_SERVICE_NAME}"
-        fi
-    elif _singbox_openrc_service_configured; then
-        _info "通过 OpenRC 重启 sing-box..."
-        if ! rc-service "$_SINGBOX_SERVICE_NAME" restart >/dev/null 2>&1; then
-            if ! rc-service "$_SINGBOX_SERVICE_NAME" start >/dev/null 2>&1; then
-                _error_no_exit "sing-box 重启失败，请检查 rc-service ${_SINGBOX_SERVICE_NAME} status"
-                _press_any_key
-                return
-            fi
-        fi
-        sleep 1
-        if _singbox_service_is_active; then
-            _info "sing-box 已成功重启"
-        else
-            _error_no_exit "sing-box 重启失败，请检查 rc-service ${_SINGBOX_SERVICE_NAME} status"
-        fi
-    else
-        local pid
-        pid=$(_singbox_running_pid 2>/dev/null || true)
-        if [[ -n "$pid" ]]; then
-            _info "终止旧进程 (PID: $pid)..."
-            kill "$pid" 2>/dev/null
-            sleep 1
-        fi
-        _info "启动 sing-box..."
-        mkdir -p "$(dirname "$_SINGBOX_LOG_FILE")"
-        nohup sing-box run -c /etc/sing-box/config.json >>"$_SINGBOX_LOG_FILE" 2>>"$_SINGBOX_ERR_FILE" &
-        sleep 1
-        pid=$(_singbox_running_pid 2>/dev/null || true)
-        if [[ -n "$pid" ]]; then
-            _info "sing-box 已成功启动 (PID: ${pid})"
-        else
-            _error_no_exit "sing-box 启动失败"
-        fi
-    fi
-
-    _press_any_key
-}
-
-_singbox_status() {
-    _header "Sing-Box 运行状态"
-
-    echo ""
-    if _singbox_systemd_service_configured; then
-        systemctl status "$_SINGBOX_SERVICE_NAME" --no-pager || true
-    elif _singbox_openrc_service_configured; then
-        rc-service "$_SINGBOX_SERVICE_NAME" status || true
-    else
-        local pid
-        pid=$(_singbox_running_pid 2>/dev/null || true)
-        if [[ -n "$pid" ]]; then
-            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${GREEN}运行中${PLAIN} (PID: $pid)\n"
-        else
-            printf "${GREEN}  ✔ ${PLAIN}运行状态: ${RED}未运行${PLAIN}\n"
-        fi
-    fi
-
-    _press_any_key
-}
-
-_singbox_log() {
-    _header "Sing-Box 日志"
-
-    echo ""
-    if _singbox_systemd_service_configured; then
-        _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
-        _separator
-        echo ""
-        journalctl -u "$_SINGBOX_SERVICE_NAME" --no-pager -n 50
-        echo ""
-        _separator
-        local follow
-        read -rp "  实时跟踪日志? [y/N]: " follow
-        if [[ "$follow" =~ ^[Yy] ]]; then
-            echo ""
-            _info "按 Ctrl+C 退出实时日志..."
-            echo ""
-            journalctl -u "$_SINGBOX_SERVICE_NAME" -f
-        fi
-    else
-        if ! _tail_log_files_interactive "sing-box" "$_SINGBOX_LOG_FILE" "$_SINGBOX_ERR_FILE" "rc-service ${_SINGBOX_SERVICE_NAME} status"; then
-            _warn "sing-box 当前未使用 systemd 管理，且未检测到日志文件"
-            _info "提示: 可先执行选项 2「配置自启并启动」来设置 systemd/OpenRC 服务"
-        fi
-    fi
-
-    _press_any_key
-}
-
-_singbox_uninstall() {
-    _header "Sing-Box 卸载"
-
-    local systemd_service_file="$_SINGBOX_SYSTEMD_SERVICE_FILE"
-    local openrc_service_file="$_SINGBOX_OPENRC_SERVICE_FILE"
-    local config_dir="/etc/sing-box"
-    local apt_source="/etc/apt/sources.list.d/sagernet.sources"
-    local apt_key="/etc/apt/keyrings/sagernet.asc"
-    local bin_path remove_config remove_repo confirm p
-    local removed_count=0
-    local -a bin_candidates=() apt_pkgs=()
-
-    bin_path=$(command -v sing-box 2>/dev/null || true)
-
-    _warn "将停止并卸载 Sing-Box，可删除配置目录。"
-    printf "    systemd 服务文件: %s\n" "$systemd_service_file"
-    printf "    OpenRC 服务文件 : %s\n" "$openrc_service_file"
-    if [[ -n "$bin_path" ]]; then
-        printf "    可执行文件: %s\n" "$bin_path"
-    else
-        printf "    可执行文件: %s\n" "/usr/bin/sing-box"
-    fi
-    printf "    配置目录: %s\n" "$config_dir"
-    read -rp "  确认卸载 Sing-Box? [y/N]: " confirm
-    if [[ ! "$confirm" =~ ^[Yy] ]]; then
-        _info "已取消"
-        _press_any_key
-        return
-    fi
-
-    if _has_systemd; then
-        if systemctl is-active --quiet "$_SINGBOX_SERVICE_NAME" 2>/dev/null || systemctl is-enabled "${_SINGBOX_SERVICE_NAME}.service" &>/dev/null || [[ -f "$systemd_service_file" ]]; then
-            systemctl stop "$_SINGBOX_SERVICE_NAME" >/dev/null 2>&1 || true
-            systemctl disable "$_SINGBOX_SERVICE_NAME" >/dev/null 2>&1 || true
-            _info "已停止并禁用 sing-box 服务"
-        fi
-    fi
-    if _has_openrc; then
-        if [[ -x "$openrc_service_file" ]] || _openrc_service_in_default "$_SINGBOX_SERVICE_NAME"; then
-            rc-service "$_SINGBOX_SERVICE_NAME" stop >/dev/null 2>&1 || true
-            rc-update del "$_SINGBOX_SERVICE_NAME" default >/dev/null 2>&1 || true
-            _info "已停止并禁用 OpenRC 的 sing-box 服务"
-        fi
-    fi
-
-    if _singbox_running_pid >/dev/null 2>&1; then
-        pkill -x sing-box >/dev/null 2>&1 || pkill sing-box >/dev/null 2>&1 || true
-        sleep 1
-    fi
-
-    if [[ -f "$systemd_service_file" ]]; then
-        rm -f "$systemd_service_file"
-        removed_count=$((removed_count + 1))
-        _info "已删除服务文件: $systemd_service_file"
-    fi
-    if [[ -f "$openrc_service_file" ]]; then
-        rm -f "$openrc_service_file"
-        removed_count=$((removed_count + 1))
-        _info "已删除服务文件: $openrc_service_file"
-    fi
-    if _has_systemd; then
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl reset-failed "$_SINGBOX_SERVICE_NAME" >/dev/null 2>&1 || true
-    fi
-
-    if command -v dpkg >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-        dpkg -s sing-box >/dev/null 2>&1 && apt_pkgs+=("sing-box")
-        dpkg -s sing-box-beta >/dev/null 2>&1 && apt_pkgs+=("sing-box-beta")
-        if (( ${#apt_pkgs[@]} > 0 )); then
-            _info "检测到 APT 安装包: ${apt_pkgs[*]}"
-            if apt-get remove -y "${apt_pkgs[@]}" >/dev/null 2>&1; then
-                removed_count=$((removed_count + 1))
-                _info "已卸载 APT 包: ${apt_pkgs[*]}"
-            else
-                _warn "APT 包卸载失败，可手动执行: apt-get remove -y ${apt_pkgs[*]}"
-            fi
-        fi
-    fi
-
-    [[ -n "$bin_path" ]] && bin_candidates+=("$bin_path")
-    [[ "/usr/bin/sing-box" != "$bin_path" ]] && bin_candidates+=("/usr/bin/sing-box")
-    [[ "/usr/local/bin/sing-box" != "$bin_path" ]] && bin_candidates+=("/usr/local/bin/sing-box")
-    for p in "${bin_candidates[@]}"; do
-        [[ -z "${p:-}" ]] && continue
-        if [[ -f "$p" || -L "$p" ]]; then
-            rm -f "$p"
-            removed_count=$((removed_count + 1))
-            _info "已删除可执行文件: $p"
-        fi
-    done
-
-    if [[ -f "$_SINGBOX_LOG_FILE" || -f "$_SINGBOX_ERR_FILE" ]]; then
-        rm -f "$_SINGBOX_LOG_FILE" "$_SINGBOX_ERR_FILE"
-        removed_count=$((removed_count + 1))
-        _info "已删除日志文件"
-    fi
-
-    if [[ -f "$apt_source" || -f "$apt_key" ]]; then
-        read -rp "  同时删除 Sing-Box APT 源配置? [y/N]: " remove_repo
-        if [[ "$remove_repo" =~ ^[Yy] ]]; then
-            rm -f "$apt_source" "$apt_key"
-            removed_count=$((removed_count + 1))
-            _info "已删除 APT 源配置"
-            if command -v apt-get >/dev/null 2>&1; then
-                apt-get update -qq >/dev/null 2>&1 || true
-            fi
-        else
-            _info "已保留 APT 源配置"
-        fi
-    fi
-
-    if [[ -d "$config_dir" ]]; then
-        read -rp "  同时删除配置目录 ${config_dir}? [y/N]: " remove_config
-        if [[ "$remove_config" =~ ^[Yy] ]]; then
-            rm -rf "$config_dir"
-            removed_count=$((removed_count + 1))
-            _info "已删除配置目录: $config_dir"
-        else
-            _info "已保留配置目录: $config_dir"
-        fi
-    fi
-
-    if (( removed_count == 0 )); then
-        _warn "未检测到可删除的 Sing-Box 文件，已完成服务清理。"
-    else
-        _success "Sing-Box 卸载完成"
-    fi
-    _press_any_key
-}
-
-_singbox_manage_screen() {
-    _header "Sing-Box 管理"
-
-    local sb_ver="未安装"
-    local sb_status="未运行"
-    local sb_status_tone="red"
-
-    if command -v sing-box >/dev/null 2>&1; then
-        local ver
-        ver=$(sing-box version 2>/dev/null | head -1)
-        sb_ver="${ver:-未知}"
-        local pid
-        pid=$(pgrep -x sing-box 2>/dev/null || true)
-        if [[ -n "$pid" ]]; then
-            sb_status="运行中 (PID: $pid)"
-            sb_status_tone="green"
-        fi
-    fi
-
-    printf "  ${BOLD}状态信息${PLAIN}\n"
-    _separator
-    _status_kv_pair "版本" "$sb_ver" "dim" 8 "状态" "$sb_status" "$sb_status_tone" 8
-
-    _separator
-    _menu_pair "1" "安装/更新 Sing-Box" "" "green" "2" "配置自启并启动" "" "green"
-    _menu_pair "3" "重启 Sing-Box" "" "green" "4" "查看状态" "" "green"
-    _menu_pair "5" "查看日志" "" "green" "6" "卸载 Sing-Box" "停止并清理" "yellow"
-    _menu_item "0" "返回主菜单" "" "red"
-    _separator
-}
-
-_singbox_manage() {
-    while true; do
-        _ui_print_screen _singbox_manage_screen
-
-        local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-6]: " choice
-        case "$choice" in
-            1) _singbox_setup ;;
-            2) _singbox_enable ;;
-            3) _singbox_restart ;;
-            4) _singbox_status ;;
-            5) _singbox_log ;;
-            6) _singbox_uninstall ;;
-            0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
-        esac
-    done
-}
-
-# --- 11. Snell V5 管理 ---
+# --- 10. Snell V5 管理 ---
 
 _SNELL_CONFIG_DIR="/etc/snell"
 _SNELL_CONFIG_FILE="/etc/snell/snell-server.conf"
@@ -22004,7 +22096,7 @@ _snell_manage() {
     done
 }
 
-# --- 11.5 Snell V6 管理 ---
+# --- 10.5 Snell V6 管理 ---
 
 _SNELL6_CONFIG_DIR="/etc/snell6"
 _SNELL6_CONFIG_FILE="/etc/snell6/snell-server.conf"
@@ -22862,7 +22954,7 @@ _snell6_manage() {
     done
 }
 
-# --- 12. Realm 端口转发管理 ---
+# --- 11. Realm 端口转发管理 ---
 
 _REALM_CONFIG_DIR="/etc/realm"
 _REALM_CONFIG_FILE="/etc/realm/config.toml"
@@ -24378,7 +24470,7 @@ _realm_manage() {
     done
 }
 
-# --- 13. Shadowsocks-Rust 管理 ---
+# --- 12. Shadowsocks-Rust 管理 ---
 
 _SSRUST_CONFIG_DIR="/etc/shadowsocks-rust"
 _SSRUST_CONFIG_FILE="/etc/shadowsocks-rust/config.json"
@@ -26391,7 +26483,7 @@ _ssrust_manage() {
     done
 }
 
-# --- 14. WireGuard 原生节点 ---
+# --- 13. WireGuard 原生节点 ---
 
 _WIREGUARD_DIR="/etc/wireguard"
 _WIREGUARD_CLIENT_DIR="/etc/wireguard/clients"
@@ -28119,7 +28211,7 @@ _acme_manage() {
     done
 }
 
-# --- 15. Akile DNS 解锁检测与配置 ---
+# --- 14. Akile DNS 解锁检测与配置 ---
 
 _akdns_install_deps() {
     local need_install=0
@@ -28299,7 +28391,7 @@ _akdns_setup() {
     _press_any_key
 }
 
-# --- 16. Linux DNS 管理 ---
+# --- 15. Linux DNS 管理 ---
 
 _DNS_SERVERS=()
 _DNS_V4_SERVERS=()
@@ -29420,7 +29512,7 @@ _dns_manage() {
     done
 }
 
-# --- 17. Swap 管理 ---
+# --- 16. Swap 管理 ---
 
 _swap_human_readable() {
     local bytes=$1
@@ -34228,11 +34320,11 @@ _proxy_cipher_benchmark() {
 
 _proxy_tools_menu_screen() {
     _header "代理工具"
-    _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Sing-Box" "安装/服务/日志" "green"
-    _menu_pair "3" "Snell V5 (Beta)" "配置/导出/日志" "green" "4" "Snell V6 (Beta)" "配置/导出/日志" "green"
-    _menu_pair "5" "WireGuard" "部署/客户端/状态" "green" "6" "Shadowsocks-Rust" "配置/导出/日志" "green"
+    _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Snell V5 (Beta)" "配置/导出/日志" "green"
+    _menu_pair "3" "Snell V6 (Beta)" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
+    _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "SSH 代理管理" "受限代理用户管理" "green"
     _menu_pair "7" "Realm 转发" "端口转发管理" "green" "8" "ACME 证书" "申请/续期证书" "green"
-    _menu_pair "9" "加密吞吐量测试" "常见加解密测试" "green" "10" "SSH 代理管理" "受限代理用户管理" "green"
+    _menu_item "9" "加密吞吐量测试" "常见加解密测试" "green"
     _menu_item "0" "返回主菜单" "" "red"
     _separator
 }
@@ -34241,18 +34333,17 @@ _proxy_tools_menu() {
     while true; do
         _ui_print_screen _proxy_tools_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-10]: " ch
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-9]: " ch
         case "$ch" in
             1) _mihomo_manage ;;
-            2) _singbox_manage ;;
-            3) _snell_manage ;;
-            4) _snell6_manage ;;
-            5) _wireguard_manage ;;
-            6) _ssrust_manage ;;
+            2) _snell_manage ;;
+            3) _snell6_manage ;;
+            4) _wireguard_manage ;;
+            5) _ssrust_manage ;;
+            6) _ssh_proxy_user_manage ;;
             7) _realm_manage ;;
             8) _acme_manage ;;
             9) _proxy_cipher_benchmark ;;
-            10) _ssh_proxy_user_manage ;;
             0) return ;;
             *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
         esac
