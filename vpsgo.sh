@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.10"
+VERSION="5.11"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -14598,7 +14598,7 @@ _mihomochain_read_rules_from_config() {
             if (line ~ /^IN-USER,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "RULE_USER\037%s\037%s\n", a[2], a[3]
-            } else if (line ~ /^USER,[^,]+,[^,]+$/) {
+            } else if (line ~ /^(PROCESS-USER|USER),[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "RULE_SYS_USER\037%s\037%s\n", a[2], a[3]
             } else if (line ~ /^IN-NAME,[^,]+,[^,]+$/) {
@@ -16276,7 +16276,7 @@ _mihomorule_search_ios_rule_add() {
     _mihomorule_search_ios_rules "$query" "$tmp_results"
     fetch_status=$?
     if [[ "$fetch_status" -eq 2 ]]; then
-        _warn "在线检索 iOS rule 仓库失败，已使用内置常用规则兜底"
+        _warn "在线检索远程规则仓库失败，已使用内置常用规则兜底"
     fi
 
     while IFS=$'\x1f' read -r rule_name rule_path; do
@@ -16372,7 +16372,7 @@ _mihomorule_search_ios_rule_add() {
     if (( applied == 0 )); then
         return 1
     fi
-    _info "已保存 ${applied} 个 iOS rule 规则 -> ${out_show}"
+    _info "已保存 ${applied} 个在线规则 -> ${out_show}"
     [[ "$failed" -eq 1 ]] && _warn "部分规则保存失败，请核对上方提示"
     if ! _mihomorule_apply_and_restart; then
         _warn "自动应用或重启失败，请检查日志后重试"
@@ -16675,10 +16675,10 @@ _mihomo_outbound_rule_manage() {
             _header "Mihomo 出站分流规则"
             _info "配置文件: ${config_file}"
             _info "预置规则来源: blackmatrix7/ios_rule_script (Clash classical yaml)"
-            _info "支持 iOS rule 模糊搜索、多选添加和规则优先级调整"
+            _info "支持在线规则模糊搜索、多选添加和规则优先级调整"
             _info "自定义远程规则支持 yaml/text/mrs；mrs 仅支持 domain/ipcidr"
             _separator
-            _menu_pair "1" "查看当前分流" "含优先级" "green" "2" "搜索 iOS 规则" "模糊搜索/多选" "green"
+            _menu_pair "1" "查看当前分流" "含优先级" "green" "2" "搜索在线规则" "模糊搜索/多选" "green"
             _menu_pair "3" "分流 Google" "远程规则" "green" "4" "分流 Netflix" "远程规则" "green"
             _menu_pair "5" "分流指定端口" "DST-PORT" "green" "6" "自定义远程规则" "支持 mrs" "green"
             _menu_pair "7" "调整规则优先级" "上移/置顶" "green" "8" "删除分流规则" "" "yellow"
@@ -16917,7 +16917,7 @@ _mihomo_outbound_and_rule_manage() {
         _menu_pair "7" "新增入站用户 (Mihomo)" "" "green" "8" "删除出口节点" "" "green"
         _menu_pair "9" "删除绑定规则" "" "green" "" "" "" ""
         _separator
-        _menu_pair "10" "搜索与添加 iOS 规则" "模糊搜索/多选" "green" "11" "快捷分流 (Google / Netflix)" "" "green"
+        _menu_pair "10" "搜索与添加在线规则" "模糊搜索/多选" "green" "11" "快捷分流 (Google / Netflix)" "" "green"
         _menu_pair "12" "分流指定端口" "DST-PORT" "green" "13" "自定义远程规则" "支持 mrs" "green"
         _menu_pair "14" "调整分流规则优先级" "上移/置顶" "green" "15" "删除分流规则" "" "yellow"
         _menu_pair "16" "本地解析直发分流" "DNS 预解析" "green" "17" "Gemini/Google IPv4 定向" "" "green"
@@ -17248,7 +17248,7 @@ _mihomochain_rule_split_parts() {
             if (line ~ /^IN-USER,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "%s\037%s\n", a[2], a[3] >> uf
-            } else if (line ~ /^USER,[^,]+,[^,]+$/) {
+            } else if (line ~ /^(PROCESS-USER|USER),[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "SYS:%s\037%s\n", a[2], a[3] >> uf
             } else if (line ~ /^IN-NAME,[^,]+,[^,]+$/) {
@@ -17286,7 +17286,7 @@ _mihomochain_rule_write_parts() {
         while IFS=$'\x1f' read -r user out; do
             [[ -z "${user:-}" || -z "${out:-}" ]] && continue
             if [[ "$user" == SYS:* ]]; then
-                printf "  - USER,%s,%s\n" "${user#SYS:}" "$out"
+                printf "  - PROCESS-USER,%s,%s\n" "${user#SYS:}" "$out"
             else
                 printf "  - IN-USER,%s,%s\n" "$user" "$out"
             fi
