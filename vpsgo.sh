@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.5"
+VERSION="5.6"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -18139,9 +18139,22 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 read -rp "  password [可留空，若使用密钥认证]: " out_pass
                                 out_pass=$(_mihomoconf_trim "${out_pass:-}")
-                                read -rp "  private-key (密钥文件绝对路径，或直接回车留空/跳过): " out_wg_private_key
+                                read -rp "  private-key (密钥文件绝对路径，或直接粘贴私钥内容，支持多行，回车留空/跳过): " out_wg_private_key
                                 out_wg_private_key=$(_mihomoconf_trim "${out_wg_private_key:-}")
-                                if [[ -n "$out_wg_private_key" && -f "$out_wg_private_key" ]]; then
+                                if [[ "$out_wg_private_key" == "-----BEGIN "* ]]; then
+                                    local line
+                                    while true; do
+                                        if [[ "$out_wg_private_key" == *"-----END "* ]]; then
+                                            break
+                                        fi
+                                        if IFS= read -r line; then
+                                            out_wg_private_key="${out_wg_private_key}"$'\n'"$line"
+                                        else
+                                            break
+                                        fi
+                                    done
+                                    out_wg_private_key=$(_mihomoconf_trim "$out_wg_private_key")
+                                elif [[ -n "$out_wg_private_key" && -f "$out_wg_private_key" ]]; then
                                     _info "正在读取密钥文件: ${out_wg_private_key}..."
                                     out_wg_private_key=$(cat "$out_wg_private_key")
                                 fi
@@ -31197,9 +31210,17 @@ _ssh_proxy_user_manage() {
                     continue
                 fi
 
+                _info "可用的受限代理用户列表:"
+                local i=0
+                for u in "${proxy_users[@]}"; do
+                    ((i++))
+                    printf "  ${GREEN}[%d]${PLAIN} %s\n" "$i" "$u"
+                done
+                _separator
+
                 local del_user=""
                 local del_input
-                read -rp "  请输入要删除 of 用户名或编号: " del_input
+                read -rp "  请输入要删除的用户名或编号: " del_input
                 del_input=$(_mihomoconf_trim "$del_input")
                 if [[ "$del_input" =~ ^[0-9]+$ ]] && [ "$del_input" -ge 1 ] && [ "$del_input" -le "${#proxy_users[@]}" ]; then
                     del_user="${proxy_users[$((del_input - 1))]}"
@@ -31224,9 +31245,9 @@ _ssh_proxy_user_manage() {
                 read -rp "  确认删除代理用户 ${del_user} 及其主目录吗？[y/N]: " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     if command -v userdel >/dev/null 2>&1; then
-                        userdel -r "$del_user"
+                        userdel -r "$del_user" >/dev/null 2>&1 || userdel "$del_user" >/dev/null 2>&1
                     elif command -v deluser >/dev/null 2>&1; then
-                        deluser --remove-home "$del_user" 2>/dev/null || deluser "$del_user"
+                        deluser --remove-home "$del_user" >/dev/null 2>&1 || deluser "$del_user" >/dev/null 2>&1
                     fi
                     
                     # 删除本地存储的密码与密钥
