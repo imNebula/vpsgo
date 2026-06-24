@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.6"
+VERSION="5.10"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -12675,7 +12675,7 @@ _mihomo_uninstall() {
 }
 
 _mihomo_log() {
-    _header "Mihomo 日志"
+    _header "Mihomo 实时日志"
 
     if ! command -v mihomo >/dev/null 2>&1; then
         _error_no_exit "未检测到 mihomo，请先安装"
@@ -12685,22 +12685,22 @@ _mihomo_log() {
 
     echo ""
     if _mihomo_systemd_service_configured; then
-        _info "显示最近 50 行日志 (Ctrl+C 退出实时跟踪)"
+        _info "正在查看实时日志 (按 Ctrl+C 退出)..."
         _separator
         echo ""
-        journalctl -u mihomo --no-pager -n 50
-        echo ""
-        _separator
-        local follow
-        read -rp "  实时跟踪日志? [y/N]: " follow
-        if [[ "$follow" =~ ^[Yy] ]]; then
-            echo ""
-            _info "按 Ctrl+C 退出实时日志..."
-            echo ""
-            journalctl -u mihomo -f
-        fi
+        journalctl -u mihomo -f -n 50
     elif _mihomo_openrc_service_configured; then
-        _tail_log_files_interactive "mihomo" "$_MIHOMO_OPENRC_LOG_FILE" "$_MIHOMO_OPENRC_ERR_FILE" "rc-service mihomo status" || true
+        local log_files=()
+        [[ -f "$_MIHOMO_OPENRC_LOG_FILE" ]] && log_files+=("$_MIHOMO_OPENRC_LOG_FILE")
+        [[ -f "$_MIHOMO_OPENRC_ERR_FILE" ]] && log_files+=("$_MIHOMO_OPENRC_ERR_FILE")
+        if (( ${#log_files[@]} > 0 )); then
+            _info "正在查看实时日志 (按 Ctrl+C 退出)..."
+            _separator
+            echo ""
+            tail -n 50 -f "${log_files[@]}"
+        else
+            _warn "未检测到 OpenRC 日志文件"
+        fi
     else
         _warn "mihomo 未配置为 systemd/OpenRC 服务，暂无统一日志入口"
         _info "提示: 可通过选项3「配置自启并启动」完成服务化管理"
@@ -14598,6 +14598,9 @@ _mihomochain_read_rules_from_config() {
             if (line ~ /^IN-USER,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "RULE_USER\037%s\037%s\n", a[2], a[3]
+            } else if (line ~ /^USER,[^,]+,[^,]+$/) {
+                split(line, a, ",")
+                printf "RULE_SYS_USER\037%s\037%s\n", a[2], a[3]
             } else if (line ~ /^IN-NAME,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "RULE_NAME\037%s\037%s\n", a[2], a[3]
@@ -14630,6 +14633,8 @@ _mihomochain_show_topology() {
         if [[ "$kind" == "RULE_USER" ]]; then
             in_name=$(_mihomochain_listener_name_by_user "$config_file" "$left")
             printf "      %s [user=%s]  ${DIM}-->${PLAIN}  %s\n" "$in_name" "$left" "$out_name"
+        elif [[ "$kind" == "RULE_SYS_USER" ]]; then
+            printf "      [Linux系统用户:%s]  ${DIM}-->${PLAIN}  %s\n" "$left" "$out_name"
         else
             printf "      %s  ${DIM}-->${PLAIN}  %s\n" "$left" "$out_name"
         fi
@@ -15532,6 +15537,32 @@ _mihomochain_remove_user_rule() {
     mv "$tmp_new" "$tmp_user"
     _mihomochain_rule_write_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
     rm -f "$tmp_other" "$tmp_user" "$tmp_name"
+}
+
+_mihomochain_add_or_update_sys_user_rule() {
+    local username="$1" out_tag="$2"
+    local config_file="$_MIHOMOCONF_CONFIG_FILE"
+    local out_name tmp_other tmp_user tmp_name tmp_new
+
+    out_name=$(_mihomochain_outbound_name_by_tag "$out_tag" 2>/dev/null || true)
+    [[ -n "$out_name" ]] || out_name="$out_tag"
+    if ! _mihomochain_outbound_tag_by_name "$out_name" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    tmp_other=$(mktemp)
+    tmp_user=$(mktemp)
+    tmp_name=$(mktemp)
+    tmp_new=$(mktemp)
+    _mihomochain_rule_split_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+    # Remove existing rules for this system user (prefixed with SYS:)
+    awk -F'\037' -v u="SYS:$username" '$1!=u { print }' "$tmp_user" > "$tmp_new"
+    # Append the new rule
+    printf 'SYS:%s\037%s\n' "$username" "$out_name" >> "$tmp_new"
+    mv "$tmp_new" "$tmp_user"
+    _mihomochain_rule_write_parts "$config_file" "$tmp_other" "$tmp_user" "$tmp_name"
+    rm -f "$tmp_other" "$tmp_user" "$tmp_name"
+    return 0
 }
 
 _mihomorule_read_providers() {
@@ -16627,6 +16658,7 @@ _mihomorule_add_dns_pre_rule_flow() {
 }
 
 _mihomo_outbound_rule_manage() {
+    local direct_choice="${1:-}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
     if [[ ! -f "$config_file" ]]; then
         _error_no_exit "未找到配置文件: ${config_file}"
@@ -16636,22 +16668,25 @@ _mihomo_outbound_rule_manage() {
     fi
 
     while true; do
-        _header "Mihomo 出站分流规则"
-        _info "配置文件: ${config_file}"
-        _info "预置规则来源: blackmatrix7/ios_rule_script (Clash classical yaml)"
-        _info "支持 iOS rule 模糊搜索、多选添加和规则优先级调整"
-        _info "自定义远程规则支持 yaml/text/mrs；mrs 仅支持 domain/ipcidr"
-        _separator
-        _menu_pair "1" "查看当前分流" "含优先级" "green" "2" "搜索 iOS 规则" "模糊搜索/多选" "green"
-        _menu_pair "3" "分流 Google" "远程规则" "green" "4" "分流 Netflix" "远程规则" "green"
-        _menu_pair "5" "分流指定端口" "DST-PORT" "green" "6" "自定义远程规则" "支持 mrs" "green"
-        _menu_pair "7" "调整规则优先级" "上移/置顶" "green" "8" "删除分流规则" "" "yellow"
-        _menu_pair "9" "本地解析直发分流" "DNS 预解析" "green" "10" "Gemini/Google IPv4 定向" "解决 Gemini 地区限制" "green"
-        _menu_item "0" "返回上级菜单" "" "red"
-        _separator
-
         local ch
-        read -rp "  选择 [0-10]: " ch
+        if [[ -n "$direct_choice" ]]; then
+            ch="$direct_choice"
+        else
+            _header "Mihomo 出站分流规则"
+            _info "配置文件: ${config_file}"
+            _info "预置规则来源: blackmatrix7/ios_rule_script (Clash classical yaml)"
+            _info "支持 iOS rule 模糊搜索、多选添加和规则优先级调整"
+            _info "自定义远程规则支持 yaml/text/mrs；mrs 仅支持 domain/ipcidr"
+            _separator
+            _menu_pair "1" "查看当前分流" "含优先级" "green" "2" "搜索 iOS 规则" "模糊搜索/多选" "green"
+            _menu_pair "3" "分流 Google" "远程规则" "green" "4" "分流 Netflix" "远程规则" "green"
+            _menu_pair "5" "分流指定端口" "DST-PORT" "green" "6" "自定义远程规则" "支持 mrs" "green"
+            _menu_pair "7" "调整规则优先级" "上移/置顶" "green" "8" "删除分流规则" "" "yellow"
+            _menu_pair "9" "本地解析直发分流" "DNS 预解析" "green" "10" "Gemini/Google IPv4 定向" "解决 Gemini 地区限制" "green"
+            _menu_item "0" "返回上级菜单" "" "red"
+            _separator
+            read -rp "  选择 [0-10]: " ch
+        fi
         case "$ch" in
             1)
                 printf "  ${BOLD}服务/端口分流:${PLAIN}\n"
@@ -16849,6 +16884,139 @@ _mihomo_outbound_rule_manage() {
             10)
                 _mihomo_ipv4_google_manage
                 ;;
+            0) return ;;
+            *)
+                _error_no_exit "无效选项"
+                sleep 1
+                ;;
+        esac
+        if [[ -n "$direct_choice" ]]; then
+            return 0
+        fi
+    done
+}
+
+_mihomo_outbound_and_rule_manage() {
+    local config_file="$_MIHOMOCONF_CONFIG_FILE"
+    if [[ ! -f "$config_file" ]]; then
+        _error_no_exit "未找到配置文件: ${config_file}"
+        _info "请先在 Mihomo 菜单中生成基础配置"
+        _press_any_key
+        return
+    fi
+
+    while true; do
+        _header "Mihomo 出站与分流管理"
+        _info "配置文件: ${config_file}"
+        _info "实时生效: 保存后将自动写入并重启 mihomo"
+        _separator
+        
+        _menu_pair "1" "查看当前拓扑与分流" "" "green" "2" "添加出口节点" "" "green"
+        _menu_pair "3" "注册 Warp 出口" "" "green" "4" "绑定入站节点 -> 出口" "" "green"
+        _menu_pair "5" "绑定入站用户 -> 出口" "" "green" "6" "绑定系统用户 (SSH) -> 出口" "" "green"
+        _menu_pair "7" "新增入站用户 (Mihomo)" "" "green" "8" "删除出口节点" "" "green"
+        _menu_pair "9" "删除绑定规则" "" "green" "" "" "" ""
+        _separator
+        _menu_pair "10" "搜索与添加 iOS 规则" "模糊搜索/多选" "green" "11" "快捷分流 (Google / Netflix)" "" "green"
+        _menu_pair "12" "分流指定端口" "DST-PORT" "green" "13" "自定义远程规则" "支持 mrs" "green"
+        _menu_pair "14" "调整分流规则优先级" "上移/置顶" "green" "15" "删除分流规则" "" "yellow"
+        _menu_pair "16" "本地解析直发分流" "DNS 预解析" "green" "17" "Gemini/Google IPv4 定向" "" "green"
+        _menu_item "0" "返回上级菜单" "" "red"
+        _separator
+
+        local ch
+        read -rp "  选择 [0-17]: " ch
+        ch=$(_mihomoconf_trim "${ch:-}")
+        case "$ch" in
+            1)
+                _header "当前出站拓扑"
+                _mihomochain_show_topology "$config_file"
+                printf "\n  ${BOLD}分流规则列表:${PLAIN}\n"
+                _separator
+                _mihomorule_list_policy_rules "$config_file"
+                _press_any_key
+                ;;
+            2) _mihomo_chain_proxy_manage "2" ;;
+            3) _mihomo_chain_proxy_manage "3" ;;
+            4) _mihomo_chain_proxy_manage "4" ;;
+            5) _mihomo_chain_proxy_manage "5" ;;
+            6)
+                local -a sys_users=()
+                local _sys_u
+                while read -r _sys_u; do
+                    [[ -n "$_sys_u" ]] && sys_users+=("$_sys_u")
+                done < <(_ssh_proxy_get_users)
+                
+                if (( ${#sys_users[@]} == 0 )); then
+                    _warn "系统中暂无属于 sshproxy 组的系统用户，请先在 SSH 代理管理中新增入站用户。"
+                    _press_any_key
+                    continue
+                fi
+
+                printf "  ${BOLD}选择需要绑定的系统用户:${PLAIN}\n"
+                _separator
+                local idx=0 sys_user_pick selected_user out_name out_show
+                for _sys_u in "${sys_users[@]}"; do
+                    idx=$((idx + 1))
+                    printf "      [%d] %s\n" "$idx" "$_sys_u"
+                done
+                _separator
+                read -rp "  选择系统用户 [序号]: " sys_user_pick
+                sys_user_pick=$(_mihomoconf_trim "${sys_user_pick:-}")
+                if [[ -z "$sys_user_pick" || ! "$sys_user_pick" =~ ^[0-9]+$ ]]; then
+                    _error_no_exit "选择无效"
+                    _press_any_key
+                    continue
+                fi
+                local pick_idx=$((10#$sys_user_pick))
+                if (( pick_idx < 1 || pick_idx > idx )); then
+                    _error_no_exit "序号超出范围"
+                    _press_any_key
+                    continue
+                fi
+                selected_user="${sys_users[$((pick_idx - 1))]}"
+
+                if ! _mihomorule_pick_outbound "$config_file" out_name out_show; then
+                    _press_any_key
+                    continue
+                fi
+
+                if ! _mihomochain_add_or_update_sys_user_rule "$selected_user" "$out_name"; then
+                    _error_no_exit "绑定系统用户失败"
+                    _press_any_key
+                    continue
+                fi
+
+                _success "成功将系统用户 [${selected_user}] 绑定至出口 [${out_show}]"
+                if ! _mihomochain_apply_and_restart; then
+                    _warn "自动应用或重启失败，请检查日志后重试"
+                fi
+                _press_any_key
+                ;;
+            7) _mihomo_chain_proxy_manage "8" ;;
+            8) _mihomo_chain_proxy_manage "6" ;;
+            9) _mihomo_chain_proxy_manage "7" ;;
+            10) _mihomo_outbound_rule_manage "2" ;;
+            11)
+                printf "  ${BOLD}选择快捷分流服务:${PLAIN}\n"
+                _separator
+                _menu_item "1" "分流 Google" "" "green"
+                _menu_item "2" "分流 Netflix" "" "green"
+                _separator
+                local quick_ch
+                read -rp "  选择 [1-2]: " quick_ch
+                case "$quick_ch" in
+                    1) _mihomo_outbound_rule_manage "3" ;;
+                    2) _mihomo_outbound_rule_manage "4" ;;
+                    *) _error_no_exit "无效选项" ;;
+                esac
+                ;;
+            12) _mihomo_outbound_rule_manage "5" ;;
+            13) _mihomo_outbound_rule_manage "6" ;;
+            14) _mihomo_outbound_rule_manage "7" ;;
+            15) _mihomo_outbound_rule_manage "8" ;;
+            16) _mihomo_outbound_rule_manage "9" ;;
+            17) _mihomo_outbound_rule_manage "10" ;;
             0) return ;;
             *)
                 _error_no_exit "无效选项"
@@ -17080,6 +17248,9 @@ _mihomochain_rule_split_parts() {
             if (line ~ /^IN-USER,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "%s\037%s\n", a[2], a[3] >> uf
+            } else if (line ~ /^USER,[^,]+,[^,]+$/) {
+                split(line, a, ",")
+                printf "SYS:%s\037%s\n", a[2], a[3] >> uf
             } else if (line ~ /^IN-NAME,[^,]+,[^,]+$/) {
                 split(line, a, ",")
                 printf "%s\037%s\n", a[2], a[3] >> nf
@@ -17114,7 +17285,11 @@ _mihomochain_rule_write_parts() {
         done < "$other_file"
         while IFS=$'\x1f' read -r user out; do
             [[ -z "${user:-}" || -z "${out:-}" ]] && continue
-            printf "  - IN-USER,%s,%s\n" "$user" "$out"
+            if [[ "$user" == SYS:* ]]; then
+                printf "  - USER,%s,%s\n" "${user#SYS:}" "$out"
+            else
+                printf "  - IN-USER,%s,%s\n" "$user" "$out"
+            fi
         done < "$user_file"
         while IFS=$'\x1f' read -r in_name out; do
             [[ -z "${in_name:-}" || -z "${out:-}" ]] && continue
@@ -17154,8 +17329,7 @@ _mihomochain_apply_and_restart() {
 }
 
 _mihomo_chain_proxy_manage() {
-    _header "出口管理（支持链式）"
-
+    local direct_choice="${1:-}"
     local config_file="$_MIHOMOCONF_CONFIG_FILE"
 
     if [[ ! -f "$config_file" ]]; then
@@ -17166,19 +17340,22 @@ _mihomo_chain_proxy_manage() {
     fi
 
     while true; do
-        _header "出口管理（支持链式）"
-        _info "配置文件: ${config_file}"
-        _info "实时生效: 保存后将自动写入并重启 mihomo"
-        _separator
-        _menu_pair "1" "查看当前规则" "" "green" "2" "添加出口节点" "" "green"
-        _menu_pair "3" "注册 Warp 出口" "" "green" "4" "绑定入站节点 -> 出口节点" "" "green"
-        _menu_pair "5" "绑定入站用户 -> 出口节点" "" "green" "6" "删除出口节点" "" "green"
-        _menu_pair "7" "删除绑定规则" "" "green" "8" "新增入站用户" "" "green"
-        _menu_item "0" "返回上级菜单" "" "red"
-        _separator
-
         local ch
-        read -rp "  选择 [0-8]: " ch
+        if [[ -n "$direct_choice" ]]; then
+            ch="$direct_choice"
+        else
+            _header "出口管理（支持链式）"
+            _info "配置文件: ${config_file}"
+            _info "实时生效: 保存后将自动写入并重启 mihomo"
+            _separator
+            _menu_pair "1" "查看当前规则" "" "green" "2" "添加出口节点" "" "green"
+            _menu_pair "3" "注册 Warp 出口" "" "green" "4" "绑定入站节点 -> 出口节点" "" "green"
+            _menu_pair "5" "绑定入站用户 -> 出口节点" "" "green" "6" "删除出口节点" "" "green"
+            _menu_pair "7" "删除绑定规则" "" "green" "8" "新增入站用户" "" "green"
+            _menu_item "0" "返回上级菜单" "" "red"
+            _separator
+            read -rp "  选择 [0-8]: " ch
+        fi
         case "$ch" in
             1)
                 printf "  ${BOLD}当前规则:${PLAIN}\n"
@@ -18786,6 +18963,10 @@ EOF
                             in_user="$rule_left"
                             in_name=$(_mihomochain_listener_name_by_user "$config_file" "$in_user")
                             ;;
+                        RULE_SYS_USER)
+                            in_user="$rule_left"
+                            in_name="[Linux系统用户]"
+                            ;;
                         *)
                             continue
                             ;;
@@ -18798,6 +18979,8 @@ EOF
                     rule_idx=$((rule_idx + 1))
                     if [[ "$kind" == "RULE_USER" ]]; then
                         printf "      [%d] %s [user=%s]  ${DIM}-->${PLAIN}  %s\n" "$rule_idx" "$in_name" "$in_user" "$out_show_name"
+                    elif [[ "$kind" == "RULE_SYS_USER" ]]; then
+                        printf "      [%d] %s: %s  ${DIM}-->${PLAIN}  %s\n" "$rule_idx" "$in_name" "$in_user" "$out_show_name"
                     else
                         printf "      [%d] %s  ${DIM}-->${PLAIN}  %s\n" "$rule_idx" "$in_name" "$out_show_name"
                     fi
@@ -18838,6 +19021,13 @@ EOF
                         continue
                     fi
                     _info "规则已删除: ${rm_listener_name}[user=${rm_user}] -> *"
+                elif [[ "$rm_kind" == "RULE_SYS_USER" ]]; then
+                    if ! _mihomochain_remove_user_rule "$rm_key" "SYS:$rm_user"; then
+                        _error_no_exit "删除规则失败: [Linux系统用户:${rm_user}]"
+                        _press_any_key
+                        continue
+                    fi
+                    _info "规则已删除: [Linux系统用户:${rm_user}] -> *"
                 else
                     if ! _mihomochain_remove_rule "$rm_key"; then
                         _error_no_exit "删除规则失败: ${rm_listener_name}"
@@ -19092,6 +19282,9 @@ EOF
                 sleep 1
                 ;;
         esac
+        if [[ -n "$direct_choice" ]]; then
+            return 0
+        fi
     done
 }
 
@@ -19880,9 +20073,9 @@ _mihomo_manage_screen() {
     _menu_pair "1" "安装/更新 Mihomo" "" "green" "2" "生成配置" "Shadowsocks / AnyTLS / HY2" "green"
     _menu_pair "3" "配置自启并启动" "" "green" "4" "重启 Mihomo" "" "green"
     _menu_pair "5" "查看日志" "" "green" "6" "读取配置并生成节点" "支持仅输出链接" "green"
-    _menu_pair "7" "出口管理" "支持链式代理" "green" "8" "出站分流规则" "检索规则/优先级" "green"
-    _menu_pair "9" "DNS 设置" "支持 DoH/DoT/DoQ/UDP" "green" "10" "定时自动更新" "检查新版本" "green"
-    _menu_pair "11" "卸载 Mihomo" "停止并清理" "yellow" "0" "返回主菜单" "" "red"
+    _menu_pair "7" "出站与分流管理" "出口/分流规则/优先级" "green" "8" "DNS 设置" "支持 DoH/DoT/DoQ/UDP" "green"
+    _menu_pair "9" "定时自动更新" "检查新版本" "green" "10" "卸载 Mihomo" "停止并清理" "yellow"
+    _menu_item "0" "返回主菜单" "" "red"
     _separator
 }
 
@@ -19891,7 +20084,7 @@ _mihomo_manage() {
         _ui_print_screen _mihomo_manage_screen
 
         local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-11]: " choice
+        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-10]: " choice
         case "$choice" in
             1) _mihomo_setup ;;
             2) _mihomoconf_setup ;;
@@ -19899,11 +20092,10 @@ _mihomo_manage() {
             4) _mihomo_restart ;;
             5) _mihomo_log ;;
             6) _mihomo_read_config ;;
-            7) _mihomo_chain_proxy_manage ;;
-            8) _mihomo_outbound_rule_manage ;;
-            9) _mihomo_dns_manage ;;
-            10) _mihomo_auto_update_manage ;;
-            11) _mihomo_uninstall ;;
+            7) _mihomo_outbound_and_rule_manage ;;
+            8) _mihomo_dns_manage ;;
+            9) _mihomo_auto_update_manage ;;
+            10) _mihomo_uninstall ;;
             0) return ;;
             *) _error_no_exit "无效选项"; sleep 1 ;;
         esac
@@ -31315,23 +31507,20 @@ _ssh_proxy_user_manage() {
                     continue
                 fi
 
-                # Check or update redir-port in config.yaml
+                # Setup local-only redir-port listener to prevent unencrypted proxy exposure
                 local redir_port
-                redir_port=$(_mihomoconf_get_port_val "redir-port")
+                redir_port=$(awk -F'\x1f' '$1 == "redir" && $2 == "ssh-redir" { print $3; exit }' < <(_mihomoconf_read_listener_rows "$config_file"))
+                if [[ -z "$redir_port" ]]; then
+                    redir_port=$(_mihomoconf_get_port_val "redir-port")
+                fi
                 if [[ -z "$redir_port" ]]; then
                     redir_port="7892"
-                    _info "未检测到 redir-port，正在自动写入: ${redir_port}"
-                    local tmp_yaml
-                    tmp_yaml=$(mktemp) || {
-                        _error_no_exit "创建临时文件失败"
-                        _press_any_key
-                        continue
-                    }
-                    echo "redir-port: ${redir_port}" > "$tmp_yaml"
-                    cat "$config_file" >> "$tmp_yaml"
-                    mv "$tmp_yaml" "$config_file"
-                else
-                    _info "检测到已配置的 redir-port: ${redir_port}"
+                fi
+                _info "正在配置环回 (127.0.0.1) 的 redir 监听器 (端口: ${redir_port})..."
+                if ! _mihomoconf_setup_ssh_redir_listener "$config_file" "$redir_port"; then
+                    _error_no_exit "配置 ssh-redir 监听器失败"
+                    _press_any_key
+                    continue
                 fi
 
                 # Enable sniffer to ensure domain name resolution/routing rules works
@@ -31401,10 +31590,145 @@ _onepanel_iptables_ref_text() {
     printf '%s' "$first_line" | awk -F'[()]' '{print $2}'
 }
 
+_mihomoconf_setup_ssh_redir_listener() {
+    local config_file="$1"
+    local port="${2:-7892}"
+    local tmp_file
+    tmp_file=$(mktemp) || return 1
+
+    awk -v target_port="$port" '
+        BEGIN {
+            in_listeners = 0
+            in_item = 0
+            item_buf = ""
+            has_listeners = 0
+        }
+        /^redir-port:/ { next }
+        /^listeners:[[:space:]]*$/ {
+            in_listeners = 1
+            has_listeners = 1
+            print $0
+            next
+        }
+        in_listeners {
+            if (/^[a-zA-Z]/) {
+                if (in_item) {
+                    flush_item()
+                }
+                in_listeners = 0
+            } else {
+                if (/^[[:space:]]*-/) {
+                    if (in_item) {
+                        flush_item()
+                    }
+                    in_item = 1
+                    item_buf = $0 "\n"
+                    next
+                } else if (in_item) {
+                    item_buf = item_buf $0 "\n"
+                    next
+                }
+            }
+        }
+        {
+            if (in_item) {
+                flush_item()
+            }
+            print $0
+        }
+        function trim(s) {
+            sub(/^[[:space:]]+/, "", s)
+            sub(/[[:space:]]+$/, "", s)
+            return s
+        }
+        function flush_item() {
+            if (!in_item) return
+            n = ""
+            t = ""
+            p = ""
+            num_lines = split(item_buf, lines, "\n")
+            for (i=1; i<=num_lines; i++) {
+                line = lines[i]
+                if (line ~ /^[[:space:]]*-[[:space:]]*name:/) {
+                    sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line)
+                    n = trim(line)
+                    gsub(/^"/, "", n); gsub(/"$/, "", n)
+                    gsub(/^'\''/, "", n); gsub(/'\''$/, "", n)
+                } else if (line ~ /^[[:space:]]*type:/) {
+                    sub(/^[[:space:]]*type:[[:space:]]*/, "", line)
+                    t = trim(line)
+                    gsub(/^"/, "", t); gsub(/"$/, "", t)
+                } else if (line ~ /^[[:space:]]*port:/) {
+                    sub(/^[[:space:]]*port:[[:space:]]*/, "", line)
+                    p = trim(line)
+                }
+            }
+            if (n == "ssh-redir" || (t == "redir" && p == target_port)) {
+                # Skip
+            } else {
+                printf "%s", item_buf
+            }
+            item_buf = ""
+            in_item = 0
+        }
+        END {
+            if (in_item) {
+                flush_item()
+            }
+        }
+    ' "$config_file" > "$tmp_file"
+
+    if ! grep -q "^listeners:" "$tmp_file"; then
+        echo "" >> "$tmp_file"
+        echo "listeners:" >> "$tmp_file"
+    fi
+
+    local final_file
+    final_file=$(mktemp) || { rm -f "$tmp_file"; return 1; }
+    awk -v port="$port" '
+        /^listeners:[[:space:]]*$/ {
+            print $0
+            print "  - name: ssh-redir"
+            print "    type: redir"
+            print "    port: " port
+            print "    bind-address: 127.0.0.1"
+            next
+        }
+        { print }
+    ' "$tmp_file" > "$final_file"
+
+    mv "$final_file" "$config_file"
+    rm -f "$tmp_file"
+    return 0
+}
+
 _onepanel_save_iptables_if_possible() {
     if ! command -v iptables-save >/dev/null 2>&1; then
         _warn "未检测到 iptables-save，已跳过持久化保存。"
         return 1
+    fi
+
+    if [ ! -d /etc/iptables ] && ! command -v netfilter-persistent >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            _info "正在自动安装 iptables-persistent 以便持久化保存规则..."
+            export DEBIAN_FRONTEND=noninteractive
+            echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
+            echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
+            if apt-get update -qy && apt-get install -qy iptables-persistent; then
+                _success "iptables-persistent 安装成功。"
+            else
+                _warn "自动安装 iptables-persistent 失败，请尝试手动安装。"
+            fi
+        elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+            _info "正在自动安装 iptables-services 以便持久化保存规则..."
+            local pkg_mgr="yum"
+            command -v dnf >/dev/null 2>&1 && pkg_mgr="dnf"
+            if $pkg_mgr install -y iptables-services && systemctl enable --now iptables; then
+                _success "iptables-services 安装并启用成功。"
+            else
+                _warn "自动安装 iptables-services 失败，请尝试手动安装。"
+            fi
+        fi
     fi
 
     if command -v netfilter-persistent >/dev/null 2>&1; then
@@ -31425,8 +31749,17 @@ _onepanel_save_iptables_if_possible() {
         return 1
     fi
 
-    _warn "未检测到 /etc/iptables 目录，当前规则已运行时生效但重启后可能丢失。"
-    _info "Debian/Ubuntu 可执行: apt install iptables-persistent -y && netfilter-persistent save"
+    if [ -d /etc/sysconfig ]; then
+        if iptables-save > /etc/sysconfig/iptables; then
+            chmod 0600 /etc/sysconfig/iptables 2>/dev/null || true
+            _success "已保存到 /etc/sysconfig/iptables。"
+            return 0
+        fi
+        _warn "写入 /etc/sysconfig/iptables 失败。"
+        return 1
+    fi
+
+    _warn "未检测到 /etc/iptables 或 /etc/sysconfig 目录，当前规则已运行时生效但重启后可能丢失。"
     return 1
 }
 
