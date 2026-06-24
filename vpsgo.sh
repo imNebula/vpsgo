@@ -38,7 +38,7 @@ fi
 
 set -uo pipefail
 
-VERSION="5.4"
+VERSION="5.5"
 # --- 全局变量 ---
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_PATH="${VPSGO_INSTALL_PATH:-/usr/local/bin/vpsgo}"
@@ -30574,6 +30574,195 @@ EOF
     return 0
 }
 
+_ssh_proxy_export_config() {
+    _header "导出/显示受限代理用户配置"
+
+    local -a proxy_users=()
+    local u
+    while read -r u; do
+        [[ -z "$u" ]] && continue
+        local exists=0 x
+        for x in "${proxy_users[@]:-}"; do
+            [[ "$x" == "$u" ]] && exists=1 && break
+        done
+        [[ "$exists" -eq 1 ]] || proxy_users+=("$u")
+    done < <(_ssh_proxy_get_users)
+
+    if [ "${#proxy_users[@]}" -eq 0 ]; then
+        _warn "当前没有可导出的 SSH 代理用户。"
+        _press_any_key
+        return
+    fi
+
+    _info "可用的受限代理用户列表:"
+    local i=0
+    for u in "${proxy_users[@]}"; do
+        ((i++))
+        printf "  ${GREEN}[%d]${PLAIN} %s\n" "$i" "$u"
+    done
+    _separator
+
+    local sel_user=""
+    local sel_input
+    read -rp "  请输入要导出的用户名或编号: " sel_input
+    sel_input=$(_mihomoconf_trim "$sel_input")
+    if [[ "$sel_input" =~ ^[0-9]+$ ]] && [ "$sel_input" -ge 1 ] && [ "$sel_input" -le "${#proxy_users[@]}" ]; then
+        sel_user="${proxy_users[$((sel_input - 1))]}"
+    else
+        # check if name exists in list
+        local u
+        for u in "${proxy_users[@]}"; do
+            if [ "$u" = "$sel_input" ]; then
+                sel_user="$u"
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$sel_user" ]; then
+        _error_no_exit "找不到该用户！"
+        _press_any_key
+        return
+    fi
+
+    local host_default host_input client_host
+    host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
+    [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
+
+    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
+    [[ -z "$client_host" ]] && client_host="YOUR_SERVER_IP"
+
+    local ssh_port port_default port_input client_port
+    ssh_port=$(_ssh_current_ports | cut -d',' -f1)
+    [[ -z "$ssh_port" ]] && ssh_port="22"
+    port_default=$(echo "$ssh_port" | tr -d ' ')
+    read -rp "  SSH 端口号 [默认 ${port_default}]: " port_input
+    client_port=$(_mihomoconf_trim "${port_input:-$port_default}")
+    [[ -z "$client_port" ]] && client_port="22"
+
+    local password
+    _info "说明：由于系统密码为哈希存储，无法直接解密提取密码。"
+    read -rp "  请输入密码 (留空则生成包含 <PASSWORD> 占位符的配置): " password
+    password=$(_mihomoconf_trim "$password")
+    [[ -z "$password" ]] && password="<PASSWORD>"
+
+    local node_name node_name_input
+    node_name="SSH-Proxy-${sel_user}"
+    read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
+    node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
+    [[ -z "$node_name" ]] && node_name="SSH-Proxy-${sel_user}"
+
+    local ssh_link
+    if [[ "$password" == "<PASSWORD>" ]]; then
+        ssh_link="ssh://$(_mihomoconf_urlencode "$sel_user")@${client_host}:${client_port}#$(_mihomoconf_urlencode "$node_name")"
+    else
+        ssh_link="ssh://$(_mihomoconf_urlencode "$sel_user"):$(_mihomoconf_urlencode "$password")@${client_host}:${client_port}#$(_mihomoconf_urlencode "$node_name")"
+    fi
+
+    local q_name q_server q_user q_pass
+    q_name=$(_mihomochain_yaml_quote "$node_name")
+    q_server=$(_mihomochain_yaml_quote "$client_host")
+    q_user=$(_mihomochain_yaml_quote "$sel_user")
+    q_pass=$(_mihomochain_yaml_quote "$password")
+
+    _separator
+    printf "  ${BOLD}1. SSH SOCKS5 代理命令行 (本地直接执行):${PLAIN}\n"
+    printf "    ${GREEN}ssh -N -D 1080 -p %s %s@%s${PLAIN}\n" "$client_port" "$sel_user" "$client_host"
+    if [[ "$password" == "<PASSWORD>" ]]; then
+        printf "    (提示: 执行后请输入该用户的实际密码)\n"
+    fi
+
+    _separator
+    printf "  ${BOLD}2. SSH URI 节点链接 (可导入支持的客户端):${PLAIN}\n"
+    printf "    ${GREEN}%s${PLAIN}\n" "$ssh_link"
+
+    _separator
+    printf "  ${BOLD}3. Mihomo (Clash) 节点配置 (YAML 格式):${PLAIN}\n"
+    cat <<EOF
+proxies:
+  - name: "${q_name}"
+    type: ssh
+    server: "${q_server}"
+    port: ${client_port}
+    username: "${q_user}"
+    password: "${q_pass}"
+EOF
+
+    _separator
+    printf "  ${BOLD}4. Sing-Box 节点配置 (JSON 格式):${PLAIN}\n"
+    cat <<EOF
+{
+  "type": "ssh",
+  "tag": "${q_name}",
+  "server": "${q_server}",
+  "server_port": ${client_port},
+  "user": "${q_user}",
+  "password": "${q_pass}"
+}
+EOF
+    _separator
+
+    local safe_host export_dir base_name
+    safe_host=$(printf '%s' "$client_host" | tr -c 'A-Za-z0-9._-' '_')
+    [[ -z "$safe_host" ]] && safe_host="server"
+    export_dir="/root/vpsgo-export"
+    if ! mkdir -p "$export_dir" >/dev/null 2>&1; then
+        export_dir="/tmp/vpsgo-export"
+        mkdir -p "$export_dir" >/dev/null 2>&1 || {
+            _error_no_exit "创建导出目录失败: /root/vpsgo-export 和 /tmp/vpsgo-export"
+            _press_any_key
+            return
+        }
+    fi
+
+    base_name="${safe_host}-${client_port}-${sel_user}"
+    local txt_file mihomo_file singbox_file
+    txt_file="${export_dir}/ssh-${base_name}.txt"
+    mihomo_file="${export_dir}/ssh-${base_name}.mihomo.yaml"
+    singbox_file="${export_dir}/ssh-${base_name}.singbox.json"
+
+    cat > "$txt_file" <<EOF
+# SSH Proxy Node Export
+name=${node_name}
+server=${client_host}
+port=${client_port}
+username=${sel_user}
+password=${password}
+uri=${ssh_link}
+command=ssh -N -D 1080 -p ${client_port} ${sel_user}@${client_host}
+EOF
+
+    cat > "$mihomo_file" <<EOF
+proxies:
+  - name: "${q_name}"
+    type: ssh
+    server: "${q_server}"
+    port: ${client_port}
+    username: "${q_user}"
+    password: "${q_pass}"
+EOF
+
+    cat > "$singbox_file" <<EOF
+{
+  "type": "ssh",
+  "tag": "${q_name}",
+  "server": "${q_server}",
+  "server_port": ${client_port},
+  "user": "${q_user}",
+  "password": "${q_pass}"
+}
+EOF
+
+    echo ""
+    _success "节点配置文件已导出:"
+    printf "    文本参数   : %s\n" "$txt_file"
+    printf "    Mihomo 配置: %s\n" "$mihomo_file"
+    printf "    Sing-Box 配置: %s\n" "$singbox_file"
+    echo ""
+    _press_any_key
+}
+
 _ssh_proxy_user_manage() {
     while true; do
         _header "SSH 代理管理"
@@ -30604,11 +30793,12 @@ _ssh_proxy_user_manage() {
 
         _separator
         _menu_pair "1" "创建受限代理用户" "" "green" "2" "删除代理用户" "" "red"
-        _menu_pair "3" "配置 Mihomo 接管流量" "使用 iptables NAT 转发" "green" "0" "返回" "" "cyan"
+        _menu_pair "3" "配置 Mihomo 接管流量" "使用 iptables NAT 转发" "green" "4" "导出/显示用户配置" "输出 SSH/Mihomo/Sing-Box 格式" "green"
+        _menu_pair "0" "返回" "" "cyan" "" "" "" ""
         _separator
 
         local choice
-        read -rp "  选择 [0-3]: " choice
+        read -rp "  选择 [0-4]: " choice
         choice=$(_mihomoconf_trim "${choice:-}")
 
         case "$choice" in
@@ -30800,6 +30990,9 @@ EOF
                 _success "配置完成！所有属于 sshproxy 组的受限用户的 SSH 代理流量已成功接入 Mihomo。"
                 _info "分流说明: 流量接管后，Mihomo 会自动根据您配置的「分流规则」和「落地出口」进行处理。"
                 _press_any_key
+                ;;
+            4)
+                _ssh_proxy_export_config
                 ;;
             *)
                 _error_no_exit "无效选项: ${choice}"
@@ -34322,7 +34515,7 @@ _proxy_tools_menu_screen() {
     _header "代理工具"
     _menu_pair "1" "Mihomo" "安装/配置/日志" "green" "2" "Snell V5 (Beta)" "配置/导出/日志" "green"
     _menu_pair "3" "Snell V6 (Beta)" "配置/导出/日志" "green" "4" "WireGuard" "部署/客户端/状态" "green"
-    _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "SSH 代理管理" "受限代理用户管理" "green"
+    _menu_pair "5" "Shadowsocks-Rust" "配置/导出/日志" "green" "6" "SSH 代理管理" "配置/导出/用户管理" "green"
     _menu_pair "7" "Realm 转发" "端口转发管理" "green" "8" "ACME 证书" "申请/续期证书" "green"
     _menu_item "9" "加密吞吐量测试" "常见加解密测试" "green"
     _menu_item "0" "返回主菜单" "" "red"
