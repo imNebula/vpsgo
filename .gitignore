@@ -3,3 +3,5 @@
 .claude/
 cache.db
 *.log
+AGENTS.md
+doc/

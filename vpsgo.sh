@@ -722,6 +722,74 @@ _press_any_key() {
     _ui_clear_screen
 }
 
+
+# --- 统一交互 UI 工具集 ---
+# 所有用户交互输入统一走以下函数，保证提示前缀、默认值、确认方式与错误提示完全一致。
+
+_ui_ask() {
+    # 统一文本/选项输入: _ui_ask "提示语" "默认值"
+    # 输出用户输入内容（留空时使用默认值），由调用方自行校验。
+    local prompt="$1" default="${2:-}" answer
+    if [[ -n "$default" ]]; then
+        printf "  ${CYAN}➜${PLAIN} %s [%s]: " "$prompt" "$default" >&2
+    else
+        printf "  ${CYAN}➜${PLAIN} %s: " "$prompt" >&2
+    fi
+    IFS= read -r answer
+    [[ -z "$answer" ]] && answer="$default"
+    printf '%s' "$answer"
+}
+
+_ui_confirm() {
+    # 统一确认输入: _ui_confirm "问题" "默认值(y/n，小写)"
+    # 返回 0=同意，1=拒绝。
+    local prompt="$1" default="${2:-n}" answer opt
+    case "$default" in
+        y|Y|yes|YES) opt="Y/n" ;;
+        *) opt="y/N" ;;
+    esac
+    printf "  ${CYAN}➜${PLAIN} %s [%s]: " "$prompt" "$opt" >&2
+    IFS= read -r answer
+    answer=$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')
+    case "$answer" in
+        "") [[ "$default" =~ ^[yY] ]] && return 0 || return 1 ;;
+        y|yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_ui_step() {
+    # 统一步骤进度: _ui_step "1/5" "步骤说明"
+    local progress="$1" text="${2:-}"
+    if [[ -n "$text" ]]; then
+        printf "  ${CYAN}[%s]${PLAIN} %b\n" "$progress" "$text"
+    else
+        printf "  ${CYAN}[%s]${PLAIN}\n" "$progress"
+    fi
+}
+
+_ui_hint() {
+    # 统一辅助说明（次要提示，不打断主流程）
+    printf "  ${DIM}%b${PLAIN}\n" "$1"
+}
+
+_ui_invalid() {
+    # 统一无效输入提示
+    local input="${1:-}"
+    if [[ -n "$input" ]]; then
+        printf "  ${RED}✘${PLAIN} 输入无效: ${DIM}%s${PLAIN}，请重新选择。\n" "$input"
+    else
+        printf "  ${RED}✘${PLAIN} 输入无效，请重新选择。\n"
+    fi
+}
+
+_ui_note() {
+    # 统一分节说明标题（用于屏内小节）
+    local text="$1"
+    _separator
+    printf "  ${BOLD}%s${PLAIN}\n" "$text"
+}
+
 _network_reboot_prompt() {
     printf "\n"
     printf "  ${YELLOW}⚠${PLAIN} ${BOLD}重启建议:${PLAIN} ${DIM}完成全部网络调优后再重启系统，确保配置完全生效。${PLAIN}\n"
@@ -1006,7 +1074,7 @@ _tail_log_files_interactive() {
 
     echo ""
     _separator
-    read -rp "  实时跟踪日志? [y/N]: " follow
+    if _ui_confirm "实时跟踪日志?" n; then follow=y; else follow=n; fi
     if [[ "$follow" =~ ^[Yy] ]]; then
         echo ""
         _info "按 Ctrl+C 退出实时日志..."
@@ -1349,7 +1417,7 @@ _bbr_get_latest_version() {
     echo ""
 
     local pick
-    read -rp "  选择内核版本 (默认最新 ${kernel_arr[-1]}): " pick
+    pick=$(_ui_ask "请选择 内核版本 (1-${#kernel_arr[@]}, 默认最新)" "${#kernel_arr[@]}")
     if [ -z "$pick" ]; then
         pick=${#kernel_arr[@]}
     fi
@@ -1621,7 +1689,7 @@ _qdisc_setup() {
     _separator
 
     local choice
-    read -rp "  选择 [0-3]: " choice
+    choice=$(_ui_ask "请选择 [0-3]" "")
 
     local qdisc=""
     case "$choice" in
@@ -1629,7 +1697,7 @@ _qdisc_setup() {
         2) qdisc="cake" ;;
         3) qdisc="fq_pie" ;;
         0) return ;;
-        *) _error_no_exit "无效选项: ${choice}"; _press_any_key; return ;;
+        *) _ui_invalid "$choice"; _press_any_key; return ;;
     esac
 
     local kv min_kv
@@ -1782,13 +1850,13 @@ _v4v6_setup() {
     _separator
 
     local choice
-    read -rp "  选择 [0-2]: " choice
+    choice=$(_ui_ask "请选择 [0-2]" "")
 
     case "$choice" in
         1) _v4v6_set_ipv4_first ;;
         2) _v4v6_set_ipv6_first ;;
         0) return ;;
-        *) _error_no_exit "无效选项: ${choice}"; _press_any_key; return ;;
+        *) _ui_invalid "$choice"; _press_any_key; return ;;
     esac
 
     echo ""
@@ -2047,7 +2115,7 @@ _warp_configure_cli_interactive() {
     # 3. Port settings
     local proxy_port
     while true; do
-        read -rp "  请输入 Socks5 代理端口 (1024-65535, 默认 30000): " proxy_port
+        proxy_port=$(_ui_ask "请输入 Socks5 代理端口 (1024-65535, 默认 30000)" "")
         proxy_port="${proxy_port:-30000}"
         if _is_digit "$proxy_port" && [ "$proxy_port" -ge 1024 ] && [ "$proxy_port" -le 65535 ]; then
             break
@@ -2064,7 +2132,7 @@ _warp_configure_cli_interactive() {
 
     # 4. MASQUE protocol choice
     local use_masque
-    read -rp "  是否使用 MASQUE 协议连接? [Y/n] (默认 Y): " use_masque
+    if _ui_confirm "是否使用 MASQUE 协议连接?" y; then use_masque=y; else use_masque=n; fi
     use_masque="${use_masque:-y}"
     if [[ "$use_masque" =~ ^[Yy] ]]; then
         _info "设置 WARP 传输协议为 MASQUE..."
@@ -2098,7 +2166,7 @@ _warp_configure_cli_interactive() {
 
     # 7. Optionally check IP quality
     local check_ip_quality
-    read -rp "  是否使用 IP.Check.Place 测试 WARP IP 质量? [y/N] (默认 N): " check_ip_quality
+    if _ui_confirm "是否使用 IP.Check.Place 测试 WARP IP 质量?" n; then check_ip_quality=y; else check_ip_quality=n; fi
     if [[ "$check_ip_quality" =~ ^[Yy] ]]; then
         _info "正在测试 IP 质量..."
         bash <(curl -Ls IP.Check.Place) -x socks5://127.0.0.1:"$proxy_port"
@@ -2173,7 +2241,7 @@ _warp_cli_manage_screen() {
 _warp_cli_manage() {
     if ! command -v warp-cli >/dev/null 2>&1; then
         local confirm_install
-        read -rp "  未检测到 warp-cli，是否开始安装? [Y/n]: " confirm_install
+        if _ui_confirm "未检测到 warp-cli，是否开始安装?" y; then confirm_install=y; else confirm_install=n; fi
         confirm_install="${confirm_install:-y}"
         if [[ "$confirm_install" =~ ^[Yy] ]]; then
             if _warp_install_cli_packages; then
@@ -2186,7 +2254,7 @@ _warp_cli_manage() {
     while true; do
         _ui_print_screen _warp_cli_manage_screen
         local ch
-        read -rp "  选择 [0-9]: " ch
+        ch=$(_ui_ask "请选择 [0-9]" "")
         case "$ch" in
             1)
                 _info "正在连接 WARP..."
@@ -2210,7 +2278,7 @@ _warp_cli_manage() {
             4)
                 local proxy_port
                 while true; do
-                    read -rp "  请输入新的 Socks5 代理端口 (1024-65535, 默认 30000): " proxy_port
+                    proxy_port=$(_ui_ask "请输入新的 Socks5 代理端口 (1024-65535, 默认 30000)" "")
                     proxy_port="${proxy_port:-30000}"
                     if _is_digit "$proxy_port" && [ "$proxy_port" -ge 1024 ] && [ "$proxy_port" -le 65535 ]; then
                         break
@@ -2257,7 +2325,7 @@ _warp_cli_manage() {
                 ;;
             8)
                 local confirm_uninstall
-                read -rp "  确定要卸载 warp-cli 吗? [y/N]: " confirm_uninstall
+                if _ui_confirm "确定要卸载 warp-cli 吗?" n; then confirm_uninstall=y; else confirm_uninstall=n; fi
                 if [[ "$confirm_uninstall" =~ ^[Yy] ]]; then
                     _warp_uninstall_cli_packages
                 fi
@@ -2267,7 +2335,7 @@ _warp_cli_manage() {
                 _warp_cli_log
                 ;;
             0) return ;;
-            * ) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            * ) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -2283,7 +2351,7 @@ _warp_cli_log() {
         echo ""
         _separator
         local follow
-        read -rp "  实时跟踪日志? [y/N]: " follow
+        if _ui_confirm "实时跟踪日志?" n; then follow=y; else follow=n; fi
         if [[ "$follow" =~ ^[Yy] ]]; then
             journalctl -u warp-svc -f
         fi
@@ -2298,7 +2366,7 @@ _warp_cli_log() {
                 echo ""
                 _separator
                 local follow
-                read -rp "  实时跟踪日志? [y/N]: " follow
+                if _ui_confirm "实时跟踪日志?" n; then follow=y; else follow=n; fi
                 if [[ "$follow" =~ ^[Yy] ]]; then
                     tail -f "$log_file" | grep -i "warp-svc"
                 fi
@@ -2347,7 +2415,7 @@ _warp_run_upstream_script() {
     fi
 
     local confirm tmp_file
-    read -rp "  继续? [y/N]: " confirm
+    if _ui_confirm "继续?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -2493,7 +2561,7 @@ _warp_prompt_netflix_ip_version() {
     _separator
     _menu_pair "1" "刷 WARP IPv4" "" "green" "2" "刷 WARP IPv6" "默认" "green"
     _separator
-    read -rp "  选择 [1-2]（默认 2）: " choice
+    choice=$(_ui_ask "请选择 [1-2]" "2")
     choice="${choice:-2}"
     case "$choice" in
         1|2) _WARP_NETFLIX_IP_CHOICE="$choice" ;;
@@ -2503,7 +2571,7 @@ _warp_prompt_netflix_ip_version() {
 
 _warp_prompt_netflix_region() {
     local region
-    read -rp "  Netflix 目标地区 [默认当前地区，示例 hk/sg/jp/us]: " region
+    region=$(_ui_ask "Netflix 目标地区 (留空=当前地区，示例 hk/sg/jp/us)" "")
     region=$(printf '%s' "${region:-}" | tr '[:upper:]' '[:lower:]')
     if [[ -n "$region" && ! "$region" =~ ^[a-z]{2}$ ]]; then
         _warn "地区格式无效，将使用当前地区。"
@@ -2816,7 +2884,7 @@ _warp_configure_refresh_cron() {
     _separator
 
     local mode_choice mode ip_choice="" region="" time_hhmm hour minute max_minutes="120"
-    read -rp "  选择 [1-2]: " mode_choice
+    mode_choice=$(_ui_ask "请选择 [1-2]" "")
     case "$mode_choice" in
         1) mode="network" ;;
         2)
@@ -2830,7 +2898,7 @@ _warp_configure_refresh_cron() {
             _warp_prompt_netflix_region
             ip_choice="$_WARP_NETFLIX_IP_CHOICE"
             region="$_WARP_NETFLIX_REGION"
-            read -rp "  单次最多运行分钟数 [默认 120，0 表示不限制]: " max_minutes
+            max_minutes=$(_ui_ask "单次最多运行分钟数 (0 表示不限制)" "120")
             max_minutes="${max_minutes:-120}"
             if ! _is_digit "$max_minutes"; then
                 _warn "运行时长格式无效，使用默认 120 分钟。"
@@ -2838,7 +2906,7 @@ _warp_configure_refresh_cron() {
             fi
             ;;
         *)
-            _error_no_exit "无效选项: ${mode_choice}"
+            _ui_invalid "$mode_choice"
             _press_any_key
             return
             ;;
@@ -2846,7 +2914,7 @@ _warp_configure_refresh_cron() {
 
     echo ""
     _info "输入北京时间，格式 HH:MM，例如 03:30。"
-    read -rp "  每天执行时间 [HH:MM]: " time_hhmm
+    time_hhmm=$(_ui_ask "每天执行时间 [HH:MM]" "")
     if ! _warp_valid_hhmm "$time_hhmm"; then
         _error_no_exit "时间格式无效，请使用 HH:MM，例如 03:30。"
         _press_any_key
@@ -2906,7 +2974,7 @@ _warp_remove_refresh_cron() {
     fi
 
     local confirm
-    read -rp "  确认删除 WARP 定时刷新? [y/N]: " confirm
+    if _ui_confirm "确认删除 WARP 定时刷新?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -2936,7 +3004,7 @@ _warp_manage() {
     while true; do
         _ui_print_screen _warp_manage_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
+        ch=$(_ui_ask "请选择 [0-8]" "")
         case "$ch" in
             1) _warp_install_cli ;;
             2) _warp_run_upstream_script "warp-sh" ;;
@@ -2947,7 +3015,7 @@ _warp_manage() {
             7) _warp_show_refresh_cron ;;
             8) _warp_remove_refresh_cron ;;
             0) return ;;
-            * ) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            * ) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -3057,7 +3125,7 @@ _tcptune_calc_bdp_bytes() {
 _tcptune_prompt_positive_int() {
     local prompt="$1" default="$2" input
     while true; do
-        read -rp "  ${prompt} [默认 ${default}]: " input
+        input=$(_ui_ask "${prompt}" "${default}")
         input="${input:-$default}"
         if _is_digit "$input" && [ "$input" -gt 0 ]; then
             printf '%s' "$input"
@@ -3070,7 +3138,7 @@ _tcptune_prompt_positive_int() {
 _tcptune_prompt_required_positive_int() {
     local prompt="$1" input
     while true; do
-        read -rp "  ${prompt}: " input
+        input=$(_ui_ask "${prompt}" "")
         if _is_digit "$input" && [ "$input" -gt 0 ]; then
             printf '%s' "$input"
             return
@@ -3115,7 +3183,7 @@ _tcptune_choose_ceiling() {
     _menu_item "4" "64 MiB" "经验档位: 高 RTT / 跨区" "green"
     _menu_item "5" "128 MiB" "经验档位: 高带宽或高并发" "green"
     _separator
-    read -rp "  选择 [1-5]（默认 4）: " choice
+    choice=$(_ui_ask "请选择 [1-5]" "4")
     choice="${choice:-4}"
 
     case "$choice" in
@@ -3635,7 +3703,7 @@ _tcptune_resolve_conflicts_before_apply() {
     _menu_item "2" "保留冲突继续" "当前可生效，重启后可能漂移" "yellow"
     _menu_item "0" "取消本次应用" "" "red"
     _separator
-    read -rp "  选择 [0-2]: " choice
+    choice=$(_ui_ask "请选择 [0-2]" "")
 
     case "$choice" in
         1|"")
@@ -4002,7 +4070,7 @@ _tcptune_select_backup() {
     [ "${#backups[@]}" -gt 0 ] || return 1
     _tcptune_show_backups || return 1
     echo ""
-    read -rp "  选择备份编号 [1-${#backups[@]}，0 返回]: " choice
+    choice=$(_ui_ask "请选择 备份编号 [1-${#backups[@]}，0 返回]" "")
     if [ "${choice:-0}" = "0" ]; then
         return 1
     fi
@@ -4063,7 +4131,7 @@ _tcptune_restore_backup() {
     fi
     echo ""
     _warn "将恢复 TCP 调优修改过的配置文件、sysctl 参数，以及 qdisc 持久化状态。"
-    read -rp "  确认恢复该备份? [y/N]: " confirm
+    if _ui_confirm "确认恢复该备份?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         _info "已取消。"
         return 1
@@ -4125,7 +4193,7 @@ _tcptune_run_v2() {
     _tcptune_show_current
     echo ""
     _warn "将写入 TCP 调优配置并立即应用。"
-    read -rp "  继续? [Y/n]: " confirm
+    if _ui_confirm "继续?" y; then confirm=y; else confirm=n; fi
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         _info "已取消。"
         _press_any_key
@@ -4133,10 +4201,10 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "步骤 1/8: 采集系统信息"
+    _ui_step "1/8" "采集系统信息"
     iface="$(_tcptune_guess_iface)"
     if [ -z "$iface" ]; then
-        read -rp "  无法自动识别出口网卡，请手动输入 (如 eth0): " iface
+        iface=$(_ui_ask "无法自动识别出口网卡，请手动输入 (如 eth0)" "")
     fi
     if [ -z "$iface" ]; then
         _error_no_exit "未提供网卡，无法继续。"
@@ -4180,20 +4248,20 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "步骤 2/8: 计算 TCP 缓冲区"
+    _ui_step "2/8" "计算 TCP 缓冲区"
     _tcptune_choose_ceiling "$link_speed"
 
     echo ""
     if [ "$_TCPTUNE_LAST_QDISC_MODE" = "cake" ]; then
-        _info "步骤 3/8: 设置 CAKE 带宽"
+        _ui_step "3/8" "设置 CAKE 带宽"
         _tcptune_choose_cake_bandwidth "$link_speed"
     else
-        _info "步骤 3/8: FQ 无需设置带宽"
+        _ui_step "3/8" "FQ 无需设置带宽"
         _TCPTUNE_LAST_CAKE_BW_MBIT=0
     fi
 
     echo ""
-    _info "步骤 4/8: 检查 BBR"
+    _ui_step "4/8" "检查 BBR"
     if ! _tcptune_ensure_bbr_available; then
         _error_no_exit "当前内核未检测到 BBR。请先执行“开启 BBR”模块。"
         _press_any_key
@@ -4201,11 +4269,11 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "步骤 5/8: 备份配置"
+    _ui_step "5/8" "备份配置"
     _tcptune_backup_runtime "$iface"
 
     echo ""
-    _info "步骤 6/8: 写入配置"
+    _ui_step "6/8" "写入配置"
     while IFS= read -r key; do
         [ -n "$key" ] && managed_keys+=("$key")
     done < <(_tcptune_build_managed_keys)
@@ -4217,7 +4285,7 @@ _tcptune_run_v2() {
     _tcptune_apply_sysctl_all
 
     echo ""
-    _info "步骤 7/8: 应用 Qdisc"
+    _ui_step "7/8" "应用 Qdisc"
     if [ "$_TCPTUNE_LAST_QDISC_MODE" = "cake" ]; then
         _tcptune_verify_cake_qdisc "$iface" "$_TCPTUNE_LAST_CAKE_BW_MBIT" || true
         _tcptune_enable_cake_persist "$iface" "$_TCPTUNE_LAST_CAKE_BW_MBIT" || true
@@ -4227,7 +4295,7 @@ _tcptune_run_v2() {
     fi
 
     echo ""
-    _info "步骤 8/8: 验证结果"
+    _ui_step "8/8" "验证结果"
     _tcptune_final_verify "$iface" "$_TCPTUNE_LAST_CEILING_BYTES" "$_TCPTUNE_LAST_QDISC_MODE" "$_TCPTUNE_LAST_CAKE_BW_MBIT"
     _tcptune_print_verify_hint "$iface" "$_TCPTUNE_LAST_CEILING_BYTES" "$_TCPTUNE_LAST_QDISC_MODE" "$_TCPTUNE_LAST_CAKE_BW_MBIT"
     _network_reboot_prompt
@@ -4248,14 +4316,14 @@ _tcptune_setup() {
         _separator
 
         local choice
-        read -rp "  选择 [0-4]: " choice
+        choice=$(_ui_ask "请选择 [0-4]" "")
         case "$choice" in
             1) _tcptune_run_v2 ;;
             2) _tcptune_print_verify_hint "$(_tcptune_guess_iface)" "$_TCPTUNE_LAST_CEILING_BYTES" "$_TCPTUNE_LAST_QDISC_MODE" "$_TCPTUNE_LAST_CAKE_BW_MBIT"; _press_any_key ;;
             3) _tcptune_show_backups; _press_any_key ;;
             4) _tcptune_restore_from_menu ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${choice}"; _press_any_key ;;
+            *) _ui_invalid "$choice"; _press_any_key ;;
         esac
     done
 }
@@ -4330,7 +4398,7 @@ _dockerlog_setup() {
     _separator
 
     local choice
-    read -rp "  选择 [0-1]: " choice
+    choice=$(_ui_ask "请选择 [0-1]" "")
     case "$choice" in
         1) ;;
         0) return ;;
@@ -4942,7 +5010,7 @@ _mihomo_configure_auto_update_cron() {
     echo ""
     _info "输入北京时间，格式 HH:MM，例如 04:20。"
     _info "任务每天执行一次，只在发现新版本时更新。"
-    read -rp "  每天检查时间 [HH:MM]: " time_hhmm
+    time_hhmm=$(_ui_ask "每天检查时间 [HH:MM]" "")
     if ! _valid_hhmm "$time_hhmm"; then
         _error_no_exit "时间格式无效，请使用 HH:MM，例如 04:20。"
         _press_any_key
@@ -5003,7 +5071,7 @@ _mihomo_remove_auto_update_cron() {
     fi
 
     local confirm
-    read -rp "  确认删除 Mihomo 定时自动更新? [y/N]: " confirm
+    if _ui_confirm "确认删除 Mihomo 定时自动更新?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -5031,13 +5099,13 @@ _mihomo_auto_update_manage() {
         _separator
 
         local choice
-        read -rp "  选择 [0-3]: " choice
+        choice=$(_ui_ask "请选择 [0-3]" "")
         case "$choice" in
             1) _mihomo_configure_auto_update_cron ;;
             2) _mihomo_show_auto_update_cron ;;
             3) _mihomo_remove_auto_update_cron ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -5086,7 +5154,7 @@ _mihomo_setup() {
     _info "检测到架构: ${ARCH}"
 
     local confirm_install
-    read -rp "  安装或更新 mihomo? [Y/n]: " confirm_install
+    if _ui_confirm "安装或更新 mihomo?" y; then confirm_install=y; else confirm_install=n; fi
     if [[ "$confirm_install" =~ ^([Nn]|[Nn][Oo])$ ]]; then
         _info "已取消"
         _press_any_key
@@ -5100,7 +5168,7 @@ _mihomo_setup() {
                "2" "开发版 (Alpha)" "包含最新功能和修复，可能存在实验性代码" "yellow"
 
     local track_choice
-    read -rp "  请选择 [1-2, 默认 1]: " track_choice
+    track_choice=$(_ui_ask "请选择 [1-2]" "1")
     if [[ "$track_choice" == "2" ]]; then
         _MIHOMO_TRACK="dev"
     else
@@ -5509,7 +5577,7 @@ _mihomoconf_test_reality_domains_auto() {
 _mihomoconf_test_reality_domain_manual() {
     local input_domain
     while true; do
-        read -rp "    请输入 Reality 伪造域名 [默认 cdn.icloud-content.com]: " input_domain
+        input_domain=$(_ui_ask "请输入 Reality 伪造域名" "cdn.icloud-content.com")
         input_domain=$(_mihomoconf_trim "${input_domain:-cdn.icloud-content.com}")
         
         _info "正在检测域名 ${input_domain}..."
@@ -5524,7 +5592,7 @@ _mihomoconf_test_reality_domain_manual() {
         elif [[ "$exit_code" -eq 1 ]]; then
             _warn "该域名不支持 X25519MLKEM768 (无 PQ)"
             local force_use
-            read -rp "    该域名不支持 PQ (存在安全隐患)，是否强制使用？[y/N]: " force_use
+            if _ui_confirm "该域名不支持 PQ (存在安全隐患)，是否强制使用？" n; then force_use=y; else force_use=n; fi
             force_use=$(_mihomoconf_trim "${force_use:-n}")
             if [[ "$force_use" =~ ^[Yy]$ ]]; then
                 _info "强制使用域名: ${input_domain}"
@@ -5539,7 +5607,7 @@ _mihomoconf_test_reality_domain_manual() {
             
             _warn "${err_msg}！"
             local force_use
-            read -rp "    该域名不符合基础标准，是否强制使用？[y/N]: " force_use
+            if _ui_confirm "该域名不符合基础标准，是否强制使用？" n; then force_use=y; else force_use=n; fi
             force_use=$(_mihomoconf_trim "${force_use:-n}")
             if [[ "$force_use" =~ ^[Yy]$ ]]; then
                 _info "强制使用域名: ${input_domain}"
@@ -6912,14 +6980,14 @@ _mihomoconf_collect_users_input() {
             printf "    %s 用户配置方式:\n" "$label"
             printf "      ${GREEN}1${PLAIN}) 手动输入用户名列表 ${DIM}(默认)${PLAIN}\n"
             printf "      ${GREEN}2${PLAIN}) 自动随机生成用户名\n"
-            read -rp "      ${label} 用户配置方式 [1=手动输入, 2=自动生成，默认 1]: " mode
+            mode=$(_ui_ask "${label} 用户配置方式 (1=手动输入, 2=自动生成)" "1")
             mode=$(_mihomoconf_trim "${mode:-1}")
         fi
         users=()
 
         case "$mode" in
             1)
-                read -rp "      输入用户名列表 (空格/逗号分隔，如 alice,bob；留空自动生成 1 个): " raw
+                raw=$(_ui_ask "输入用户名列表 (空格/逗号分隔，如 alice,bob；留空自动生成 1 个)" "")
                 raw="${raw//,/ }"
                 local token valid=1
                 for token in $raw; do
@@ -6949,7 +7017,7 @@ _mihomoconf_collect_users_input() {
                 fi
                 ;;
             2)
-                read -rp "      自动生成数量 [默认 1]: " count
+                count=$(_ui_ask "自动生成数量" "1")
                 count=$(_mihomoconf_trim "${count:-1}")
                 if ! _is_digit "$count" || [[ "$count" -le 0 ]]; then
                     _warn "数量必须是正整数"
@@ -8637,7 +8705,7 @@ _mihomoconf_setup() {
         _menu_item "0" "返回主菜单" "" "red"
         _separator
         local file_action
-        read -rp "  选择 [0-2]: " file_action
+        file_action=$(_ui_ask "请选择 [0-2]" "")
         case "$file_action" in
             1) WRITE_MODE="append" ;;
             2) WRITE_MODE="new" ;;
@@ -8658,7 +8726,7 @@ _mihomoconf_setup() {
     _menu_pair "11" "Sudoku" "" "green" "" "" "" ""
     _separator
     local PROTOCOL_CHOICES
-    read -rp "  选择 (如 \"1 1 10\" 表示 2 个 SS + 1 个 MASQUE): " -a PROTOCOL_CHOICES
+    read -rp "  ${CYAN}➜${PLAIN} 选择协议组合 (如 \"1 1 10\" 表示 2 个 SS + 1 个 MASQUE): " -a PROTOCOL_CHOICES
 
     for ch in "${PROTOCOL_CHOICES[@]}"; do
         case "$ch" in
@@ -8669,7 +8737,7 @@ _mihomoconf_setup() {
                 printf "      2) VMess WebSocket (CDN 回源)\n"
                 printf "      3) VMess gRPC (CDN 回源)\n"
                 local vmess_sub
-                read -rp "      选择 [1-3]（默认 1）: " vmess_sub
+                vmess_sub=$(_ui_ask "请选择 [1-3]" "1")
                 case "${vmess_sub:-1}" in
                     1) ENABLE_VMESS="y"; VMESS_COUNT=$((VMESS_COUNT + 1)) ;;
                     2) ENABLE_VMESS_WS="y"; VMESS_WS_COUNT=$((VMESS_WS_COUNT + 1)) ;;
@@ -8685,7 +8753,7 @@ _mihomoconf_setup() {
                 printf "      4) VLESS gRPC Reality (防封锁强加密)\n"
                 printf "      5) VLESS Enc (抗量子加密)\n"
                 local vless_sub
-                read -rp "      选择 [1-5]（默认 1）: " vless_sub
+                vless_sub=$(_ui_ask "请选择 [1-5]" "1")
                 case "${vless_sub:-1}" in
                     1) ENABLE_VLESS="y"; VLESS_COUNT=$((VLESS_COUNT + 1)) ;;
                     2) ENABLE_VLESS_WS="y"; VLESS_WS_COUNT=$((VLESS_WS_COUNT + 1)) ;;
@@ -8701,7 +8769,7 @@ _mihomoconf_setup() {
                 printf "      2) Trojan WebSocket (CDN 回源)\n"
                 printf "      3) Trojan gRPC (CDN 回源)\n"
                 local trojan_sub
-                read -rp "      选择 [1-3]（默认 1）: " trojan_sub
+                trojan_sub=$(_ui_ask "请选择 [1-3]" "1")
                 case "${trojan_sub:-1}" in
                     1) ENABLE_TROJAN="y"; TROJAN_COUNT=$((TROJAN_COUNT + 1)) ;;
                     2) ENABLE_TROJAN_WS="y"; TROJAN_WS_COUNT=$((TROJAN_WS_COUNT + 1)) ;;
@@ -8753,7 +8821,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Shadowsocks 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local ss_action
-        read -rp "  选择 [1/2]（默认 2）: " ss_action
+        ss_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${ss_action:-2}" == "1" ]] && SS_REPLACE="y"
         fi
         if [[ "$ENABLE_ANYTLS" == "y" ]] && _mihomoconf_has_listener_type "anytls"; then
@@ -8763,7 +8831,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 AnyTLS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local anytls_action
-        read -rp "  选择 [1/2]（默认 2）: " anytls_action
+        anytls_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${anytls_action:-2}" == "1" ]] && ANYTLS_REPLACE="y"
         fi
         if [[ "$ENABLE_VLESS" == "y" ]] && _mihomoconf_has_listener_type "vless"; then
@@ -8773,7 +8841,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VLESS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vless_action
-        read -rp "  选择 [1/2]（默认 2）: " vless_action
+        vless_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${vless_action:-2}" == "1" ]] && VLESS_REPLACE="y"
         fi
         if [[ "$ENABLE_VLESS_WS" == "y" ]] && _mihomoconf_has_listener_type "vless-ws"; then
@@ -8783,7 +8851,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VLESS WS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vless_ws_action
-        read -rp "  选择 [1/2]（默认 2）: " vless_ws_action
+        vless_ws_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${vless_ws_action:-2}" == "1" ]] && VLESS_WS_REPLACE="y"
         fi
         if [[ "$ENABLE_HY2" == "y" ]] && _mihomoconf_has_listener_type "hysteria2"; then
@@ -8793,7 +8861,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 HY2 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local hy2_action
-        read -rp "  选择 [1/2]（默认 2）: " hy2_action
+        hy2_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${hy2_action:-2}" == "1" ]] && HY2_REPLACE="y"
         fi
         if [[ "$ENABLE_TUIC" == "y" ]] && _mihomoconf_has_listener_type "tuic"; then
@@ -8803,7 +8871,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Tuic 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local tuic_action
-        read -rp "  选择 [1/2]（默认 2）: " tuic_action
+        tuic_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${tuic_action:-2}" == "1" ]] && TUIC_REPLACE="y"
         fi
         if [[ "$ENABLE_SOCKS" == "y" ]] && _mihomoconf_has_listener_type "socks"; then
@@ -8813,7 +8881,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Socks5 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local socks_action
-        read -rp "  选择 [1/2]（默认 2）: " socks_action
+        socks_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${socks_action:-2}" == "1" ]] && SOCKS_REPLACE="y"
         fi
         if [[ "$ENABLE_SNELL" == "y" ]] && _mihomoconf_has_listener_type "snell"; then
@@ -8823,7 +8891,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Snell 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local snell_action
-            read -rp "  选择 [1/2]（默认 2）: " snell_action
+            snell_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${snell_action:-2}" == "1" ]] && SNELL_REPLACE="y"
         fi
         if [[ "$ENABLE_MASQUE" == "y" ]] && _mihomoconf_has_listener_type "masque"; then
@@ -8833,7 +8901,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 MASQUE 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local masque_action
-            read -rp "  选择 [1/2]（默认 2）: " masque_action
+            masque_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${masque_action:-2}" == "1" ]] && MASQUE_REPLACE="y"
         fi
         if [[ "$ENABLE_SUDOKU" == "y" ]] && _mihomoconf_has_listener_type "sudoku"; then
@@ -8843,7 +8911,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Sudoku 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local sudoku_action
-            read -rp "  选择 [1/2]（默认 2）: " sudoku_action
+            sudoku_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${sudoku_action:-2}" == "1" ]] && SUDOKU_REPLACE="y"
         fi
         if [[ "$ENABLE_VMESS" == "y" ]] && _mihomoconf_has_listener_type "vmess"; then
@@ -8853,7 +8921,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VMess TCP 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vmess_action
-        read -rp "  选择 [1/2]（默认 2）: " vmess_action
+        vmess_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${vmess_action:-2}" == "1" ]] && VMESS_REPLACE="y"
         fi
         if [[ "$ENABLE_VMESS_WS" == "y" ]] && _mihomoconf_has_listener_type "vmess-ws"; then
@@ -8863,7 +8931,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VMess WS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vmess_ws_action
-        read -rp "  选择 [1/2]（默认 2）: " vmess_ws_action
+        vmess_ws_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${vmess_ws_action:-2}" == "1" ]] && VMESS_WS_REPLACE="y"
         fi
         if [[ "$ENABLE_VMESS_GRPC" == "y" ]] && _mihomoconf_has_listener_type "vmess-grpc"; then
@@ -8873,7 +8941,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VMess gRPC 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vmess_grpc_action
-        read -rp "  选择 [1/2]（默认 2）: " vmess_grpc_action
+        vmess_grpc_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${vmess_grpc_action:-2}" == "1" ]] && VMESS_GRPC_REPLACE="y"
         fi
         if [[ "$ENABLE_VLESS_GRPC" == "y" || "$ENABLE_VLESS_PURE_GRPC" == "y" ]] && _mihomoconf_has_listener_type "vless-grpc"; then
@@ -8883,7 +8951,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VLESS gRPC 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vless_grpc_action
-        read -rp "  选择 [1/2]（默认 2）: " vless_grpc_action
+        vless_grpc_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${vless_grpc_action:-2}" == "1" ]] && VLESS_GRPC_REPLACE="y"
         fi
         if [[ "$ENABLE_VLESS_ENC" == "y" ]] && _mihomoconf_has_listener_type "vless-enc"; then
@@ -8893,7 +8961,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 VLESS Enc 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local vless_enc_action
-        read -rp "  选择 [1/2]（默认 2）: " vless_enc_action
+        vless_enc_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${vless_enc_action:-2}" == "1" ]] && VLESS_ENC_REPLACE="y"
         fi
         if [[ "$ENABLE_TROJAN" == "y" ]] && _mihomoconf_has_listener_type "trojan"; then
@@ -8903,7 +8971,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Trojan TCP 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local trojan_action
-        read -rp "  选择 [1/2]（默认 2）: " trojan_action
+        trojan_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${trojan_action:-2}" == "1" ]] && TROJAN_REPLACE="y"
         fi
         if [[ "$ENABLE_TROJAN_WS" == "y" ]] && _mihomoconf_has_listener_type "trojan-ws"; then
@@ -8913,7 +8981,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Trojan WS 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local trojan_ws_action
-        read -rp "  选择 [1/2]（默认 2）: " trojan_ws_action
+        trojan_ws_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${trojan_ws_action:-2}" == "1" ]] && TROJAN_WS_REPLACE="y"
         fi
         if [[ "$ENABLE_TROJAN_GRPC" == "y" ]] && _mihomoconf_has_listener_type "trojan-grpc"; then
@@ -8923,7 +8991,7 @@ _mihomoconf_setup() {
             _menu_pair "1" "覆盖已有 Trojan gRPC 节点" "" "yellow" "2" "保留已有，继续添加" "" "green"
             _separator
             local trojan_grpc_action
-        read -rp "  选择 [1/2]（默认 2）: " trojan_grpc_action
+        trojan_grpc_action=$(_ui_ask "请选择 [1/2]" "2")
             [[ "${trojan_grpc_action:-2}" == "1" ]] && TROJAN_GRPC_REPLACE="y"
         fi
     fi
@@ -8975,7 +9043,7 @@ _mihomoconf_setup() {
         local _ss_idx ss_port_input
         for ((_ss_idx=1; _ss_idx<=SS_COUNT; _ss_idx++)); do
             while true; do
-                read -rp "    Shadowsocks #${_ss_idx} 监听端口 [默认 12353]: " ss_port_input
+                ss_port_input=$(_ui_ask "Shadowsocks #${_ss_idx} 监听端口" "12353")
                 ss_port_input=$(_mihomoconf_trim "${ss_port_input:-12353}")
                 if _is_valid_port "$ss_port_input"; then
                     if _mihomoconf_port_in_list "$ss_port_input" "${NEW_PORTS[@]}"; then
@@ -9001,7 +9069,7 @@ _mihomoconf_setup() {
         printf "      ${GREEN}4${PLAIN}) 2022-blake3-aes-128-gcm\n"
         printf "      ${GREEN}5${PLAIN}) 2022-blake3-aes-256-gcm\n"
         local cipher_choice
-        read -rp "    选择 [1-5]（默认 1）: " cipher_choice
+        cipher_choice=$(_ui_ask "请选择 [1-5]" "1")
         case "${cipher_choice:-1}" in
             1) SS_CIPHER="chacha20-ietf-poly1305" ;;
             2) SS_CIPHER="aes-256-gcm" ;;
@@ -9013,7 +9081,7 @@ _mihomoconf_setup() {
         local i _u_name _u_pass
         for i in "${!SS_PORTS[@]}"; do
             SS_TAGS+=("$(_mihomoconf_gen_listener_tag "ss_relay")")
-            read -rp "    Shadowsocks #$((i + 1)) 用户名 [留空自动生成]: " _u_name < /dev/tty
+            read -rp "  ${CYAN}➜${PLAIN} Shadowsocks #$((i + 1)) 用户名 [留空自动生成]: " _u_name < /dev/tty
             _u_name=$(_mihomoconf_trim "${_u_name:-}")
             if [[ -z "$_u_name" ]]; then
                 _u_name="user-$(_mihomoconf_gen_uuid | cut -d'-' -f1)"
@@ -9036,7 +9104,7 @@ _mihomoconf_setup() {
         local _anytls_idx anytls_port_input
         for ((_anytls_idx=1; _anytls_idx<=ANYTLS_COUNT; _anytls_idx++)); do
             while true; do
-                read -rp "    AnyTLS #${_anytls_idx} 监听端口 [默认 443]: " anytls_port_input
+                anytls_port_input=$(_ui_ask "AnyTLS #${_anytls_idx} 监听端口" "443")
                 anytls_port_input=$(_mihomoconf_trim "${anytls_port_input:-443}")
                 if _is_valid_port "$anytls_port_input"; then
                     if _mihomoconf_port_in_list "$anytls_port_input" "${NEW_PORTS[@]}"; then
@@ -9054,7 +9122,7 @@ _mihomoconf_setup() {
                 _warn "端口无效，请输入 1-65535 的数字"
             done
         done
-        read -rp "    SNI 域名 (留空则用 IP): " ANYTLS_SNI
+        ANYTLS_SNI=$(_ui_ask "SNI 域名 (留空则用 IP)" "")
         ANYTLS_SNI=$(_mihomoconf_trim "${ANYTLS_SNI:-}")
         local i _user_rows _u_name _u_pass _user_total=0
         for i in "${!ANYTLS_PORTS[@]}"; do
@@ -9076,7 +9144,7 @@ _mihomoconf_setup() {
         local _vless_idx vless_port_input
         for ((_vless_idx=1; _vless_idx<=VLESS_COUNT; _vless_idx++)); do
             while true; do
-                read -rp "    VLESS #${_vless_idx} 监听端口 [默认 443]: " vless_port_input
+                vless_port_input=$(_ui_ask "VLESS #${_vless_idx} 监听端口" "443")
                 vless_port_input=$(_mihomoconf_trim "${vless_port_input:-443}")
                 if _is_valid_port "$vless_port_input"; then
                     if _mihomoconf_port_in_list "$vless_port_input" "${NEW_PORTS[@]}"; then
@@ -9103,7 +9171,7 @@ _mihomoconf_setup() {
             if [[ -n "${ANYTLS_SNI:-}" ]]; then
                 printf "      3) 复用 AnyTLS 域名 [${ANYTLS_SNI}]\n"
             fi
-            read -rp "    请选择操作 [默认 1]: " choice_domain
+            choice_domain=$(_ui_ask "请选择 操作" "1")
             choice_domain=$(_mihomoconf_trim "${choice_domain:-1}")
             
             if [[ "$choice_domain" == "1" ]]; then
@@ -9161,7 +9229,7 @@ _mihomoconf_setup() {
         local _vless_ws_idx vless_ws_port_input
         for ((_vless_ws_idx=1; _vless_ws_idx<=VLESS_WS_COUNT; _vless_ws_idx++)); do
             while true; do
-                read -rp "    VLESS WS #${_vless_ws_idx} 监听端口 [默认 8080]: " vless_ws_port_input
+                vless_ws_port_input=$(_ui_ask "VLESS WS #${_vless_ws_idx} 监听端口" "8080")
                 vless_ws_port_input=$(_mihomoconf_trim "${vless_ws_port_input:-8080}")
                 if _is_valid_port "$vless_ws_port_input"; then
                     if _mihomoconf_port_in_list "$vless_ws_port_input" "${NEW_PORTS[@]}"; then
@@ -9183,12 +9251,12 @@ _mihomoconf_setup() {
         local _vless_ws_path_input _vless_ws_tls_input _vless_ws_host_input
         local i _user_rows _u_name _u_uuid _vless_ws_user_total=0
         for i in "${!VLESS_WS_PORTS[@]}"; do
-            read -rp "    VLESS WS #$((i + 1)) WebSocket Path [默认 /vless-ws]: " _vless_ws_path_input
+            _vless_ws_path_input=$(_ui_ask "VLESS WS #$((i + 1)) WebSocket Path" "/vless-ws")
             _vless_ws_path_input=$(_mihomoconf_trim "${_vless_ws_path_input:-/vless-ws}")
             [[ "${_vless_ws_path_input:0:1}" != "/" ]] && _vless_ws_path_input="/${_vless_ws_path_input}"
             VLESS_WS_PATHS+=("$_vless_ws_path_input")
 
-            read -rp "    VLESS WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [y/N]: " _vless_ws_tls_input
+            if _ui_confirm "VLESS WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源)" n; then _vless_ws_tls_input=y; else _vless_ws_tls_input=n; fi
             _vless_ws_tls_input=$(_mihomoconf_trim "${_vless_ws_tls_input:-N}")
             if [[ "$_vless_ws_tls_input" =~ ^[Yy]$ ]]; then
                 VLESS_WS_TLS_OPTS+=("true")
@@ -9208,7 +9276,7 @@ _mihomoconf_setup() {
                 fi
             fi
 
-            read -rp "    VLESS WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_ws_host_input
+            _vless_ws_host_input=$(_ui_ask "VLESS WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名)" "")
             VLESS_WS_HOSTS+=("$(_mihomoconf_trim "${_vless_ws_host_input:-}")")
 
             VLESS_WS_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_ws_relay")")
@@ -9230,7 +9298,7 @@ _mihomoconf_setup() {
         local _vmess_idx vmess_port_input
         for ((_vmess_idx=1; _vmess_idx<=VMESS_COUNT; _vmess_idx++)); do
             while true; do
-                read -rp "    VMess TCP #${_vmess_idx} 监听端口 [默认 10086]: " vmess_port_input
+                vmess_port_input=$(_ui_ask "VMess TCP #${_vmess_idx} 监听端口" "10086")
                 vmess_port_input=$(_mihomoconf_trim "${vmess_port_input:-10086}")
                 if _is_valid_port "$vmess_port_input"; then
                     if _mihomoconf_port_in_list "$vmess_port_input" "${NEW_PORTS[@]}"; then
@@ -9269,7 +9337,7 @@ _mihomoconf_setup() {
         local _vmess_ws_idx vmess_ws_port_input
         for ((_vmess_ws_idx=1; _vmess_ws_idx<=VMESS_WS_COUNT; _vmess_ws_idx++)); do
             while true; do
-                read -rp "    VMess WS #${_vmess_ws_idx} 监听端口 [默认 10087]: " vmess_ws_port_input
+                vmess_ws_port_input=$(_ui_ask "VMess WS #${_vmess_ws_idx} 监听端口" "10087")
                 vmess_ws_port_input=$(_mihomoconf_trim "${vmess_ws_port_input:-10087}")
                 if _is_valid_port "$vmess_ws_port_input"; then
                     if _mihomoconf_port_in_list "$vmess_ws_port_input" "${NEW_PORTS[@]}"; then
@@ -9291,12 +9359,12 @@ _mihomoconf_setup() {
         local _vmess_ws_path_input _vmess_ws_tls_input _vmess_ws_host_input
         local i _user_rows _u_name _u_uuid _vmess_ws_user_total=0
         for i in "${!VMESS_WS_PORTS[@]}"; do
-            read -rp "    VMess WS #$((i + 1)) WebSocket Path [默认 /vmess-ws]: " _vmess_ws_path_input
+            _vmess_ws_path_input=$(_ui_ask "VMess WS #$((i + 1)) WebSocket Path" "/vmess-ws")
             _vmess_ws_path_input=$(_mihomoconf_trim "${_vmess_ws_path_input:-/vmess-ws}")
             [[ "${_vmess_ws_path_input:0:1}" != "/" ]] && _vmess_ws_path_input="/${_vmess_ws_path_input}"
             VMESS_WS_PATHS+=("$_vmess_ws_path_input")
 
-            read -rp "    VMess WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [y/N]: " _vmess_ws_tls_input
+            if _ui_confirm "VMess WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源)" n; then _vmess_ws_tls_input=y; else _vmess_ws_tls_input=n; fi
             _vmess_ws_tls_input=$(_mihomoconf_trim "${_vmess_ws_tls_input:-N}")
             if [[ "$_vmess_ws_tls_input" =~ ^[Yy]$ ]]; then
                 VMESS_WS_TLS_OPTS+=("true")
@@ -9304,7 +9372,7 @@ _mihomoconf_setup() {
                 VMESS_WS_TLS_OPTS+=("false")
             fi
 
-            read -rp "    VMess WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vmess_ws_host_input
+            _vmess_ws_host_input=$(_ui_ask "VMess WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名)" "")
             VMESS_WS_HOSTS+=("$(_mihomoconf_trim "${_vmess_ws_host_input:-}")")
 
             VMESS_WS_TAGS+=("$(_mihomoconf_gen_listener_tag "vmess_ws_relay")")
@@ -9326,7 +9394,7 @@ _mihomoconf_setup() {
         local _vmess_grpc_idx vmess_grpc_port_input
         for ((_vmess_grpc_idx=1; _vmess_grpc_idx<=VMESS_GRPC_COUNT; _vmess_grpc_idx++)); do
             while true; do
-                read -rp "    VMess gRPC #${_vmess_grpc_idx} 监听端口 [默认 10088]: " vmess_grpc_port_input
+                vmess_grpc_port_input=$(_ui_ask "VMess gRPC #${_vmess_grpc_idx} 监听端口" "10088")
                 vmess_grpc_port_input=$(_mihomoconf_trim "${vmess_grpc_port_input:-10088}")
                 if _is_valid_port "$vmess_grpc_port_input"; then
                     if _mihomoconf_port_in_list "$vmess_grpc_port_input" "${NEW_PORTS[@]}"; then
@@ -9348,11 +9416,11 @@ _mihomoconf_setup() {
         local _vmess_grpc_service_name_input _vmess_grpc_tls_input _vmess_grpc_host_input
         local i _user_rows _u_name _u_uuid _vmess_grpc_user_total=0
         for i in "${!VMESS_GRPC_PORTS[@]}"; do
-            read -rp "    VMess gRPC #$((i + 1)) gRPC Service Name [默认 vmess-grpc]: " _vmess_grpc_service_name_input
+            _vmess_grpc_service_name_input=$(_ui_ask "VMess gRPC #$((i + 1)) gRPC Service Name" "vmess-grpc")
             _vmess_grpc_service_name_input=$(_mihomoconf_trim "${_vmess_grpc_service_name_input:-vmess-grpc}")
             VMESS_GRPC_SERVICE_NAMES+=("$_vmess_grpc_service_name_input")
 
-            read -rp "    VMess gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [y/N]: " _vmess_grpc_tls_input
+            if _ui_confirm "VMess gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源)" n; then _vmess_grpc_tls_input=y; else _vmess_grpc_tls_input=n; fi
             _vmess_grpc_tls_input=$(_mihomoconf_trim "${_vmess_grpc_tls_input:-N}")
             if [[ "$_vmess_grpc_tls_input" =~ ^[Yy]$ ]]; then
                 VMESS_GRPC_TLS_OPTS+=("true")
@@ -9360,7 +9428,7 @@ _mihomoconf_setup() {
                 VMESS_GRPC_TLS_OPTS+=("false")
             fi
 
-            read -rp "    VMess gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vmess_grpc_host_input
+            _vmess_grpc_host_input=$(_ui_ask "VMess gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名)" "")
             VMESS_GRPC_HOSTS+=("$(_mihomoconf_trim "${_vmess_grpc_host_input:-}")")
 
             VMESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vmess_grpc_relay")")
@@ -9382,7 +9450,7 @@ _mihomoconf_setup() {
         local _vless_grpc_idx vless_grpc_port_input
         for ((_vless_grpc_idx=1; _vless_grpc_idx<=VLESS_GRPC_COUNT; _vless_grpc_idx++)); do
             while true; do
-                read -rp "    VLESS gRPC #${_vless_grpc_idx} 监听端口 [默认 8443]: " vless_grpc_port_input
+                vless_grpc_port_input=$(_ui_ask "VLESS gRPC #${_vless_grpc_idx} 监听端口" "8443")
                 vless_grpc_port_input=$(_mihomoconf_trim "${vless_grpc_port_input:-8443}")
                 if _is_valid_port "$vless_grpc_port_input"; then
                     if _mihomoconf_port_in_list "$vless_grpc_port_input" "${NEW_PORTS[@]}"; then
@@ -9404,7 +9472,7 @@ _mihomoconf_setup() {
         local _vless_grpc_service_name_input _vless_grpc_host_input
         local i _user_rows _u_name _u_uuid
         for i in "${!VLESS_GRPC_PORTS[@]}"; do
-            read -rp "    VLESS gRPC #$((i + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_grpc_service_name_input
+            _vless_grpc_service_name_input=$(_ui_ask "VLESS gRPC #$((i + 1)) gRPC Service Name" "vless-grpc")
             _vless_grpc_service_name_input=$(_mihomoconf_trim "${_vless_grpc_service_name_input:-vless-grpc}")
             VLESS_GRPC_SERVICE_NAMES+=("$_vless_grpc_service_name_input")
 
@@ -9417,7 +9485,7 @@ _mihomoconf_setup() {
             VLESS_GRPC_REALITY_DSTS+=("")
             VLESS_GRPC_REALITY_SNIS+=("")
 
-            read -rp "    VLESS gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _vless_grpc_host_input
+            _vless_grpc_host_input=$(_ui_ask "VLESS gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名)" "")
             VLESS_GRPC_HOSTS+=("$(_mihomoconf_trim "${_vless_grpc_host_input:-}")")
 
             VLESS_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "vless_grpc_relay")")
@@ -9439,7 +9507,7 @@ _mihomoconf_setup() {
         local _vless_pgrpc_idx vless_pgrpc_port_input
         for ((_vless_pgrpc_idx=1; _vless_pgrpc_idx<=VLESS_PURE_GRPC_COUNT; _vless_pgrpc_idx++)); do
             while true; do
-                read -rp "    VLESS gRPC Reality #${_vless_pgrpc_idx} 监听端口 [默认 8443]: " vless_pgrpc_port_input
+                vless_pgrpc_port_input=$(_ui_ask "VLESS gRPC Reality #${_vless_pgrpc_idx} 监听端口" "8443")
                 vless_pgrpc_port_input=$(_mihomoconf_trim "${vless_pgrpc_port_input:-8443}")
                 if _is_valid_port "$vless_pgrpc_port_input"; then
                     if _mihomoconf_port_in_list "$vless_pgrpc_port_input" "${NEW_PORTS[@]}"; then
@@ -9466,7 +9534,7 @@ _mihomoconf_setup() {
             if [[ -n "${ANYTLS_SNI:-}" ]]; then
                 printf "      3) 复用 AnyTLS 域名 [${ANYTLS_SNI}]\n"
             fi
-            read -rp "    请选择操作 [默认 1]: " choice_domain
+            choice_domain=$(_ui_ask "请选择 操作" "1")
             choice_domain=$(_mihomoconf_trim "${choice_domain:-1}")
             
             if [[ "$choice_domain" == "1" ]]; then
@@ -9498,7 +9566,7 @@ _mihomoconf_setup() {
         local start_idx=$(( ${#VLESS_GRPC_PORTS[@]} - VLESS_PURE_GRPC_COUNT ))
         local i _keypair _vless_private_key _vless_public_key _vless_short_id
         for ((i=start_idx; i<${#VLESS_GRPC_PORTS[@]}; i++)); do
-            read -rp "    VLESS gRPC Reality #$((i - start_idx + 1)) gRPC Service Name [默认 vless-grpc]: " _vless_pgrpc_service_name_input
+            _vless_pgrpc_service_name_input=$(_ui_ask "VLESS gRPC Reality #$((i - start_idx + 1)) gRPC Service Name" "vless-grpc")
             _vless_pgrpc_service_name_input=$(_mihomoconf_trim "${_vless_pgrpc_service_name_input:-vless-grpc}")
             VLESS_GRPC_SERVICE_NAMES+=("$_vless_pgrpc_service_name_input")
             VLESS_GRPC_TLS_OPTS+=("reality")
@@ -9539,7 +9607,7 @@ _mihomoconf_setup() {
         local _vless_enc_idx vless_enc_port_input
         for ((_vless_enc_idx=1; _vless_enc_idx<=VLESS_ENC_COUNT; _vless_enc_idx++)); do
             while true; do
-                read -rp "    VLESS Enc #${_vless_enc_idx} 监听端口 [默认 22787]: " vless_enc_port_input
+                vless_enc_port_input=$(_ui_ask "VLESS Enc #${_vless_enc_idx} 监听端口" "22787")
                 vless_enc_port_input=$(_mihomoconf_trim "${vless_enc_port_input:-22787}")
                 if _is_valid_port "$vless_enc_port_input"; then
                     if _mihomoconf_port_in_list "$vless_enc_port_input" "${NEW_PORTS[@]}"; then
@@ -9590,7 +9658,7 @@ _mihomoconf_setup() {
         local _trojan_idx trojan_port_input
         for ((_trojan_idx=1; _trojan_idx<=TROJAN_COUNT; _trojan_idx++)); do
             while true; do
-                read -rp "    Trojan TCP #${_trojan_idx} 监听端口 [默认 12443]: " trojan_port_input
+                trojan_port_input=$(_ui_ask "Trojan TCP #${_trojan_idx} 监听端口" "12443")
                 trojan_port_input=$(_mihomoconf_trim "${trojan_port_input:-12443}")
                 if _is_valid_port "$trojan_port_input"; then
                     if _mihomoconf_port_in_list "$trojan_port_input" "${NEW_PORTS[@]}"; then
@@ -9612,7 +9680,7 @@ _mihomoconf_setup() {
         local _trojan_tls_input _trojan_host_input
         local i _user_rows _u_name _u_pass _trojan_user_total=0
         for i in "${!TROJAN_PORTS[@]}"; do
-            read -rp "    Trojan TCP #$((i + 1)) 是否启用 TLS [Y/n]: " _trojan_tls_input
+            if _ui_confirm "Trojan TCP #$((i + 1)) 是否启用 TLS" y; then _trojan_tls_input=y; else _trojan_tls_input=n; fi
             _trojan_tls_input=$(_mihomoconf_trim "${_trojan_tls_input:-Y}")
             if [[ "$_trojan_tls_input" =~ ^[Nn]$ ]]; then
                 TROJAN_TLS_OPTS+=("false")
@@ -9620,7 +9688,7 @@ _mihomoconf_setup() {
                 TROJAN_TLS_OPTS+=("true")
             fi
 
-            read -rp "    Trojan TCP #$((i + 1)) SNI / Host (使用证书的域名): " _trojan_host_input
+            _trojan_host_input=$(_ui_ask "Trojan TCP #$((i + 1)) SNI / Host (使用证书的域名)" "")
             TROJAN_HOSTS+=("$(_mihomoconf_trim "${_trojan_host_input:-}")")
 
             TROJAN_TAGS+=("$(_mihomoconf_gen_listener_tag "trojan_relay")")
@@ -9642,7 +9710,7 @@ _mihomoconf_setup() {
         local _trojan_ws_idx trojan_ws_port_input
         for ((_trojan_ws_idx=1; _trojan_ws_idx<=TROJAN_WS_COUNT; _trojan_ws_idx++)); do
             while true; do
-                read -rp "    Trojan WS #${_trojan_ws_idx} 监听端口 [默认 12444]: " trojan_ws_port_input
+                trojan_ws_port_input=$(_ui_ask "Trojan WS #${_trojan_ws_idx} 监听端口" "12444")
                 trojan_ws_port_input=$(_mihomoconf_trim "${trojan_ws_port_input:-12444}")
                 if _is_valid_port "$trojan_ws_port_input"; then
                     if _mihomoconf_port_in_list "$trojan_ws_port_input" "${NEW_PORTS[@]}"; then
@@ -9664,12 +9732,12 @@ _mihomoconf_setup() {
         local _trojan_ws_path_input _trojan_ws_tls_input _trojan_ws_host_input
         local i _user_rows _u_name _u_pass _trojan_ws_user_total=0
         for i in "${!TROJAN_WS_PORTS[@]}"; do
-            read -rp "    Trojan WS #$((i + 1)) WebSocket Path [默认 /trojan-ws]: " _trojan_ws_path_input
+            _trojan_ws_path_input=$(_ui_ask "Trojan WS #$((i + 1)) WebSocket Path" "/trojan-ws")
             _trojan_ws_path_input=$(_mihomoconf_trim "${_trojan_ws_path_input:-/trojan-ws}")
             [[ "${_trojan_ws_path_input:0:1}" != "/" ]] && _trojan_ws_path_input="/${_trojan_ws_path_input}"
             TROJAN_WS_PATHS+=("$_trojan_ws_path_input")
 
-            read -rp "    Trojan WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [Y/n]: " _trojan_ws_tls_input
+            if _ui_confirm "Trojan WS #$((i + 1)) 是否启用 TLS (用于 CDN https 回源)" y; then _trojan_ws_tls_input=y; else _trojan_ws_tls_input=n; fi
             _trojan_ws_tls_input=$(_mihomoconf_trim "${_trojan_ws_tls_input:-Y}")
             if [[ "$_trojan_ws_tls_input" =~ ^[Nn]$ ]]; then
                 TROJAN_WS_TLS_OPTS+=("false")
@@ -9677,7 +9745,7 @@ _mihomoconf_setup() {
                 TROJAN_WS_TLS_OPTS+=("true")
             fi
 
-            read -rp "    Trojan WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _trojan_ws_host_input
+            _trojan_ws_host_input=$(_ui_ask "Trojan WS #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名)" "")
             TROJAN_WS_HOSTS+=("$(_mihomoconf_trim "${_trojan_ws_host_input:-}")")
 
             TROJAN_WS_TAGS+=("$(_mihomoconf_gen_listener_tag "trojan_ws_relay")")
@@ -9699,7 +9767,7 @@ _mihomoconf_setup() {
         local _trojan_grpc_idx trojan_grpc_port_input
         for ((_trojan_grpc_idx=1; _trojan_grpc_idx<=TROJAN_GRPC_COUNT; _trojan_grpc_idx++)); do
             while true; do
-                read -rp "    Trojan gRPC #${_trojan_grpc_idx} 监听端口 [默认 12445]: " trojan_grpc_port_input
+                trojan_grpc_port_input=$(_ui_ask "Trojan gRPC #${_trojan_grpc_idx} 监听端口" "12445")
                 trojan_grpc_port_input=$(_mihomoconf_trim "${trojan_grpc_port_input:-12445}")
                 if _is_valid_port "$trojan_grpc_port_input"; then
                     if _mihomoconf_port_in_list "$trojan_grpc_port_input" "${NEW_PORTS[@]}"; then
@@ -9721,11 +9789,11 @@ _mihomoconf_setup() {
         local _trojan_grpc_service_name_input _trojan_grpc_tls_input _trojan_grpc_host_input
         local i _user_rows _u_name _u_pass _trojan_grpc_user_total=0
         for i in "${!TROJAN_GRPC_PORTS[@]}"; do
-            read -rp "    Trojan gRPC #$((i + 1)) gRPC Service Name [默认 trojan-grpc]: " _trojan_grpc_service_name_input
+            _trojan_grpc_service_name_input=$(_ui_ask "Trojan gRPC #$((i + 1)) gRPC Service Name" "trojan-grpc")
             _trojan_grpc_service_name_input=$(_mihomoconf_trim "${_trojan_grpc_service_name_input:-trojan-grpc}")
             TROJAN_GRPC_SERVICE_NAMES+=("$_trojan_grpc_service_name_input")
 
-            read -rp "    Trojan gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源) [Y/n]: " _trojan_grpc_tls_input
+            if _ui_confirm "Trojan gRPC #$((i + 1)) 是否启用 TLS (用于 CDN https 回源)" y; then _trojan_grpc_tls_input=y; else _trojan_grpc_tls_input=n; fi
             _trojan_grpc_tls_input=$(_mihomoconf_trim "${_trojan_grpc_tls_input:-Y}")
             if [[ "$_trojan_grpc_tls_input" =~ ^[Nn]$ ]]; then
                 TROJAN_GRPC_TLS_OPTS+=("false")
@@ -9733,7 +9801,7 @@ _mihomoconf_setup() {
                 TROJAN_GRPC_TLS_OPTS+=("true")
             fi
 
-            read -rp "    Trojan gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名): " _trojan_grpc_host_input
+            _trojan_grpc_host_input=$(_ui_ask "Trojan gRPC #$((i + 1)) CDN Host / 域名 (可选，留空则不校验主机名)" "")
             TROJAN_GRPC_HOSTS+=("$(_mihomoconf_trim "${_trojan_grpc_host_input:-}")")
 
             TROJAN_GRPC_TAGS+=("$(_mihomoconf_gen_listener_tag "trojan_grpc_relay")")
@@ -9755,7 +9823,7 @@ _mihomoconf_setup() {
         local _hy2_idx hy2_port_input
         for ((_hy2_idx=1; _hy2_idx<=HY2_COUNT; _hy2_idx++)); do
             while true; do
-                read -rp "    HY2 #${_hy2_idx} 监听端口 [默认 8080]: " hy2_port_input
+                hy2_port_input=$(_ui_ask "HY2 #${_hy2_idx} 监听端口" "8080")
                 hy2_port_input=$(_mihomoconf_trim "${hy2_port_input:-8080}")
                 if _is_valid_port "$hy2_port_input"; then
                     if _mihomoconf_port_in_list "$hy2_port_input" "${NEW_PORTS[@]}"; then
@@ -9775,10 +9843,10 @@ _mihomoconf_setup() {
         done
 
         if [[ -n "${ANYTLS_SNI:-}" ]]; then
-            read -rp "    HY2 SNI 域名 [默认复用 AnyTLS: ${ANYTLS_SNI}]: " HY2_SNI
+            HY2_SNI=$(_ui_ask "HY2 SNI 域名 (默认复用 AnyTLS: ${ANYTLS_SNI})" "${ANYTLS_SNI}")
             HY2_SNI=$(_mihomoconf_trim "${HY2_SNI:-$ANYTLS_SNI}")
         else
-            read -rp "    HY2 SNI 域名 (留空则用 IP): " HY2_SNI
+            HY2_SNI=$(_ui_ask "HY2 SNI 域名 (留空则用 IP)" "")
             HY2_SNI=$(_mihomoconf_trim "${HY2_SNI:-}")
         fi
 
@@ -9788,7 +9856,7 @@ _mihomoconf_setup() {
         printf "      ${GREEN}2${PLAIN}) bbr ${DIM}(温和)${PLAIN}\n"
         printf "      ${GREEN}3${PLAIN}) reno ${DIM}(最温和)${PLAIN}\n"
         local hy2_cc_choice
-        read -rp "    选择 [1/2/3]（默认 1）: " hy2_cc_choice
+        hy2_cc_choice=$(_ui_ask "请选择 [1/2/3]" "1")
         case "${hy2_cc_choice:-1}" in
             1) HY2_CONGESTION_CONTROL="brutal" ;;
             2) HY2_CONGESTION_CONTROL="bbr" ;;
@@ -9797,7 +9865,7 @@ _mihomoconf_setup() {
         esac
 
         if [[ "$HY2_CONGESTION_CONTROL" == "brutal" ]]; then
-            read -rp "    up 上传速率 [默认 1000 Mbps]: " HY2_UP
+            HY2_UP=$(_ui_ask "up 上传速率 (Mbps)" "1000")
             HY2_UP="${HY2_UP:-1000}"
             if ! _is_digit "$HY2_UP" || [[ "$HY2_UP" -le 0 ]]; then
                 _error_no_exit "up 必须为正整数"
@@ -9805,7 +9873,7 @@ _mihomoconf_setup() {
                 return
             fi
 
-            read -rp "    down 下载速率 [默认 1000 Mbps]: " HY2_DOWN
+            HY2_DOWN=$(_ui_ask "down 下载速率 (Mbps)" "1000")
             HY2_DOWN="${HY2_DOWN:-1000}"
             if ! _is_digit "$HY2_DOWN" || [[ "$HY2_DOWN" -le 0 ]]; then
                 _error_no_exit "down 必须为正整数"
@@ -9836,7 +9904,7 @@ _mihomoconf_setup() {
             _info "HY2 已启用 obfs=${HY2_OBFS}，将不写入 masquerade 以避免协议冲突"
         else
             local hy2_masquerade_input
-            read -rp "    masquerade URL [默认 https://bing.com，输入 none 关闭]: " hy2_masquerade_input
+            hy2_masquerade_input=$(_ui_ask "masquerade URL (输入 none 关闭)" "https://bing.com")
             case "${hy2_masquerade_input:-}" in
                 "") HY2_MASQUERADE="https://bing.com" ;;
                 none|None|NONE) HY2_MASQUERADE="" ;;
@@ -9864,7 +9932,7 @@ _mihomoconf_setup() {
         local _tuic_idx tuic_port_input
         for ((_tuic_idx=1; _tuic_idx<=TUIC_COUNT; _tuic_idx++)); do
             while true; do
-                read -rp "    Tuic #${_tuic_idx} 监听端口 [默认 8443]: " tuic_port_input
+                tuic_port_input=$(_ui_ask "Tuic #${_tuic_idx} 监听端口" "8443")
                 tuic_port_input=$(_mihomoconf_trim "${tuic_port_input:-8443}")
                 if _is_valid_port "$tuic_port_input"; then
                     if _mihomoconf_port_in_list "$tuic_port_input" "${NEW_PORTS[@]}"; then
@@ -9884,10 +9952,10 @@ _mihomoconf_setup() {
         done
 
         if [[ -n "${ANYTLS_SNI:-}" ]]; then
-            read -rp "    Tuic SNI 域名 [默认复用 AnyTLS: ${ANYTLS_SNI}]: " TUIC_SNI
+            TUIC_SNI=$(_ui_ask "Tuic SNI 域名 (默认复用 AnyTLS: ${ANYTLS_SNI})" "${ANYTLS_SNI}")
             TUIC_SNI=$(_mihomoconf_trim "${TUIC_SNI:-$ANYTLS_SNI}")
         else
-            read -rp "    Tuic SNI 域名 (留空则用 IP): " TUIC_SNI
+            TUIC_SNI=$(_ui_ask "Tuic SNI 域名 (留空则用 IP)" "")
             TUIC_SNI=$(_mihomoconf_trim "${TUIC_SNI:-}")
         fi
 
@@ -9897,7 +9965,7 @@ _mihomoconf_setup() {
         printf "      ${GREEN}2${PLAIN}) cubic\n"
         printf "      ${GREEN}3${PLAIN}) new_reno\n"
         local cc_choice
-        read -rp "    选择 [1/2/3]（默认 1）: " cc_choice
+        cc_choice=$(_ui_ask "请选择 [1/2/3]" "1")
         case "${cc_choice:-1}" in
             1) TUIC_CONGESTION_CONTROL="bbr" ;;
             2) TUIC_CONGESTION_CONTROL="cubic" ;;
@@ -9910,7 +9978,7 @@ _mihomoconf_setup() {
         printf "      ${GREEN}1${PLAIN}) h3\n"
         printf "      ${GREEN}2${PLAIN}) h3,http/1.1\n"
         local alpn_choice
-        read -rp "    选择 [1/2]（默认 1）: " alpn_choice
+        alpn_choice=$(_ui_ask "请选择 [1/2]" "1")
         case "${alpn_choice:-1}" in
             1) TUIC_ALPN="h3" ;;
             2) TUIC_ALPN="h3,http/1.1" ;;
@@ -9939,7 +10007,7 @@ _mihomoconf_setup() {
         local _socks_idx socks_port_input
         for ((_socks_idx=1; _socks_idx<=SOCKS_COUNT; _socks_idx++)); do
             while true; do
-                read -rp "    Socks5 #${_socks_idx} 监听端口 [默认 1080]: " socks_port_input
+                socks_port_input=$(_ui_ask "Socks5 #${_socks_idx} 监听端口" "1080")
                 socks_port_input=$(_mihomoconf_trim "${socks_port_input:-1080}")
                 if _is_valid_port "$socks_port_input"; then
                     if _mihomoconf_port_in_list "$socks_port_input" "${NEW_PORTS[@]}"; then
@@ -9978,7 +10046,7 @@ _mihomoconf_setup() {
         local _snell_idx snell_port_input
         for ((_snell_idx=1; _snell_idx<=SNELL_COUNT; _snell_idx++)); do
             while true; do
-                read -rp "    Snell #${_snell_idx} 监听端口 [默认 40000]: " snell_port_input
+                snell_port_input=$(_ui_ask "Snell #${_snell_idx} 监听端口" "40000")
                 snell_port_input=$(_mihomoconf_trim "${snell_port_input:-40000}")
                 if _is_valid_port "$snell_port_input"; then
                     if _mihomoconf_port_in_list "$snell_port_input" "${NEW_PORTS[@]}"; then
@@ -10000,7 +10068,7 @@ _mihomoconf_setup() {
         local i _psk_input _obfs_choice _obfs_host
         for i in "${!SNELL_PORTS[@]}"; do
             SNELL_TAGS+=("$(_mihomoconf_gen_listener_tag "snell_relay")")
-            read -rp "    Snell #$((i + 1)) PSK (Pre-Shared Key) [留空随机生成]: " _psk_input
+            _psk_input=$(_ui_ask "Snell #$((i + 1)) PSK (Pre-Shared Key) [留空随机生成]" "")
             _psk_input=$(_mihomoconf_trim "${_psk_input:-}")
             if [[ -z "$_psk_input" ]]; then
                 _psk_input=$(_mihomoconf_gen_anytls_password)
@@ -10009,7 +10077,7 @@ _mihomoconf_setup() {
             SNELL_PSKS+=("$_psk_input")
 
             local _ver_input
-            read -rp "    Snell #$((i + 1)) 协议版本 [1-5] (默认 5): " _ver_input
+            _ver_input=$(_ui_ask "Snell #$((i + 1)) 协议版本 [1-5]" "5")
             _ver_input=$(_mihomoconf_trim "${_ver_input:-5}")
             if [[ ! "$_ver_input" =~ ^[1-5]$ ]]; then
                 _warn "版本无效，将默认使用版本 5"
@@ -10018,7 +10086,7 @@ _mihomoconf_setup() {
             SNELL_VERSIONS+=("$_ver_input")
 
             local _reuse_input
-            read -rp "    Snell #$((i + 1)) 是否开启 TCP 连接复用 (reuse)? [Y/n] (默认 Y): " _reuse_input
+            if _ui_confirm "Snell #$((i + 1)) 是否开启 TCP 连接复用 (reuse)?" y; then _reuse_input=y; else _reuse_input=n; fi
             _reuse_input=$(_mihomoconf_trim "${_reuse_input:-y}")
             if [[ "$_reuse_input" =~ ^[Nn] ]]; then
                 SNELL_REUSES+=("false")
@@ -10030,18 +10098,18 @@ _mihomoconf_setup() {
             printf "      ${GREEN}1${PLAIN}) 不启用混淆 (默认)\n"
             printf "      ${GREEN}2${PLAIN}) HTTP 混淆\n"
             printf "      ${GREEN}3${PLAIN}) TLS 混淆\n"
-            read -rp "      选择 [1-3]（默认 1）: " _obfs_choice
+            _obfs_choice=$(_ui_ask "请选择 [1-3]" "1")
             _obfs_choice=$(_mihomoconf_trim "${_obfs_choice:-1}")
             case "$_obfs_choice" in
                 2)
                     SNELL_OBFS_MODES+=("http")
-                    read -rp "      混淆域名 (host) [默认 m.baidu.com]: " _obfs_host
+                    _obfs_host=$(_ui_ask "混淆域名 (host)" "m.baidu.com")
                     _obfs_host=$(_mihomoconf_trim "${_obfs_host:-m.baidu.com}")
                     SNELL_OBFS_HOSTS+=("$_obfs_host")
                     ;;
                 3)
                     SNELL_OBFS_MODES+=("tls")
-                    read -rp "      混淆域名 (host) [默认 m.baidu.com]: " _obfs_host
+                    _obfs_host=$(_ui_ask "混淆域名 (host)" "m.baidu.com")
                     _obfs_host=$(_mihomoconf_trim "${_obfs_host:-m.baidu.com}")
                     SNELL_OBFS_HOSTS+=("$_obfs_host")
                     ;;
@@ -10061,7 +10129,7 @@ _mihomoconf_setup() {
         local _masque_idx masque_port_input
         for ((_masque_idx=1; _masque_idx<=MASQUE_COUNT; _masque_idx++)); do
             while true; do
-                read -rp "    MASQUE #${_masque_idx} 监听端口 [默认 443]: " masque_port_input
+                masque_port_input=$(_ui_ask "MASQUE #${_masque_idx} 监听端口" "443")
                 masque_port_input=$(_mihomoconf_trim "${masque_port_input:-443}")
                 if _is_valid_port "$masque_port_input"; then
                     if _mihomoconf_port_in_list "$masque_port_input" "${NEW_PORTS[@]}"; then
@@ -10095,21 +10163,21 @@ _mihomoconf_setup() {
 
             local rand_octet=$(( RANDOM % 254 + 1 ))
             local default_ip="172.16.${rand_octet}.2/32"
-            read -rp "    MASQUE #$((i + 1)) tunnel IPv4 地址 [默认 ${default_ip}]: " _ip_input
+            _ip_input=$(_ui_ask "MASQUE #$((i + 1)) tunnel IPv4 地址" "${default_ip}")
             _ip_input=$(_mihomoconf_trim "${_ip_input:-$default_ip}")
             MASQUE_IP_CIDRS+=("$_ip_input")
 
             local rand_hex=$(printf '%x' $(( RANDOM % 65535 + 1 )))
             local default_ipv6="fd00::${rand_hex}/128"
-            read -rp "    MASQUE #$((i + 1)) tunnel IPv6 地址 [默认 ${default_ipv6}]: " _ipv6_input
+            _ipv6_input=$(_ui_ask "MASQUE #$((i + 1)) tunnel IPv6 地址" "${default_ipv6}")
             _ipv6_input=$(_mihomoconf_trim "${_ipv6_input:-$default_ipv6}")
             MASQUE_IPV6_CIDRS+=("$_ipv6_input")
 
-            read -rp "    MASQUE #$((i + 1)) MTU 大小 [默认 1280]: " _mtu_input
+            _mtu_input=$(_ui_ask "MASQUE #$((i + 1)) MTU 大小" "1280")
             _mtu_input=$(_mihomoconf_trim "${_mtu_input:-1280}")
             MASQUE_MTUS+=("$_mtu_input")
 
-            read -rp "    MASQUE #$((i + 1)) 是否启用 UDP 隧道? [Y/n]: " _udp_input
+            if _ui_confirm "MASQUE #$((i + 1)) 是否启用 UDP 隧道?" y; then _udp_input=y; else _udp_input=n; fi
             _udp_input=$(_mihomoconf_trim "${_udp_input:-Y}")
             if [[ "$_udp_input" =~ ^[Nn]$ ]]; then
                 MASQUE_UDPS+=("false")
@@ -10120,7 +10188,7 @@ _mihomoconf_setup() {
             printf "    MASQUE #$((i + 1)) 传输层网络 (network):\n"
             printf "      ${GREEN}1${PLAIN}) quic (HTTP/3 over QUIC，默认)\n"
             printf "      ${GREEN}2${PLAIN}) h2 (HTTP/2 over TCP/TLS)\n"
-            read -rp "      选择 [1-2]（默认 1）: " _network_choice
+            _network_choice=$(_ui_ask "请选择 [1-2]" "1")
             _network_choice=$(_mihomoconf_trim "${_network_choice:-1}")
             if [[ "$_network_choice" == "2" ]]; then
                 MASQUE_NETWORKS+=("h2")
@@ -10138,7 +10206,7 @@ _mihomoconf_setup() {
         local _sudoku_idx sudoku_port_input
         for ((_sudoku_idx=1; _sudoku_idx<=SUDOKU_COUNT; _sudoku_idx++)); do
             while true; do
-                read -rp "    Sudoku #${_sudoku_idx} 监听端口 [默认 8443]: " sudoku_port_input
+                sudoku_port_input=$(_ui_ask "Sudoku #${_sudoku_idx} 监听端口" "8443")
                 sudoku_port_input=$(_mihomoconf_trim "${sudoku_port_input:-8443}")
                 if _is_valid_port "$sudoku_port_input"; then
                     if _mihomoconf_port_in_list "$sudoku_port_input" "${NEW_PORTS[@]}"; then
@@ -10160,7 +10228,7 @@ _mihomoconf_setup() {
         local i _sudoku_key_input _aead_choice _pad_min_input _pad_max_input _table_choice _mask_disable_input _mask_mode_choice
         for i in "${!SUDOKU_PORTS[@]}"; do
             SUDOKU_TAGS+=("$(_mihomoconf_gen_listener_tag "sudoku_relay")")
-            read -rp "    Sudoku #$((i + 1)) Key/密匙 [留空自动生成 UUID]: " _sudoku_key_input
+            _sudoku_key_input=$(_ui_ask "Sudoku #$((i + 1)) Key/密匙 [留空自动生成 UUID]" "")
             _sudoku_key_input=$(_mihomoconf_trim "${_sudoku_key_input:-}")
             if [[ -z "$_sudoku_key_input" ]]; then
                 _sudoku_key_input=$(_mihomoconf_gen_uuid)
@@ -10172,7 +10240,7 @@ _mihomoconf_setup() {
             printf "      ${GREEN}1${PLAIN}) chacha20-poly1305 (默认)\n"
             printf "      ${GREEN}2${PLAIN}) aes-128-gcm\n"
             printf "      ${GREEN}3${PLAIN}) none\n"
-            read -rp "      选择 [1-3]（默认 1）: " _aead_choice
+            _aead_choice=$(_ui_ask "请选择 [1-3]" "1")
             _aead_choice=$(_mihomoconf_trim "${_aead_choice:-1}")
             case "$_aead_choice" in
                 2) SUDOKU_AEADS+=("aes-128-gcm") ;;
@@ -10180,18 +10248,18 @@ _mihomoconf_setup() {
                 *) SUDOKU_AEADS+=("chacha20-poly1305") ;;
             esac
 
-            read -rp "    Sudoku #$((i + 1)) 最小混淆填充 padding-min [默认 1]: " _pad_min_input
+            _pad_min_input=$(_ui_ask "Sudoku #$((i + 1)) 最小混淆填充 padding-min" "1")
             _pad_min_input=$(_mihomoconf_trim "${_pad_min_input:-1}")
             SUDOKU_PADDING_MINS+=("$_pad_min_input")
 
-            read -rp "    Sudoku #$((i + 1)) 最大混淆填充 padding-max [默认 15]: " _pad_max_input
+            _pad_max_input=$(_ui_ask "Sudoku #$((i + 1)) 最大混淆填充 padding-max" "15")
             _pad_max_input=$(_mihomoconf_trim "${_pad_max_input:-15}")
             SUDOKU_PADDING_MAXS+=("$_pad_max_input")
 
             printf "    选择混淆表类型 (table-type):\n"
             printf "      ${GREEN}1${PLAIN}) prefer_ascii (伪装为文本，默认)\n"
             printf "      ${GREEN}2${PLAIN}) prefer_entropy (高熵随机)\n"
-            read -rp "      选择 [1-2]（默认 1）: " _table_choice
+            _table_choice=$(_ui_ask "请选择 [1-2]" "1")
             _table_choice=$(_mihomoconf_trim "${_table_choice:-1}")
             if [[ "$_table_choice" == "2" ]]; then
                 SUDOKU_TABLES+=("prefer_entropy")
@@ -10199,7 +10267,7 @@ _mihomoconf_setup() {
                 SUDOKU_TABLES+=("prefer_ascii")
             fi
 
-            read -rp "    是否禁用 HTTP 伪装 httpmask.disable? [y/N]: " _mask_disable_input
+            if _ui_confirm "是否禁用 HTTP 伪装 httpmask.disable?" n; then _mask_disable_input=y; else _mask_disable_input=n; fi
             _mask_disable_input=$(_mihomoconf_trim "${_mask_disable_input:-N}")
             if [[ "$_mask_disable_input" =~ ^[Yy]$ ]]; then
                 SUDOKU_HTTPMASK_DISABLES+=("true")
@@ -10212,7 +10280,7 @@ _mihomoconf_setup() {
                 printf "      ${GREEN}3${PLAIN}) stream\n"
                 printf "      ${GREEN}4${PLAIN}) poll\n"
                 printf "      ${GREEN}5${PLAIN}) ws\n"
-                read -rp "      选择 [1-5]（默认 1）: " _mask_mode_choice
+                _mask_mode_choice=$(_ui_ask "请选择 [1-5]" "1")
                 _mask_mode_choice=$(_mihomoconf_trim "${_mask_mode_choice:-1}")
                 case "$_mask_mode_choice" in
                     2) SUDOKU_HTTPMASK_MODES+=("legacy") ;;
@@ -10274,7 +10342,7 @@ _mihomoconf_setup() {
     else
         HOST_DEFAULT="$SERVER_IP"
     fi
-    read -rp "  链接/JSON Host [默认 ${HOST_DEFAULT}，可填域名]: " host_input
+    host_input=$(_ui_ask "链接/JSON Host (可填域名)" "${HOST_DEFAULT}")
     SERVER_HOST=$(_mihomoconf_trim "${host_input:-$HOST_DEFAULT}")
     _info "导出 Host: ${SERVER_HOST}"
 
@@ -11045,13 +11113,13 @@ MIHOMOCONF_HEADER
     # Shadowsocks 输出
     if [[ "$ENABLE_SS" == "y" ]]; then
         local ss_export_udp_answer ss_export_uot_answer _ss_udp_bool _ss_uot_bool
-        read -rp "  SS 导出: 开启 UDP? [Y/n]: " ss_export_udp_answer
+        if _ui_confirm "SS 导出: 开启 UDP?" y; then ss_export_udp_answer=y; else ss_export_udp_answer=n; fi
         if [[ "$ss_export_udp_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             SS_EXPORT_UDP="0"
             SS_EXPORT_UOT="0"
             _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
         else
-            read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
+            if _ui_confirm "SS 导出: 开启 UDP over TCP v2?" n; then ss_export_uot_answer=y; else ss_export_uot_answer=n; fi
             if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
                 SS_EXPORT_UOT="1"
             else
@@ -12505,7 +12573,7 @@ _mihomoconf_post_setup_service_prompt() {
     fi
 
     if _mihomo_service_is_active; then
-        read -rp "  检测到 mihomo 已启动，立即热重载 (Reload) 应用新配置? [Y/n]: " answer
+        if _ui_confirm "检测到 mihomo 已启动，立即热重载 (Reload) 应用新配置?" y; then answer=y; else answer=n; fi
         if [[ "$answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已跳过热重载"
             return 0
@@ -12515,7 +12583,7 @@ _mihomoconf_post_setup_service_prompt() {
     fi
 
     if _mihomo_service_is_configured; then
-        read -rp "  检测到 mihomo 服务已配置，立即启动? [Y/n]: " answer
+        if _ui_confirm "检测到 mihomo 服务已配置，立即启动?" y; then answer=y; else answer=n; fi
         if [[ "$answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已跳过启动"
             return 0
@@ -12525,9 +12593,9 @@ _mihomoconf_post_setup_service_prompt() {
     fi
 
     if [[ "$tls_required" == "1" ]]; then
-        read -rp "  检测到 SSL 证书，配置自启并启动 mihomo? [Y/n]: " answer
+        if _ui_confirm "检测到 SSL 证书，配置自启并启动 mihomo?" y; then answer=y; else answer=n; fi
     else
-        read -rp "  配置自启并启动 mihomo? [Y/n]: " answer
+        if _ui_confirm "配置自启并启动 mihomo?" y; then answer=y; else answer=n; fi
     fi
     if [[ "$answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
         _info "已跳过自启动配置"
@@ -12555,7 +12623,7 @@ _mihomo_enable() {
     if [[ -n "$service_file" && -f "$service_file" ]]; then
         _warn "${service_name} 服务文件已存在"
         local overwrite
-        read -rp "  覆盖? [y/N]: " overwrite
+        if _ui_confirm "覆盖?" n; then overwrite=y; else overwrite=n; fi
         if [[ ! "$overwrite" =~ ^[Yy] ]]; then
             _press_any_key
             return
@@ -12589,7 +12657,7 @@ _mihomo_uninstall() {
         printf "    可执行文件: %s\n" "/usr/local/bin/mihomo"
     fi
     printf "    配置目录: %s\n" "$config_dir"
-    read -rp "  确认卸载 Mihomo? [y/N]: " confirm
+    if _ui_confirm "确认卸载 Mihomo?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -12656,7 +12724,7 @@ _mihomo_uninstall() {
     done
 
     if [[ -d "$config_dir" ]]; then
-        read -rp "  同时删除配置目录 ${config_dir}? [y/N]: " remove_config
+        if _ui_confirm "同时删除配置目录 ${config_dir}?" n; then remove_config=y; else remove_config=n; fi
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$config_dir"
             removed_count=$((removed_count + 1))
@@ -12745,7 +12813,7 @@ _mihomo_read_config() {
         return
     fi
 
-    read -rp "  输出模式: 1) 完整信息  2) 仅分享链接 [默认 2]: " output_mode_answer
+    output_mode_answer=$(_ui_ask "输出模式: 1) 完整信息  2) 仅分享链接" "2")
     case "${output_mode_answer:-2}" in
         2) OUTPUT_LINK_ONLY="1" ;;
         1) OUTPUT_LINK_ONLY="0" ;;
@@ -12758,7 +12826,7 @@ _mihomo_read_config() {
 
     local EXPORT_PROXIES="0"
     local export_proxies_answer
-    read -rp "  是否同时导出 VPS 自身的出站节点 (如 WARP、链式代理)? [y/N, 默认 N]: " export_proxies_answer
+    if _ui_confirm "是否同时导出 VPS 自身的出站节点 (如 WARP、链式代理)?" n; then export_proxies_answer=y; else export_proxies_answer=n; fi
     if [[ "$export_proxies_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
         EXPORT_PROXIES="1"
     fi
@@ -12806,13 +12874,13 @@ _mihomo_read_config() {
                 fi
                 if [[ "$SS_EXPORT_ASKED" != "1" ]]; then
                     local ss_export_udp_answer ss_export_uot_answer
-                    read -rp "  SS 导出: 开启 UDP? [Y/n]: " ss_export_udp_answer < /dev/tty
+                    read -rp "  ${CYAN}➜${PLAIN} SS 导出: 开启 UDP? [Y/n]: " ss_export_udp_answer < /dev/tty
                     if [[ "$ss_export_udp_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
                         SS_EXPORT_UDP="0"
                         SS_EXPORT_UOT="0"
                         _info "已关闭 SS 导出的 UDP 与 UDP over TCP v2"
                     else
-                        read -rp "  SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer < /dev/tty
+                        read -rp "  ${CYAN}➜${PLAIN} SS 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer < /dev/tty
                         if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
                             SS_EXPORT_UOT="1"
                         else
@@ -15969,7 +16037,7 @@ _mihomorule_pick_outbound() {
     printf "      [%d] vpsgo-ipv6-direct (直连 - 强制 IPv6)\n" "$idx"
 
     _separator
-    read -rp "  选择出口节点 [序号]: " pick
+    pick=$(_ui_ask "请选择 出口节点 [序号]" "")
     pick=$(_mihomoconf_trim "${pick:-}")
     if [[ -z "$pick" || ! "$pick" =~ ^[0-9]+$ ]]; then
         _error_no_exit "请输入有效序号"
@@ -16239,7 +16307,7 @@ _mihomorule_prompt_priority() {
         printf "      [%d] 插入在 [%d] 之后\n" "$i" "$i"
     done
     _separator
-    read -rp "  请选择插入位置 [0-${idx}, 默认 ${idx} (最后面)]: " pick
+    pick=$(_ui_ask "请选择 插入位置 [0-${idx}] (默认最后)" "${idx}")
     pick=$(_mihomoconf_trim "${pick:-}")
     if [[ -z "$pick" ]]; then
         pick="$idx"
@@ -16274,7 +16342,7 @@ _mihomorule_search_ios_rule_add() {
     local rule_name rule_path related_text applied=0 failed=0
     local -a result_names=() result_paths=() selected_names=() selected_paths=() tokens=()
 
-    read -rp "  输入要搜索的规则/服务名称: " query
+    query=$(_ui_ask "输入要搜索的规则/服务名称" "")
     query=$(_mihomoconf_trim "${query:-}")
     if [[ -z "$query" ]]; then
         _error_no_exit "搜索名称不能为空"
@@ -16308,7 +16376,7 @@ _mihomorule_search_ios_rule_add() {
         printf "      [%d] %s  ${DIM}%s${PLAIN}\n" "$((idx + 1))" "${result_names[$idx]}" "${result_paths[$idx]}"
     done
 
-    read -rp "  选择规则 [序号，可多选如 1 3 5，Enter 取消]: " pick
+    pick=$(_ui_ask "请选择 规则 [序号，可多选如 1 3 5，Enter 取消]" "")
     pick=$(_mihomoconf_trim "${pick:-}")
     [[ -n "$pick" ]] || return 1
     pick="${pick//,/ }"
@@ -16455,7 +16523,7 @@ _mihomorule_manage_priority() {
         fi
     done
 
-    read -rp "  选择要调整的规则 [序号]: " pick
+    pick=$(_ui_ask "请选择 要调整的规则 [序号]" "")
     pick=$(_mihomoconf_trim "${pick:-}")
     if [[ -z "$pick" || ! "$pick" =~ ^[0-9]+$ ]]; then
         _error_no_exit "请输入有效序号"
@@ -16473,7 +16541,7 @@ _mihomorule_manage_priority() {
     _separator
     _menu_pair "1" "上移" "" "green" "2" "下移" "" "green"
     _menu_pair "3" "置顶" "" "green" "4" "置底" "" "yellow"
-    read -rp "  选择 [1-4]: " action
+    action=$(_ui_ask "请选择 [1-4]" "")
     action=$(_mihomoconf_trim "${action:-}")
 
     case "$action" in
@@ -16573,10 +16641,10 @@ _mihomorule_add_dns_pre_rule_flow() {
         _separator
         
         local pick_user
-        read -rp "  选择用户 [序号/m]: " pick_user
+        pick_user=$(_ui_ask "请选择 用户 [序号/m]" "")
         pick_user=$(_mihomoconf_trim "${pick_user:-}")
         if [[ "$pick_user" == "m" || "$pick_user" == "M" ]]; then
-            read -rp "  请输入入站用户或UUID: " target_user
+            target_user=$(_ui_ask "请输入入站用户或UUID" "")
             target_user=$(_mihomoconf_trim "${target_user:-}")
         else
             if [[ -z "$pick_user" || ! "$pick_user" =~ ^[0-9]+$ ]]; then
@@ -16591,7 +16659,7 @@ _mihomorule_add_dns_pre_rule_flow() {
             target_user="${user_list[$ui]}"
         fi
     else
-        read -rp "  请输入入站用户或UUID: " target_user
+        target_user=$(_ui_ask "请输入入站用户或UUID" "")
         target_user=$(_mihomoconf_trim "${target_user:-}")
     fi
 
@@ -16616,7 +16684,7 @@ _mihomorule_add_dns_pre_rule_flow() {
     _separator
 
     local pick_scope
-    read -rp "  选择范围 [序号]: " pick_scope
+    pick_scope=$(_ui_ask "请选择 范围 [序号]" "")
     pick_scope=$(_mihomoconf_trim "${pick_scope:-}")
     if [[ -z "$pick_scope" || ! "$pick_scope" =~ ^[0-9]+$ ]]; then
         _error_no_exit "请输入有效序号"
@@ -16694,7 +16762,7 @@ _mihomo_outbound_rule_manage() {
             _menu_pair "9" "本地解析直发分流" "DNS 预解析" "green" "10" "Gemini/Google IPv4 定向" "解决 Gemini 地区限制" "green"
             _menu_item "0" "返回上级菜单" "" "red"
             _separator
-            read -rp "  选择 [0-10]: " ch
+            ch=$(_ui_ask "请选择 [0-10]" "")
         fi
         case "$ch" in
             1)
@@ -16736,7 +16804,7 @@ _mihomo_outbound_rule_manage() {
                 ;;
             5)
                 local port_input port_match out_name out_show position
-                read -rp "  目标端口/范围 (如 443 或 80/443/8000-9000): " port_input
+                port_input=$(_ui_ask "目标端口/范围 (如 443 或 80/443/8000-9000)" "")
                 if ! _mihomorule_normalize_port_match "$port_input" port_match; then
                     _error_no_exit "端口格式无效，支持单端口、范围和 / 分隔的多个端口"
                     _press_any_key
@@ -16759,10 +16827,10 @@ _mihomo_outbound_rule_manage() {
                 ;;
             6)
                 local rule_label provider_name url behavior format interval path out_name out_show position
-                read -rp "  规则名称 [如 youtube_domain]: " rule_label
+                rule_label=$(_ui_ask "规则名称 [如 youtube_domain]" "")
                 rule_label=$(_mihomoconf_trim "${rule_label:-}")
                 provider_name=$(_mihomorule_safe_provider_name "$rule_label")
-                read -rp "  远程规则 URL: " url
+                url=$(_ui_ask "远程规则 URL" "")
                 url=$(_mihomoconf_trim "${url:-}")
                 if [[ "$url" != http://* && "$url" != https://* ]]; then
                     _error_no_exit "远程规则 URL 必须以 http:// 或 https:// 开头"
@@ -16776,7 +16844,7 @@ _mihomo_outbound_rule_manage() {
                     format="yaml"
                     behavior="classical"
                 fi
-                read -rp "  format [默认 ${format}; yaml/text/mrs]: " format
+                format=$(_ui_ask "format (yaml/text/mrs)" "${format}")
                 format=$(_mihomoconf_trim "${format:-}")
                 [[ -n "$format" ]] || format=$([[ "$url" == *.mrs* ]] && printf 'mrs' || printf 'yaml')
                 case "$format" in
@@ -16784,21 +16852,21 @@ _mihomo_outbound_rule_manage() {
                     *) _error_no_exit "format 仅支持 yaml/text/mrs"; _press_any_key; continue ;;
                 esac
                 if [[ "$format" == "mrs" ]]; then
-                    read -rp "  behavior [默认 domain; domain/ipcidr]: " behavior
+                    behavior=$(_ui_ask "behavior (domain/ipcidr)" "domain")
                     behavior=$(_mihomoconf_trim "${behavior:-domain}")
                     case "$behavior" in
                         domain|ipcidr) ;;
                         *) _error_no_exit "mrs 仅支持 behavior=domain/ipcidr"; _press_any_key; continue ;;
                     esac
                 else
-                    read -rp "  behavior [默认 classical; classical/domain/ipcidr]: " behavior
+                    behavior=$(_ui_ask "behavior (classical/domain/ipcidr)" "classical")
                     behavior=$(_mihomoconf_trim "${behavior:-classical}")
                     case "$behavior" in
                         classical|domain|ipcidr) ;;
                         *) _error_no_exit "behavior 仅支持 classical/domain/ipcidr"; _press_any_key; continue ;;
                     esac
                 fi
-                read -rp "  更新间隔秒数 [默认 86400]: " interval
+                interval=$(_ui_ask "更新间隔秒数" "86400")
                 interval=$(_mihomoconf_trim "${interval:-86400}")
                 if ! _is_digit "$interval" || [[ "$interval" -le 0 ]]; then
                     _error_no_exit "更新间隔必须为正整数"
@@ -16806,7 +16874,7 @@ _mihomo_outbound_rule_manage() {
                     continue
                 fi
                 path="./ruleset/${provider_name}.${format}"
-                read -rp "  本地缓存路径 [默认 ${path}]: " path
+                path=$(_ui_ask "本地缓存路径" "${path}")
                 path=$(_mihomoconf_trim "${path:-./ruleset/${provider_name}.${format}}")
                 if ! _mihomorule_pick_outbound "$config_file" out_name out_show; then
                     _press_any_key
@@ -16861,7 +16929,7 @@ _mihomo_outbound_rule_manage() {
                     _press_any_key
                     continue
                 fi
-                read -rp "  选择要删除的规则 [序号]: " pick
+                pick=$(_ui_ask "请选择 要删除的规则 [序号]" "")
                 pick=$(_mihomoconf_trim "${pick:-}")
                 if [[ -z "$pick" || ! "$pick" =~ ^[0-9]+$ ]]; then
                     _error_no_exit "请输入有效序号"
@@ -16934,7 +17002,7 @@ _mihomo_outbound_and_rule_manage() {
         _separator
 
         local ch
-        read -rp "  选择 [0-17]: " ch
+        ch=$(_ui_ask "请选择 [0-17]" "")
         ch=$(_mihomoconf_trim "${ch:-}")
         case "$ch" in
             1)
@@ -16970,7 +17038,7 @@ _mihomo_outbound_and_rule_manage() {
                     printf "      [%d] %s\n" "$idx" "$_sys_u"
                 done
                 _separator
-                read -rp "  选择系统用户 [序号]: " sys_user_pick
+                sys_user_pick=$(_ui_ask "请选择 系统用户 [序号]" "")
                 sys_user_pick=$(_mihomoconf_trim "${sys_user_pick:-}")
                 if [[ -z "$sys_user_pick" || ! "$sys_user_pick" =~ ^[0-9]+$ ]]; then
                     _error_no_exit "选择无效"
@@ -17013,7 +17081,7 @@ _mihomo_outbound_and_rule_manage() {
                 _menu_item "2" "分流 Netflix" "" "green"
                 _separator
                 local quick_ch
-                read -rp "  选择 [1-2]: " quick_ch
+                quick_ch=$(_ui_ask "请选择 [1-2]" "")
                 case "$quick_ch" in
                     1) _mihomo_outbound_rule_manage "3" ;;
                     2) _mihomo_outbound_rule_manage "4" ;;
@@ -17395,7 +17463,7 @@ _mihomo_chain_proxy_manage() {
             _menu_pair "7" "删除绑定规则" "" "green" "8" "新增入站用户" "" "green"
             _menu_item "0" "返回上级菜单" "" "red"
             _separator
-            read -rp "  选择 [0-8]: " ch
+            ch=$(_ui_ask "请选择 [0-8]" "")
         fi
         case "$ch" in
             1)
@@ -17422,7 +17490,7 @@ _mihomo_chain_proxy_manage() {
                 local out_wg_preshared_key out_wg_reserved out_wg_mtu out_wg_keepalive
                 local out_vless_uuid out_vless_flow out_vless_public_key out_vless_short_id out_vless_client_fingerprint out_vless_packet_encoding out_vless_encryption
                 local out_transport_network out_transport_path out_transport_host out_transport_tls out_snell_version out_snell_reuse
-                read -rp "  选择 [1-2]: " import_mode
+                import_mode=$(_ui_ask "请选择 [1-2]" "")
                 import_mode=$(_mihomoconf_trim "${import_mode:-}")
                 case "$import_mode" in
                     1|2) ;;
@@ -17476,7 +17544,7 @@ _mihomo_chain_proxy_manage() {
                         local ss_decoded kv k v
                         local -a _qarr
 
-                        read -rp "  输入节点链接/配置 (支持 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls/ssh): " in_link
+                        in_link=$(_ui_ask "输入节点链接/配置 (支持 ss/vmess/vless/trojan/snell/hy2/hy/tuic/wg/socks5/http/anytls/ssh)" "")
                         in_link=$(_mihomoconf_trim "${in_link:-}")
                         if [[ -z "$in_link" ]]; then
                             _error_no_exit "链接不能为空"
@@ -18208,9 +18276,9 @@ _mihomo_chain_proxy_manage() {
                         if [[ -z "$out_name" ]]; then
                             out_name=$(_mihomochain_default_outbound_name "$out_type" "$out_server" "$out_port")
                         fi
-                        read -rp "  自定义出口节点名称? [y/N]: " rename_confirm
+                        if _ui_confirm "自定义出口节点名称?" n; then rename_confirm=y; else rename_confirm=n; fi
                         if [[ "$rename_confirm" =~ ^[Yy] ]]; then
-                            read -rp "  出口节点名称 [默认 ${out_name}]: " custom_name_input
+                            custom_name_input=$(_ui_ask "出口节点名称" "${out_name}")
                             out_name=$(_mihomoconf_trim "${custom_name_input:-$out_name}")
                         fi
                         ;;
@@ -18223,7 +18291,7 @@ _mihomo_chain_proxy_manage() {
                         _menu_pair "9" "ssh" "" "green" "" "" "" ""
                         _separator
                         local type_choice
-                        read -rp "  出站类型 [1-9]: " type_choice
+                        type_choice=$(_ui_ask "出站类型 [1-9]" "")
                         case "$type_choice" in
                             1) out_type="ss" ;;
                             2) out_type="hysteria2" ;;
@@ -18236,10 +18304,10 @@ _mihomo_chain_proxy_manage() {
                             9) out_type="ssh" ;;
                             *) _error_no_exit "无效类型"; _press_any_key; continue ;;
                         esac
-                        read -rp "  出口节点名称: " out_name
+                        out_name=$(_ui_ask "出口节点名称" "")
                         out_name=$(_mihomoconf_trim "${out_name:-}")
-                        read -rp "  server: " out_server
-                        read -rp "  port: " out_port
+                        out_server=$(_ui_ask "server" "")
+                        out_port=$(_ui_ask "port" "")
                         if [[ -z "$out_server" ]] || ! _is_valid_port "$out_port"; then
                             _error_no_exit "server/port 输入无效"
                             _press_any_key
@@ -18248,27 +18316,27 @@ _mihomo_chain_proxy_manage() {
                         case "$out_type" in
                             ss)
                                 local ss_udp_answer ss_uot_answer
-                                read -rp "  cipher [默认 aes-256-gcm]: " out_cipher
+                                out_cipher=$(_ui_ask "cipher" "aes-256-gcm")
                                 out_cipher="${out_cipher:-aes-256-gcm}"
-                                read -rp "  password: " out_pass
+                                out_pass=$(_ui_ask "password" "")
                                 if [[ -z "$out_pass" ]]; then
                                     _error_no_exit "ss password 不能为空"
                                     _press_any_key
                                     continue
                                 fi
-                                read -rp "  开启 UDP? [Y/n]: " ss_udp_answer
+                                if _ui_confirm "开启 UDP?" y; then ss_udp_answer=y; else ss_udp_answer=n; fi
                                 if [[ "$ss_udp_answer" =~ ^([Nn]|[Nn][Oo])$ ]]; then
                                     out_ss_udp="0"
                                     out_ss_uot="0"
                                 else
                                     out_ss_udp="1"
-                                    read -rp "  开启 UDP over TCP v2? [y/N]: " ss_uot_answer
+                                    if _ui_confirm "开启 UDP over TCP v2?" n; then ss_uot_answer=y; else ss_uot_answer=n; fi
                                     [[ "$ss_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]] && out_ss_uot="1" || out_ss_uot="0"
                                 fi
                                 ;;
                             anytls)
-                                read -rp "  password: " out_pass
-                                read -rp "  sni/peer [可留空]: " out_sni
+                                out_pass=$(_ui_ask "password" "")
+                                out_sni=$(_ui_ask "sni/peer [可留空]" "")
                                 if [[ -z "$out_pass" ]]; then
                                     _error_no_exit "anytls password 不能为空"
                                     _press_any_key
@@ -18276,17 +18344,17 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                             hysteria2)
-                                read -rp "  password: " out_pass
-                                read -rp "  sni/peer [可留空]: " out_sni
+                                out_pass=$(_ui_ask "password" "")
+                                out_sni=$(_ui_ask "sni/peer [可留空]" "")
                                 local hy2_insecure_input
-                                read -rp "  insecure (跳过证书验证)? [y/N]: " hy2_insecure_input
+                                if _ui_confirm "insecure (跳过证书验证)?" n; then hy2_insecure_input=y; else hy2_insecure_input=n; fi
                                 [[ "$hy2_insecure_input" =~ ^[Yy] ]] && out_insecure="1" || out_insecure="0"
-                                read -rp "  obfs [可留空，如 salamander]: " out_obfs
+                                out_obfs=$(_ui_ask "obfs [可留空，如 salamander]" "")
                                 if [[ -n "$out_obfs" ]]; then
-                                    read -rp "  obfs-password [可留空]: " out_obfs_pass
+                                    out_obfs_pass=$(_ui_ask "obfs-password [可留空]" "")
                                 fi
-                                read -rp "  mport [可留空]: " out_mport
-                                read -rp "  congestion-control [默认 brutal]: " out_hy2_cc
+                                out_mport=$(_ui_ask "mport [可留空]" "")
+                                out_hy2_cc=$(_ui_ask "congestion-control" "brutal")
                                 out_hy2_cc=$(_mihomoconf_trim "${out_hy2_cc:-brutal}")
                                 if [[ -z "$out_pass" ]]; then
                                     _error_no_exit "hy2 password 不能为空"
@@ -18295,23 +18363,23 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                             vless)
-                                read -rp "  uuid: " out_vless_uuid
+                                out_vless_uuid=$(_ui_ask "uuid" "")
                                 out_vless_uuid=$(_mihomoconf_trim "${out_vless_uuid:-}")
-                                read -rp "  servername/sni [可留空，默认跟随 server]: " out_sni
+                                out_sni=$(_ui_ask "servername/sni [可留空，默认跟随 server]" "")
                                 out_sni=$(_mihomoconf_trim "${out_sni:-}")
-                                read -rp "  flow [默认 xtls-rprx-vision]: " out_vless_flow
+                                out_vless_flow=$(_ui_ask "flow" "xtls-rprx-vision")
                                 out_vless_flow=$(_mihomoconf_trim "${out_vless_flow:-xtls-rprx-vision}")
-                                read -rp "  client-fingerprint [默认 chrome]: " out_vless_client_fingerprint
+                                out_vless_client_fingerprint=$(_ui_ask "client-fingerprint" "chrome")
                                 out_vless_client_fingerprint=$(_mihomoconf_trim "${out_vless_client_fingerprint:-chrome}")
-                                read -rp "  packet-encoding [默认 xudp]: " out_vless_packet_encoding
-                                read -rp "  vless encryption [可留空, 如 mlkem768...]: " out_vless_encryption
+                                out_vless_packet_encoding=$(_ui_ask "packet-encoding" "xudp")
+                                out_vless_encryption=$(_ui_ask "vless encryption [可留空, 如 mlkem768...]" "")
                                 out_vless_encryption=$(_mihomoconf_trim "${out_vless_encryption:-}")
-                                read -rp "  reality public-key [可留空]: " out_vless_public_key
+                                out_vless_public_key=$(_ui_ask "reality public-key [可留空]" "")
                                 out_vless_public_key=$(_mihomoconf_trim "${out_vless_public_key:-}")
-                                read -rp "  reality short-id [可留空]: " out_vless_short_id
+                                out_vless_short_id=$(_ui_ask "reality short-id [可留空]" "")
                                 out_vless_short_id=$(_mihomoconf_trim "${out_vless_short_id:-}")
                                 local vless_insecure_input
-                                read -rp "  insecure (跳过证书验证)? [y/N]: " vless_insecure_input
+                                if _ui_confirm "insecure (跳过证书验证)?" n; then vless_insecure_input=y; else vless_insecure_input=n; fi
                                 [[ "$vless_insecure_input" =~ ^[Yy] ]] && out_insecure="1" || out_insecure="0"
                                 if [[ -z "$out_vless_uuid" ]]; then
                                     _error_no_exit "vless uuid 不能为空"
@@ -18320,26 +18388,26 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                             socks5|http)
-                                read -rp "  username [可留空]: " out_user
-                                read -rp "  password [可留空]: " out_pass
+                                out_user=$(_ui_ask "username [可留空]" "")
+                                out_pass=$(_ui_ask "password [可留空]" "")
                                 ;;
                             tuic)
-                                read -rp "  uuid [留空自动生成]: " out_vless_uuid
+                                out_vless_uuid=$(_ui_ask "uuid [留空自动生成]" "")
                                 out_vless_uuid=$(_mihomoconf_trim "${out_vless_uuid:-}")
                                 if [[ -z "$out_vless_uuid" ]]; then
                                     out_vless_uuid=$(_mihomoconf_gen_uuid)
                                     _info "已自动生成 UUID: ${out_vless_uuid}"
                                 fi
-                                read -rp "  password: " out_pass
-                                read -rp "  sni/peer [可留空]: " out_sni
+                                out_pass=$(_ui_ask "password" "")
+                                out_sni=$(_ui_ask "sni/peer [可留空]" "")
                                 local tuic_insecure_input
-                                read -rp "  insecure (跳过证书验证)? [y/N]: " tuic_insecure_input
+                                if _ui_confirm "insecure (跳过证书验证)?" n; then tuic_insecure_input=y; else tuic_insecure_input=n; fi
                                 [[ "$tuic_insecure_input" =~ ^[Yy] ]] && out_insecure="1" || out_insecure="0"
-                                read -rp "  congestion-control [默认 bbr]: " out_vless_flow
+                                out_vless_flow=$(_ui_ask "congestion-control" "bbr")
                                 out_vless_flow=$(_mihomoconf_trim "${out_vless_flow:-bbr}")
-                                read -rp "  alpn [默认 h3]: " out_vless_client_fingerprint
+                                out_vless_client_fingerprint=$(_ui_ask "alpn" "h3")
                                 out_vless_client_fingerprint=$(_mihomoconf_trim "${out_vless_client_fingerprint:-h3}")
-                                read -rp "  udp-relay-mode [默认 native]: " out_vless_packet_encoding
+                                out_vless_packet_encoding=$(_ui_ask "udp-relay-mode" "native")
                                 out_vless_packet_encoding=$(_mihomoconf_trim "${out_vless_packet_encoding:-native}")
                                 if [[ -z "$out_pass" ]]; then
                                     _error_no_exit "tuic password 不能为空"
@@ -18348,16 +18416,16 @@ _mihomo_chain_proxy_manage() {
                                 fi
                                 ;;
                             ssh)
-                                read -rp "  username: " out_user
+                                out_user=$(_ui_ask "username" "")
                                 out_user=$(_mihomoconf_trim "${out_user:-}")
                                 if [[ -z "$out_user" ]]; then
                                     _error_no_exit "ssh username 不能为空"
                                     _press_any_key
                                     continue
                                 fi
-                                read -rp "  password [可留空，若使用密钥认证]: " out_pass
+                                out_pass=$(_ui_ask "password [可留空，若使用密钥认证]" "")
                                 out_pass=$(_mihomoconf_trim "${out_pass:-}")
-                                read -rp "  private-key (密钥文件绝对路径，或直接粘贴私钥内容，支持多行，回车留空/跳过): " out_wg_private_key
+                                out_wg_private_key=$(_ui_ask "private-key (密钥文件绝对路径，或直接粘贴私钥内容，支持多行，回车留空/跳过)" "")
                                 out_wg_private_key=$(_mihomoconf_trim "${out_wg_private_key:-}")
                                 if [[ "$out_wg_private_key" == "-----BEGIN "* ]]; then
                                     local line
@@ -18383,33 +18451,33 @@ _mihomo_chain_proxy_manage() {
                                     continue
                                 fi
                                 if [[ -n "$out_wg_private_key" ]]; then
-                                    read -rp "  private-key-passphrase [密匙密码，可留空]: " out_wg_public_key
+                                    out_wg_public_key=$(_ui_ask "private-key-passphrase [密匙密码，可留空]" "")
                                     out_wg_public_key=$(_mihomoconf_trim "${out_wg_public_key:-}")
                                 fi
                                 ;;
                             wireguard)
-                                read -rp "  ip (本地地址, 如 172.16.0.2/32): " out_wg_ip
+                                out_wg_ip=$(_ui_ask "ip (本地地址, 如 172.16.0.2/32)" "")
                                 out_wg_ip=$(_mihomoconf_trim "${out_wg_ip:-}")
-                                read -rp "  ipv6 [可留空]: " out_wg_ipv6
+                                out_wg_ipv6=$(_ui_ask "ipv6 [可留空]" "")
                                 out_wg_ipv6=$(_mihomoconf_trim "${out_wg_ipv6:-}")
-                                read -rp "  private-key: " out_wg_private_key
+                                out_wg_private_key=$(_ui_ask "private-key" "")
                                 out_wg_private_key=$(_mihomoconf_trim "${out_wg_private_key:-}")
-                                read -rp "  public-key: " out_wg_public_key
+                                out_wg_public_key=$(_ui_ask "public-key" "")
                                 out_wg_public_key=$(_mihomoconf_trim "${out_wg_public_key:-}")
-                                read -rp "  allowed-ips [默认 0.0.0.0/0,::/0]: " out_wg_allowed_ips
+                                out_wg_allowed_ips=$(_ui_ask "allowed-ips (默认 0.0.0.0/0,::/0)" "0.0.0.0/0,::/0")
                                 out_wg_allowed_ips=$(_mihomoconf_trim "${out_wg_allowed_ips:-0.0.0.0/0,::/0}")
-                                read -rp "  pre-shared-key [可留空]: " out_wg_preshared_key
+                                out_wg_preshared_key=$(_ui_ask "pre-shared-key [可留空]" "")
                                 out_wg_preshared_key=$(_mihomoconf_trim "${out_wg_preshared_key:-}")
-                                read -rp "  reserved [可留空，如 209,98,59]: " out_wg_reserved
+                                out_wg_reserved=$(_ui_ask "reserved [可留空，如 209,98,59]" "")
                                 out_wg_reserved=$(_mihomoconf_trim "${out_wg_reserved:-}")
-                                read -rp "  mtu [可留空，如 1408，输入 auto 自动探测]: " out_wg_mtu
+                                out_wg_mtu=$(_ui_ask "mtu [可留空，如 1408，输入 auto 自动探测]" "")
                                 out_wg_mtu=$(_mihomoconf_trim "${out_wg_mtu:-}")
                                 if [[ "$out_wg_mtu" == "auto" ]]; then
                                     _info "正在向 ${out_server} 探测最佳 MTU..."
                                     out_wg_mtu=$(_detect_optimal_mtu_val "$out_server")
                                     _success "探测完成，推荐 WireGuard MTU 为: ${out_wg_mtu}"
                                 fi
-                                read -rp "  persistent-keepalive [可留空]: " out_wg_keepalive
+                                out_wg_keepalive=$(_ui_ask "persistent-keepalive [可留空]" "")
                                 out_wg_keepalive=$(_mihomoconf_trim "${out_wg_keepalive:-}")
                                 if [[ -z "$out_wg_ip" || -z "$out_wg_private_key" || -z "$out_wg_public_key" ]]; then
                                     _error_no_exit "wireguard ip/private-key/public-key 不能为空"
@@ -18675,8 +18743,8 @@ EOF
                     continue
                 fi
 
-                read -rp "  选择入站节点 [序号]: " listener_input
-                read -rp "  选择出口节点 [序号]: " out_input
+                listener_input=$(_ui_ask "请选择 入站节点 [序号]" "")
+                out_input=$(_ui_ask "请选择 出口节点 [序号]" "")
                 listener_input=$(_mihomoconf_trim "${listener_input:-}")
                 out_input=$(_mihomoconf_trim "${out_input:-}")
                 if [[ -z "$listener_input" || -z "$out_input" ]]; then
@@ -18767,7 +18835,7 @@ EOF
                     continue
                 fi
 
-                read -rp "  选择入站节点 [序号]: " listener_pick
+                listener_pick=$(_ui_ask "请选择 入站节点 [序号]" "")
                 listener_pick=$(_mihomoconf_trim "${listener_pick:-}")
                 if [[ -z "$listener_pick" || ! "$listener_pick" =~ ^[0-9]+$ ]]; then
                     _error_no_exit "请输入有效序号"
@@ -18811,7 +18879,7 @@ EOF
                     continue
                 fi
 
-                read -rp "  选择用户 [序号]: " user_pick
+                user_pick=$(_ui_ask "请选择 用户 [序号]" "")
                 user_pick=$(_mihomoconf_trim "${user_pick:-}")
                 if [[ -z "$user_pick" || ! "$user_pick" =~ ^[0-9]+$ ]]; then
                     _error_no_exit "请输入有效序号"
@@ -18872,7 +18940,7 @@ EOF
                     continue
                 fi
 
-                read -rp "  选择出口节点 [序号]: " out_pick
+                out_pick=$(_ui_ask "请选择 出口节点 [序号]" "")
                 out_pick=$(_mihomoconf_trim "${out_pick:-}")
                 if [[ -z "$out_pick" || ! "$out_pick" =~ ^[0-9]+$ ]]; then
                     _error_no_exit "请输入有效序号"
@@ -18956,7 +19024,7 @@ EOF
                 fi
 
                 local rm_pick rm_out_name rm_out_show_name rm_out_tag
-                read -rp "  选择要删除的出口节点 [序号]: " rm_pick
+                rm_pick=$(_ui_ask "请选择 要删除的出口节点 [序号]" "")
                 rm_pick=$(_mihomoconf_trim "${rm_pick:-}")
                 if [[ -z "$rm_pick" ]]; then
                     _error_no_exit "输入不能为空"
@@ -19033,7 +19101,7 @@ EOF
                 fi
 
                 local rm_rule_input rm_idx rm_key rm_listener_name rm_kind rm_user
-                read -rp "  选择要删除的规则 [序号]: " rm_rule_input
+                rm_rule_input=$(_ui_ask "请选择 要删除的规则 [序号]" "")
                 rm_rule_input=$(_mihomoconf_trim "${rm_rule_input:-}")
                 if [[ -z "$rm_rule_input" ]]; then
                     _error_no_exit "输入不能为空"
@@ -19128,7 +19196,7 @@ EOF
                     continue
                 fi
 
-                read -rp "  选择入站节点 [序号]: " add_listener_pick
+                add_listener_pick=$(_ui_ask "请选择 入站节点 [序号]" "")
                 add_listener_pick=$(_mihomoconf_trim "${add_listener_pick:-}")
                 if [[ -z "$add_listener_pick" || ! "$add_listener_pick" =~ ^[0-9]+$ ]]; then
                     _error_no_exit "请输入有效序号"
@@ -19148,7 +19216,7 @@ EOF
 
                 printf "  ${BOLD}创建方式:${PLAIN}\n"
                 _menu_pair "1" "单个用户" "可指定用户名/密码" "green" "2" "快速批量生成" "指定数量自动生成" "green"
-                read -rp "  选择 [1/2，默认 1]: " add_mode
+                add_mode=$(_ui_ask "请选择 [1/2]" "1")
                 add_mode=$(_mihomoconf_trim "${add_mode:-1}")
                 case "$add_mode" in
                     1|2) ;;
@@ -19160,7 +19228,7 @@ EOF
                 esac
 
                 if [[ "$add_mode" == "1" ]]; then
-                    read -rp "  新用户名: " add_username
+                    add_username=$(_ui_ask "新用户名" "")
                     add_username=$(_mihomoconf_trim "${add_username:-}")
                     if [[ -z "$add_username" ]]; then
                         _error_no_exit "用户名不能为空"
@@ -19176,7 +19244,7 @@ EOF
                     add_action="新增"
                     if _mihomoconf_listener_has_user "$config_file" "$add_listener_tag" "$add_username"; then
                         add_action="更新"
-                        read -rp "  用户已存在，将更新密码，继续? [Y/n]: " add_overwrite
+                        if _ui_confirm "用户已存在，将更新密码，继续?" y; then add_overwrite=y; else add_overwrite=n; fi
                         add_overwrite=$(_mihomoconf_trim "${add_overwrite:-Y}")
                         if [[ "$add_overwrite" =~ ^[Nn]$ ]]; then
                             _info "已取消"
@@ -19185,7 +19253,7 @@ EOF
                         fi
                     fi
 
-                    read -rp "  用户密码 [留空自动生成]: " add_password
+                    add_password=$(_ui_ask "用户密码 [留空自动生成]" "")
                     add_password=$(_mihomoconf_trim "${add_password:-}")
                     if [[ -z "$add_password" ]]; then
                         if [[ "$add_listener_type" == "shadowsocks" ]]; then
@@ -19227,14 +19295,14 @@ EOF
                     add_created_passwords+=("$add_password")
                     _info "已${add_action}用户: ${add_listener_name}[user=${add_username}]"
                 else
-                    read -rp "  快速创建数量 [默认 1]: " add_count
+                    add_count=$(_ui_ask "快速创建数量" "1")
                     add_count=$(_mihomoconf_trim "${add_count:-1}")
                     if ! _is_digit "$add_count" || [[ "$add_count" -le 0 ]]; then
                         _error_no_exit "数量必须是正整数"
                         _press_any_key
                         continue
                     fi
-                    read -rp "  用户名前缀 [默认 user]: " add_prefix
+                    add_prefix=$(_ui_ask "用户名前缀" "user")
                     add_prefix=$(_mihomoconf_trim "${add_prefix:-user}")
                     if [[ -z "$add_prefix" ]] || ! _mihomoconf_is_valid_username "$add_prefix"; then
                         _error_no_exit "用户名前缀无效，仅支持字母/数字/.-_"
@@ -19355,12 +19423,12 @@ _mihomo_ipv4_google_manage() {
         _separator
 
         local ch
-        read -rp "  选择 [0-2]: " ch
+        ch=$(_ui_ask "请选择 [0-2]" "")
         case "$ch" in
             1) new_pref="on" ;;
             2) new_pref="off" ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1; continue ;;
+            *) _ui_invalid; sleep 1; continue ;;
         esac
 
         _mihomoconf_ipv4_google_pref_set "$config_file" "$new_pref"
@@ -19695,7 +19763,7 @@ _mihomo_dns_process_and_set() {
     if [[ "${#ok_dns[@]}" -eq 0 ]]; then
         _warn "警告: 所有选中的 DNS 节点均测试失败！这可能是由于当前服务器完全无法连接这些服务商，或者是您的服务器当前网络中断。"
         local confirm
-        read -rp "  是否依然强制应用这些 DNS 配置？[y/N]: " confirm
+        if _ui_confirm "是否依然强制应用这些 DNS 配置？" n; then confirm=y; else confirm=n; fi
         if [[ "$confirm" =~ ^[yY](es)?$ ]]; then
             final_dns_list="$dns_list_str"
         else
@@ -19706,7 +19774,7 @@ _mihomo_dns_process_and_set() {
     elif [[ "${#fail_dns[@]}" -gt 0 ]]; then
         _warn "检测到部分 DNS 服务器在当前网络下不可用。"
         local choice
-        read -rp "  是否仅保留测试成功的 DNS 服务器？(如果选择否，将写入全部选择) [Y/n]: " choice
+        if _ui_confirm "是否仅保留测试成功的 DNS 服务器？(如果选择否，将写入全部选择)" y; then choice=y; else choice=n; fi
         if [[ -z "$choice" || "$choice" =~ ^[yY](es)?$ ]]; then
             final_dns_list=$(IFS=,; echo "${ok_dns[*]}")
         else
@@ -19744,7 +19812,7 @@ _mihomo_dns_domestic_menu() {
         printf "    ${GREEN}0${PLAIN}) 返回上一级\n"
         _separator
         local choices
-        read -rp "  选择服务商: " -a choices
+        read -rp "  ${CYAN}➜${PLAIN} 选择服务商: " -a choices
         if [[ "${#choices[@]}" -eq 0 ]]; then
             _warn "未选择任何服务商"
             sleep 1
@@ -19776,7 +19844,7 @@ _mihomo_dns_domestic_menu() {
         printf "    ${GREEN}4${PLAIN}) 普通 UDP\n"
         _separator
         local proto_choice
-        read -rp "  选择协议 [1-4, 默认 1]: " proto_choice
+        proto_choice=$(_ui_ask "请选择 协议 [1-4]" "1")
         if [[ -z "$proto_choice" ]]; then
             proto_choice="1"
         fi
@@ -19826,7 +19894,7 @@ _mihomo_dns_foreign_menu() {
         printf "    ${GREEN}0${PLAIN}) 返回上一级\n"
         _separator
         local choices
-        read -rp "  选择服务商: " -a choices
+        read -rp "  ${CYAN}➜${PLAIN} 选择服务商: " -a choices
         if [[ "${#choices[@]}" -eq 0 ]]; then
             _warn "未选择任何服务商"
             sleep 1
@@ -19858,7 +19926,7 @@ _mihomo_dns_foreign_menu() {
         printf "    ${GREEN}4${PLAIN}) 普通 UDP\n"
         _separator
         local proto_choice
-        read -rp "  选择协议 [1-4, 默认 1]: " proto_choice
+        proto_choice=$(_ui_ask "请选择 协议 [1-4]" "1")
         if [[ -z "$proto_choice" ]]; then
             proto_choice="1"
         fi
@@ -19904,7 +19972,7 @@ _mihomo_dns_custom_input() {
     _separator
     _info "多个地址请用 ${YELLOW}逗号${PLAIN} 或 ${YELLOW}空格${PLAIN} 分隔。"
     local raw_input formatted_input
-    read -rp "  请输入 DNS 列表: " raw_input
+    raw_input=$(_ui_ask "请输入 DNS 列表" "")
     formatted_input=$(echo "$raw_input" | tr ' ' ',' | tr -s ',' | sed 's/^,//;s/,$//')
     if [[ -z "$formatted_input" ]]; then
         _warn "输入为空，已取消"
@@ -19948,7 +20016,7 @@ _mihomo_dns_bootstrap_menu() {
         _separator
         
         local ch
-        read -rp "  选择 [0-4]: " ch
+        ch=$(_ui_ask "请选择 [0-4]" "")
         case "$ch" in
             1)
                 _mihomoconf_bootstrap_dns_set "$config_file" "223.5.5.5,119.29.29.29"
@@ -19964,7 +20032,7 @@ _mihomo_dns_bootstrap_menu() {
                 printf "\n"
                 _info "请输入底层 DNS (仅支持普通 IP 地址，多个用空格或逗号分隔):"
                 local raw_input formatted_input
-                read -rp "  请输入: " raw_input
+                raw_input=$(_ui_ask "请输入" "")
                 formatted_input=$(echo "$raw_input" | tr ' ' ',' | tr -s ',' | sed 's/^,//;s/,$//')
                 if [[ -z "$formatted_input" ]]; then
                     _warn "输入为空，已取消"
@@ -20046,7 +20114,7 @@ _mihomo_dns_manage() {
         _separator
 
         local ch
-        read -rp "  选择 [0-5]: " ch
+        ch=$(_ui_ask "请选择 [0-5]" "")
         case "$ch" in
             1)
                 _mihomo_dns_domestic_menu "$config_file"
@@ -20125,7 +20193,7 @@ _mihomo_manage() {
         _ui_print_screen _mihomo_manage_screen
 
         local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-10]: " choice
+        choice=$(_ui_ask "请选择 [0-10]" "")
         case "$choice" in
             1) _mihomo_setup ;;
             2) _mihomoconf_setup ;;
@@ -20138,7 +20206,7 @@ _mihomo_manage() {
             9) _mihomo_auto_update_manage ;;
             10) _mihomo_uninstall ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -20307,7 +20375,7 @@ _iperf3_check_port() {
     _menu_item "0" "返回" "" "red"
     _separator
     local action
-    read -rp "  选择 [0-2]: " action
+    action=$(_ui_ask "请选择 [0-2]" "")
     case "$action" in
         1)
             kill "$pid" 2>/dev/null || true
@@ -20325,7 +20393,7 @@ _iperf3_check_port() {
             ;;
         2)
             local new_port
-            read -rp "  新端口号: " new_port
+            new_port=$(_ui_ask "新端口号" "")
             if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
                 _error_no_exit "端口号无效 (1-65535)"
                 return 1
@@ -20353,7 +20421,7 @@ _iperf3_setup() {
     _menu_pair "1" "启动 iperf3 服务端" "" "green" "0" "返回主菜单" "" "red"
     _separator
     local choice
-    read -rp "  选择 [0-1]: " choice
+    choice=$(_ui_ask "请选择 [0-1]" "")
     case "$choice" in
         1) ;;
         0) return ;;
@@ -20363,7 +20431,7 @@ _iperf3_setup() {
     # 配置端口
     _IPERF3_PORT=5201
     local port_input
-    read -rp "  监听端口 [默认 5201]: " port_input
+    port_input=$(_ui_ask "监听端口" "5201")
     _IPERF3_PORT="${port_input:-5201}"
     if ! [[ "$_IPERF3_PORT" =~ ^[0-9]+$ ]] || [ "$_IPERF3_PORT" -lt 1 ] || [ "$_IPERF3_PORT" -gt 65535 ]; then
         _error_no_exit "端口号无效 (1-65535)"
@@ -20458,7 +20526,7 @@ _ipquality_setup() {
     echo "  7) 返回上级菜单"
     echo ""
     local opt
-    read -rp "  请选择 [1-7, 默认 1]: " opt
+    opt=$(_ui_ask "请选择 [1-7]" "1")
     opt="${opt:-1}"
 
     local cmd_args=()
@@ -20470,7 +20538,7 @@ _ipquality_setup() {
         5) cmd_args=("-6") ;;
         6) cmd_args=("-6" "-l" "en") ;;
         7) return ;;
-        *) _error_no_exit "无效选项: ${opt}"; sleep 1; return ;;
+        *) _ui_invalid "$opt"; sleep 1; return ;;
     esac
 
     echo ""
@@ -20509,7 +20577,7 @@ _ipquality_setup() {
 
 _speedtest_prompt_yes_default() {
     local prompt="$1" answer
-    read -rp "  ${prompt} [Y/n]: " answer
+    if _ui_confirm "${prompt}" y; then answer=y; else answer=n; fi
     [[ ! "$answer" =~ ^[Nn] ]]
 }
 
@@ -20924,7 +20992,7 @@ _speedtest_setup() {
     _separator
 
     local choice
-    read -rp "  选择 [0-1]: " choice
+    choice=$(_ui_ask "请选择 [0-1]" "")
     case "$choice" in
         1) ;;
         0) return ;;
@@ -21105,14 +21173,14 @@ _ntrace_require_nexttrace() {
 
 _ntrace_prompt_target() {
     local prompt="${1:-目标 IP/域名}" default_target="${2:-1.1.1.1}" target
-    read -rp "  ${prompt} [${default_target}]: " target
+    target=$(_ui_ask "${prompt}" "")
     printf '%s' "${target:-$default_target}"
 }
 
 _ntrace_prompt_ip_family_arg() {
     local choice
 
-    read -rp "  IP 版本 [0 自动 / 1 IPv4 / 2 IPv6，默认 0]: " choice
+    choice=$(_ui_ask "IP 版本 (0 自动 / 1 IPv4 / 2 IPv6)" "0")
     case "${choice:-0}" in
         1) printf '%s' "--ipv4" ;;
         2) printf '%s' "--ipv6" ;;
@@ -21161,11 +21229,11 @@ _ntrace_quick_trace() {
     printf "  ${BOLD}探测协议${PLAIN}\n"
     _menu_pair "1" "ICMP" "默认" "green" "2" "TCP SYN" "可指定端口" "green"
     _menu_item "3" "UDP" "可指定端口" "green"
-    read -rp "  选择 [1-3，默认 1]: " protocol
+    protocol=$(_ui_ask "请选择 [1-3]" "1")
     case "${protocol:-1}" in
         2)
             args+=("--tcp")
-            read -rp "  TCP 目标端口 [80]: " port
+            port=$(_ui_ask "TCP 目标端口 [80]" "")
             port="${port:-80}"
             if _is_valid_port "$port"; then
                 args+=("--port" "$port")
@@ -21175,7 +21243,7 @@ _ntrace_quick_trace() {
             ;;
         3)
             args+=("--udp")
-            read -rp "  UDP 目标端口 [33494]: " port
+            port=$(_ui_ask "UDP 目标端口 [33494]" "")
             port="${port:-33494}"
             if _is_valid_port "$port"; then
                 args+=("--port" "$port")
@@ -21192,7 +21260,7 @@ _ntrace_quick_trace() {
     _menu_pair "1" "实时输出" "默认" "green" "2" "表格汇总" "--table" "green"
     _menu_pair "3" "JSON" "--json" "green" "4" "Raw" "--raw" "green"
     _menu_item "5" "Classic" "--classic" "green"
-    read -rp "  选择 [1-5，默认 1]: " output
+    output=$(_ui_ask "请选择 [1-5]" "1")
     case "${output:-1}" in
         2) args+=("--table") ;;
         3) args+=("--json") ;;
@@ -21207,7 +21275,7 @@ _ntrace_quick_trace() {
     _menu_pair "0" "默认" "" "green" "1" "IP.SB" "" "green"
     _menu_pair "2" "IPInfo" "" "green" "3" "ip-api.com" "" "green"
     _menu_item "4" "禁用 GeoIP" "disable-geoip" "green"
-    read -rp "  选择 [0-4，默认 0]: " provider
+    provider=$(_ui_ask "请选择 [0-4]" "0")
     case "${provider:-0}" in
         1) args+=("--data-provider" "IP.SB") ;;
         2) args+=("--data-provider" "IPInfo") ;;
@@ -21221,7 +21289,7 @@ _ntrace_quick_trace() {
     printf "  ${BOLD}RDNS${PLAIN}\n"
     _menu_pair "0" "默认" "" "green" "1" "不查询" "--no-rdns" "green"
     _menu_item "2" "总是查询" "--always-rdns" "green"
-    read -rp "  选择 [0-2，默认 0]: " rdns
+    rdns=$(_ui_ask "请选择 [0-2]" "0")
     case "${rdns:-0}" in
         1) args+=("--no-rdns") ;;
         2) args+=("--always-rdns") ;;
@@ -21253,7 +21321,7 @@ _ntrace_custom_file() {
     _header "NextTrace 自定义列表检测"
     _ntrace_require_nexttrace || { _press_any_key; return; }
 
-    read -rp "  列表文件路径: " file
+    file=$(_ui_ask "列表文件路径" "")
     if [[ -z "${file:-}" || ! -f "$file" ]]; then
         _error_no_exit "列表文件不存在"
         _press_any_key
@@ -21262,7 +21330,7 @@ _ntrace_custom_file() {
 
     family_arg="$(_ntrace_prompt_ip_family_arg)"
     [[ -n "$family_arg" ]] && args+=("$family_arg")
-    read -rp "  使用 TCP SYN 检测? [y/N]: " use_tcp
+    if _ui_confirm "使用 TCP SYN 检测?" n; then use_tcp=y; else use_tcp=n; fi
     [[ "$use_tcp" =~ ^[Yy] ]] && args+=("--tcp")
     args+=("--file" "$file")
     _ntrace_run_nexttrace "${args[@]}"
@@ -21284,7 +21352,7 @@ _ntrace_mtr() {
     printf "  ${BOLD}MTR 模式${PLAIN}\n"
     _menu_pair "1" "实时 TUI" "" "green" "2" "报告" "--report" "green"
     _menu_pair "3" "宽报告" "--wide" "green" "4" "Raw" "--raw" "green"
-    read -rp "  选择 [1-4，默认 1]: " mode
+    mode=$(_ui_ask "请选择 [1-4]" "1")
     case "${mode:-1}" in
         2) args+=("--report") ;;
         3) args+=("--wide") ;;
@@ -21293,7 +21361,7 @@ _ntrace_mtr() {
         *) _warn "MTR 模式无效，使用实时 TUI" ;;
     esac
 
-    read -rp "  显示每跳 IP? [Y/n]: " show_ips
+    if _ui_confirm "显示每跳 IP?" y; then show_ips=y; else show_ips=n; fi
     [[ ! "$show_ips" =~ ^[Nn] ]] && args+=("--show-ips")
     _ntrace_run_nexttrace "${args[@]}" "$target"
 }
@@ -21322,10 +21390,10 @@ _ntrace_speed() {
     echo ""
     printf "  ${BOLD}测速后端${PLAIN}\n"
     _menu_pair "1" "Apple CDN" "默认" "green" "2" "Cloudflare" "" "green"
-    read -rp "  选择 [1-2，默认 1]: " provider
+    provider=$(_ui_ask "请选择 [1-2]" "1")
     [[ "${provider:-1}" == "2" ]] && args+=("--speed-provider" "cloudflare")
 
-    read -rp "  输出 JSON 非交互结果? [y/N]: " json_mode
+    if _ui_confirm "输出 JSON 非交互结果?" n; then json_mode=y; else json_mode=n; fi
     [[ "$json_mode" =~ ^[Yy] ]] && args+=("--json" "--non-interactive" "--no-metadata")
     _ntrace_run_nexttrace "${args[@]}"
 }
@@ -21347,7 +21415,7 @@ _ntrace_setup() {
         _separator
 
         local choice
-        read -rp "  选择 [0-10]: " choice
+        choice=$(_ui_ask "请选择 [0-10]" "")
         case "$choice" in
             1) _ntrace_install_flavor full; _press_any_key ;;
             2) _ntrace_install_flavor tiny; _press_any_key ;;
@@ -21360,7 +21428,7 @@ _ntrace_setup() {
             9) _ntrace_mtu ;;
             10) _ntrace_speed ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -21651,7 +21719,7 @@ _snell_pick_listen_port() {
     local port_input usage_line
 
     while true; do
-        read -rp "  Snell 监听端口 [默认 ${default_port}]: " port_input
+        port_input=$(_ui_ask "Snell 监听端口" "${default_port}")
         port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
         if ! _is_valid_port "$port_input"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -21892,7 +21960,7 @@ _snell_configure() {
     local GEO_LOOKUP_IP=""
 
     if [[ ! -x "$_SNELL_BIN" ]]; then
-        read -rp "  未检测到 snell-server，先安装? [Y/n]: " install_confirm
+        if _ui_confirm "未检测到 snell-server，先安装?" y; then install_confirm=y; else install_confirm=n; fi
         if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已取消"
             _press_any_key
@@ -21919,7 +21987,7 @@ _snell_configure() {
 
     _info "将生成 Snell 配置并进行端口冲突检查（含 mihomo listeners 与常用监听端口字段）。"
     listen_port=$(_snell_pick_listen_port "$current_port")
-    read -rp "  PSK [留空自动生成]: " psk_input
+    psk_input=$(_ui_ask "PSK [留空自动生成]" "")
     psk_input=$(_mihomoconf_trim "${psk_input:-}")
     if [[ -n "$psk_input" ]]; then
         psk_value="$psk_input"
@@ -21939,7 +22007,7 @@ _snell_configure() {
         return
     fi
 
-    read -rp "  启用 IPv6 转发? [y/N]: " ipv6_input
+    if _ui_confirm "启用 IPv6 转发?" n; then ipv6_input=y; else ipv6_input=n; fi
     if [[ "$ipv6_input" =~ ^[Yy] ]]; then
         ipv6_flag="true"
         listen_addr="::0"
@@ -21948,7 +22016,7 @@ _snell_configure() {
         listen_addr="0.0.0.0"
     fi
 
-    read -rp "  egress-interface [可留空，如 eth0]: " egress_iface
+    egress_iface=$(_ui_ask "egress-interface [可留空，如 eth0]" "")
     egress_iface=$(_mihomoconf_trim "${egress_iface:-$current_egress}")
     if [[ -n "$egress_iface" ]]; then
         if ! ip link show "$egress_iface" >/dev/null 2>&1; then
@@ -21968,7 +22036,7 @@ _snell_configure() {
 
     host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
-    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    host_input=$(_ui_ask "客户端连接地址" "${host_default}")
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     if [[ -z "$client_host" ]]; then
         _error_no_exit "客户端连接地址不能为空"
@@ -22052,7 +22120,7 @@ _snell_export_node_config() {
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
     [[ -z "$host_default" ]] && host_default="YOUR_SERVER_IP"
 
-    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    host_input=$(_ui_ask "客户端连接地址" "${host_default}")
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     if [[ -z "$client_host" ]]; then
         _error_no_exit "客户端连接地址不能为空"
@@ -22072,7 +22140,7 @@ _snell_export_node_config() {
     fi
 
     node_name=$(printf '%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
-    read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
+    node_name_input=$(_ui_ask "节点名称" "${node_name}")
     node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
     [[ -z "$node_name" ]] && node_name=$(printf '%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
 
@@ -22197,7 +22265,7 @@ _snell_log() {
         echo ""
         _separator
         local follow
-        read -rp "  实时跟踪日志? [y/N]: " follow
+        if _ui_confirm "实时跟踪日志?" n; then follow=y; else follow=n; fi
         if [[ "$follow" =~ ^[Yy] ]]; then
             journalctl -u "$_SNELL_SERVICE_NAME" -f
         fi
@@ -22219,7 +22287,7 @@ _snell_uninstall() {
     printf "    OpenRC 服务文件 : %s\n" "$_SNELL_OPENRC_SERVICE_FILE"
     printf "    可执行文件: %s\n" "$_SNELL_BIN"
     printf "    配置目录: %s\n" "$_SNELL_CONFIG_DIR"
-    read -rp "  确认卸载 Snell? [y/N]: " confirm
+    if _ui_confirm "确认卸载 Snell?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -22260,7 +22328,7 @@ _snell_uninstall() {
     fi
 
     if [[ -d "$_SNELL_CONFIG_DIR" ]]; then
-        read -rp "  同时删除配置目录 ${_SNELL_CONFIG_DIR}? [y/N]: " remove_config
+        if _ui_confirm "同时删除配置目录 ${_SNELL_CONFIG_DIR}?" n; then remove_config=y; else remove_config=n; fi
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$_SNELL_CONFIG_DIR"
             removed_count=$((removed_count + 1))
@@ -22328,7 +22396,7 @@ _snell_manage() {
         _ui_print_screen _snell_manage_screen
 
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        ch=$(_ui_ask "请选择 [0-7]" "")
         case "$ch" in
             1) _snell_install_latest ;;
             2) _snell_configure ;;
@@ -22338,7 +22406,7 @@ _snell_manage() {
             6) _snell_log ;;
             7) _snell_uninstall ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -22484,7 +22552,7 @@ _snell6_pick_listen_port() {
     local port_input usage_line
 
     while true; do
-        read -rp "  Snell V6 监听端口 [默认 ${default_port}]: " port_input
+        port_input=$(_ui_ask "Snell V6 监听端口" "${default_port}")
         port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
         if ! _is_valid_port "$port_input"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -22727,7 +22795,7 @@ _snell6_configure() {
     local GEO_LOOKUP_IP=""
 
     if [[ ! -x "$_SNELL6_BIN" ]]; then
-        read -rp "  未检测到 snell-server-v6，先安装? [Y/n]: " install_confirm
+        if _ui_confirm "未检测到 snell-server-v6，先安装?" y; then install_confirm=y; else install_confirm=n; fi
         if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已取消"
             _press_any_key
@@ -22754,7 +22822,7 @@ _snell6_configure() {
     local listen_port=""
     _snell6_pick_listen_port "$current_port" listen_port
 
-    read -rp "  PSK [留空自动生成]: " psk_input
+    psk_input=$(_ui_ask "PSK [留空自动生成]" "")
     psk_input=$(_mihomoconf_trim "${psk_input:-}")
     if [[ -n "$psk_input" ]]; then
         psk_value="$psk_input"
@@ -22781,7 +22849,7 @@ _snell6_configure() {
     echo "    1) IPv4 & IPv6 双栈 (同时监听) [默认]"
     echo "    2) 仅监听 IPv4"
     echo "    3) 仅监听 IPv6"
-    read -rp "  输入选择 [1-3]: " listen_type_input
+    listen_type_input=$(_ui_ask "请选择 输入选择 [1-3]" "")
     case "$listen_type_input" in
         2)
             listen_value="0.0.0.0:${listen_port}"
@@ -22803,7 +22871,7 @@ _snell6_configure() {
     echo "    3) prefer-ipv6 (优先 IPv6)"
     echo "    4) ipv4-only (仅 IPv4)"
     echo "    5) ipv6-only (仅 IPv6)"
-    read -rp "  输入选择 [1-5]: " dns_pref_input
+    dns_pref_input=$(_ui_ask "请选择 输入选择 [1-5]" "")
     case "$dns_pref_input" in
         2) dns_pref_value="prefer-ipv4" ;;
         3) dns_pref_value="prefer-ipv6" ;;
@@ -22812,7 +22880,7 @@ _snell6_configure() {
         *) dns_pref_value="default" ;;
     esac
 
-    read -rp "  egress-interface [可留空，如 eth0]: " egress_iface
+    egress_iface=$(_ui_ask "egress-interface [可留空，如 eth0]" "")
     egress_iface=$(_mihomoconf_trim "${egress_iface:-$current_egress}")
     if [[ -n "$egress_iface" ]]; then
         if ! ip link show "$egress_iface" >/dev/null 2>&1; then
@@ -22832,7 +22900,7 @@ _snell6_configure() {
 
     host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
-    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    host_input=$(_ui_ask "客户端连接地址" "${host_default}")
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     if [[ -z "$client_host" ]]; then
         _error_no_exit "客户端连接地址不能为空"
@@ -22913,7 +22981,7 @@ _snell6_export_node_config() {
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
     [[ -z "$host_default" ]] && host_default="YOUR_SERVER_IP"
 
-    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    host_input=$(_ui_ask "客户端连接地址" "${host_default}")
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     if [[ -z "$client_host" ]]; then
         _error_no_exit "客户端连接地址不能为空"
@@ -22933,7 +23001,7 @@ _snell6_export_node_config() {
     fi
 
     node_name=$(printf '%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
-    read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
+    node_name_input=$(_ui_ask "节点名称" "${node_name}")
     node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
     [[ -z "$node_name" ]] && node_name=$(printf '%s%s' "$NODE_FLAG" "$NODE_COUNTRY_CODE")
 
@@ -23058,7 +23126,7 @@ _snell6_log() {
         echo ""
         _separator
         local follow
-        read -rp "  实时跟踪日志? [y/N]: " follow
+        if _ui_confirm "实时跟踪日志?" n; then follow=y; else follow=n; fi
         if [[ "$follow" =~ ^[Yy] ]]; then
             journalctl -u "$_SNELL6_SERVICE_NAME" -f
         fi
@@ -23080,7 +23148,7 @@ _snell6_uninstall() {
     printf "    OpenRC 服务文件 : %s\n" "$_SNELL6_OPENRC_SERVICE_FILE"
     printf "    可执行文件: %s\n" "$_SNELL6_BIN"
     printf "    配置目录: %s\n" "$_SNELL6_CONFIG_DIR"
-    read -rp "  确认卸载 Snell V6? [y/N]: " confirm
+    if _ui_confirm "确认卸载 Snell V6?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -23121,7 +23189,7 @@ _snell6_uninstall() {
     fi
 
     if [[ -d "$_SNELL6_CONFIG_DIR" ]]; then
-        read -rp "  同时删除配置目录 ${_SNELL6_CONFIG_DIR}? [y/N]: " remove_config
+        if _ui_confirm "同时删除配置目录 ${_SNELL6_CONFIG_DIR}?" n; then remove_config=y; else remove_config=n; fi
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$_SNELL6_CONFIG_DIR"
             removed_count=$((removed_count + 1))
@@ -23186,7 +23254,7 @@ _snell6_manage() {
         _ui_print_screen _snell6_manage_screen
 
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        ch=$(_ui_ask "请选择 [0-7]" "")
         case "$ch" in
             1) _snell6_install_latest ;;
             2) _snell6_configure ;;
@@ -23196,7 +23264,7 @@ _snell6_manage() {
             6) _snell6_log ;;
             7) _snell6_uninstall ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -23684,7 +23752,7 @@ _realm_pick_listen_port() {
     local port_input usage_line
 
     while true; do
-        read -rp "  监听端口 [默认 ${default_port}]: " port_input
+        port_input=$(_ui_ask "监听端口" "${default_port}")
         port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
         if ! _is_valid_port "$port_input"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -23913,7 +23981,7 @@ _realm_log() {
         echo ""
         _separator
         local follow
-        read -rp "  实时跟踪日志? [y/N]: " follow
+        if _ui_confirm "实时跟踪日志?" n; then follow=y; else follow=n; fi
         if [[ "$follow" =~ ^[Yy] ]]; then
             journalctl -u "$_REALM_SERVICE_NAME" -f
         fi
@@ -23935,7 +24003,7 @@ _realm_uninstall() {
     printf "    OpenRC 服务文件 : %s\n" "$_REALM_OPENRC_SERVICE_FILE"
     printf "    可执行文件: %s\n" "$_REALM_BIN"
     printf "    配置目录: %s\n" "$_REALM_CONFIG_DIR"
-    read -rp "  确认卸载 Realm? [y/N]: " confirm
+    if _ui_confirm "确认卸载 Realm?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -23976,7 +24044,7 @@ _realm_uninstall() {
     fi
 
     if [[ -d "$_REALM_CONFIG_DIR" ]]; then
-        read -rp "  同时删除配置目录 ${_REALM_CONFIG_DIR}? [y/N]: " remove_config
+        if _ui_confirm "同时删除配置目录 ${_REALM_CONFIG_DIR}?" n; then remove_config=y; else remove_config=n; fi
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$_REALM_CONFIG_DIR"
             removed_count=$((removed_count + 1))
@@ -24095,7 +24163,7 @@ _realm_add_rule() {
     echo "    2) 仅监听 IPv4 (0.0.0.0)"
     echo "    3) 仅监听 IPv6 ([::])"
     echo "    4) 自定义监听 IP 地址"
-    read -rp "  请选择 [1-4，默认 1]: " addr_type
+    addr_type=$(_ui_ask "请选择 [1-4]" "1")
     addr_type=$(_mihomoconf_trim "${addr_type:-1}")
 
     case "$addr_type" in
@@ -24109,7 +24177,7 @@ _realm_add_rule() {
             listen_addr="::"
             ;;
         4)
-            read -rp "  请输入自定义监听 IP 地址: " listen_input
+            listen_input=$(_ui_ask "请输入自定义监听 IP 地址" "")
             listen_addr=$(_mihomoconf_trim "${listen_input:-}")
             if [[ -z "$listen_addr" ]]; then
                 _error_no_exit "监听地址不能为空"
@@ -24160,7 +24228,7 @@ _realm_add_rule() {
     fi
 
     while true; do
-        read -rp "  转发目标 IP/域名: " remote_host
+        remote_host=$(_ui_ask "转发目标 IP/域名" "")
         remote_host=$(_mihomoconf_trim "${remote_host:-}")
         if [[ -z "$remote_host" ]]; then
             _warn "转发目标不能为空"
@@ -24170,7 +24238,7 @@ _realm_add_rule() {
     done
 
     while true; do
-        read -rp "  转发目标端口 [1-65535]: " remote_port
+        remote_port=$(_ui_ask "转发目标端口 [1-65535]" "")
         remote_port=$(_mihomoconf_trim "${remote_port:-}")
         if ! _is_valid_port "$remote_port"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -24187,7 +24255,7 @@ _realm_add_rule() {
 
     local remark_input
     while true; do
-        read -rp "  规则备注 (可选，例如: 落地机 A，回车跳过): " remark_input
+        remark_input=$(_ui_ask "规则备注 (可选，例如: 落地机 A，回车跳过)" "")
         remark_input=$(_mihomoconf_trim "${remark_input:-}")
         if [[ "$remark_input" == *"|"* ]]; then
             _warn "备注不能包含 '|' 字符"
@@ -24268,7 +24336,7 @@ _realm_delete_rule() {
     fi
 
     local index
-    read -rp "  输入要删除的规则编号 [0-$((count - 1))，或按 Enter 取消]: " index
+    index=$(_ui_ask "输入要删除的规则编号 [0-$((count - 1))，或按 Enter 取消]" "")
     if [[ -z "${index:-}" ]]; then
         _info "已取消"
         _press_any_key
@@ -24316,7 +24384,7 @@ _realm_edit_rule() {
     fi
 
     local index
-    read -rp "  输入要修改的规则编号 [0-$((count - 1))，或按 Enter 取消]: " index
+    index=$(_ui_ask "输入要修改的规则编号 [0-$((count - 1))，或按 Enter 取消]" "")
     if [[ -z "${index:-}" ]]; then
         _info "已取消"
         _press_any_key
@@ -24359,7 +24427,7 @@ _realm_edit_rule() {
     # 1. New listening port
     local new_port
     while true; do
-        read -rp "  监听端口 [当前 ${old_port}，回车保持不变]: " new_port
+        new_port=$(_ui_ask "监听端口 [当前 ${old_port}，回车保持不变]" "")
         new_port=$(_mihomoconf_trim "${new_port:-$old_port}")
         if ! _is_valid_port "$new_port"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -24410,7 +24478,7 @@ _realm_edit_rule() {
     echo "    3) 仅监听 IPv6 ([::])"
     echo "    4) 自定义监听 IP 地址"
     echo "    5) 保持当前 IP 类型 [默认]"
-    read -rp "  请选择 [1-5，默认 5]: " addr_type
+    addr_type=$(_ui_ask "请选择 [1-5]" "5")
     addr_type=$(_mihomoconf_trim "${addr_type:-5}")
 
     case "$addr_type" in
@@ -24425,7 +24493,7 @@ _realm_edit_rule() {
             ;;
         4)
             local listen_input
-            read -rp "  请输入自定义监听 IP 地址 [当前 ${old_ip}]: " listen_input
+            listen_input=$(_ui_ask "请输入自定义监听 IP 地址 [当前 ${old_ip}]" "")
             new_ip=$(_mihomoconf_trim "${listen_input:-$old_ip}")
             if [[ -z "$new_ip" ]]; then
                 _error_no_exit "监听地址不能为空"
@@ -24481,7 +24549,7 @@ _realm_edit_rule() {
     # 3. New remote target host
     local new_remote_host
     while true; do
-        read -rp "  转发目标 IP/域名 [当前 ${old_remote_host}]: " new_remote_host
+        new_remote_host=$(_ui_ask "转发目标 IP/域名 [当前 ${old_remote_host}]" "")
         new_remote_host=$(_mihomoconf_trim "${new_remote_host:-$old_remote_host}")
         if [[ -z "$new_remote_host" ]]; then
             _warn "转发目标不能为空"
@@ -24493,7 +24561,7 @@ _realm_edit_rule() {
     # 4. New remote target port
     local new_remote_port
     while true; do
-        read -rp "  转发目标端口 [当前 ${old_remote_port}]: " new_remote_port
+        new_remote_port=$(_ui_ask "转发目标端口 [当前 ${old_remote_port}]" "")
         new_remote_port=$(_mihomoconf_trim "${new_remote_port:-$old_remote_port}")
         if ! _is_valid_port "$new_remote_port"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -24512,7 +24580,7 @@ _realm_edit_rule() {
     # 5. New remark
     local new_remark
     while true; do
-        read -rp "  规则备注 [当前: ${old_remark:-无}，回车保持不变，输入 clear 清空]: " new_remark
+        new_remark=$(_ui_ask "规则备注 [当前: ${old_remark:-无}，回车保持不变，输入 clear 清空]" "")
         new_remark=$(_mihomoconf_trim "${new_remark:-$old_remark}")
         if [[ "$new_remark" == "clear" ]]; then
             new_remark=""
@@ -24574,7 +24642,7 @@ _realm_configure() {
 
     if [[ ! -x "$_REALM_BIN" ]]; then
         local install_confirm
-        read -rp "  未检测到 realm，先安装? [Y/n]: " install_confirm
+        if _ui_confirm "未检测到 realm，先安装?" y; then install_confirm=y; else install_confirm=n; fi
         if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已取消"
             _press_any_key
@@ -24591,13 +24659,13 @@ _realm_configure() {
         _ui_print_screen _realm_configure_screen
 
         local ch
-        read -rp "  选择 [0-3]: " ch
+        ch=$(_ui_ask "请选择 [0-3]" "")
         case "$ch" in
             1) _realm_add_rule ;;
             2) _realm_delete_rule ;;
             3) _realm_edit_rule ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -24701,7 +24769,7 @@ _realm_manage() {
         _ui_print_screen _realm_manage_screen
 
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
+        ch=$(_ui_ask "请选择 [0-8]" "")
         case "$ch" in
             1) _realm_install_or_update ;;
             2) _realm_configure ;;
@@ -24712,7 +24780,7 @@ _realm_manage() {
             7) _realm_view_rules ;;
             8) _realm_uninstall ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -25383,7 +25451,7 @@ _ssrust_dns_process_and_set() {
     if [[ "${#ok_dns[@]}" -eq 0 ]]; then
         _warn "警告: 所有选中的 DNS 节点均测试失败！"
         local confirm
-        read -rp "  是否依然强制应用这些 DNS 配置？[y/N]: " confirm
+        if _ui_confirm "是否依然强制应用这些 DNS 配置？" n; then confirm=y; else confirm=n; fi
         if [[ "$confirm" =~ ^[yY](es)?$ ]]; then
             final_dns_list="$dns_list_str"
         else
@@ -25394,7 +25462,7 @@ _ssrust_dns_process_and_set() {
     elif [[ "${#fail_dns[@]}" -gt 0 ]]; then
         _warn "检测到部分 DNS 服务器在当前网络下不可用。"
         local choice
-        read -rp "  是否仅保留测试成功的 DNS 服务器？(如果选择否，将写入全部选择) [Y/n]: " choice
+        if _ui_confirm "是否仅保留测试成功的 DNS 服务器？(如果选择否，将写入全部选择)" y; then choice=y; else choice=n; fi
         if [[ -z "$choice" || "$choice" =~ ^[yY](es)?$ ]]; then
             final_dns_list=$(IFS=,; echo "${ok_dns[*]}")
         else
@@ -25461,7 +25529,7 @@ _ssrust_dns_domestic_menu() {
         printf "    ${GREEN}0${PLAIN}) 返回上一级\n"
         _separator
         local choices
-        read -rp "  选择服务商: " -a choices
+        read -rp "  ${CYAN}➜${PLAIN} 选择服务商: " -a choices
         if [[ "${#choices[@]}" -eq 0 ]]; then
             _warn "未选择任何服务商"
             sleep 1
@@ -25493,7 +25561,7 @@ _ssrust_dns_domestic_menu() {
         printf "    ${GREEN}4${PLAIN}) 普通 UDP\n"
         _separator
         local proto_choice
-        read -rp "  选择协议 [1-4, 默认 1]: " proto_choice
+        proto_choice=$(_ui_ask "请选择 协议 [1-4]" "1")
         if [[ -z "$proto_choice" ]]; then
             proto_choice="1"
         fi
@@ -25537,7 +25605,7 @@ _ssrust_dns_foreign_menu() {
         printf "    ${GREEN}0${PLAIN}) 返回上一级\n"
         _separator
         local choices
-        read -rp "  选择服务商: " -a choices
+        read -rp "  ${CYAN}➜${PLAIN} 选择服务商: " -a choices
         if [[ "${#choices[@]}" -eq 0 ]]; then
             _warn "未选择任何服务商"
             sleep 1
@@ -25569,7 +25637,7 @@ _ssrust_dns_foreign_menu() {
         printf "    ${GREEN}4${PLAIN}) 普通 UDP\n"
         _separator
         local proto_choice
-        read -rp "  选择协议 [1-4, 默认 1]: " proto_choice
+        proto_choice=$(_ui_ask "请选择 协议 [1-4]" "1")
         if [[ -z "$proto_choice" ]]; then
             proto_choice="1"
         fi
@@ -25611,14 +25679,14 @@ _ssrust_dns_preset_menu() {
         printf "    ${GREEN}0${PLAIN}) 返回上一级\n"
         _separator
         local choice dns_val
-        read -rp "  选择内置预设 [0-4]: " choice
+        choice=$(_ui_ask "请选择 内置预设 [0-4]" "")
         case "$choice" in
             1) dns_val="google" ;;
             2) dns_val="cloudflare" ;;
             3) dns_val="quad9" ;;
             4) dns_val="system" ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1; continue ;;
+            *) _ui_invalid; sleep 1; continue ;;
         esac
         
         _ssrust_dns_process_and_set "$config_file" "$dns_val"
@@ -25634,7 +25702,7 @@ _ssrust_dns_custom_input() {
     printf "    - 预设服务商: ${GREEN}google${PLAIN}, ${GREEN}cloudflare${PLAIN}, ${GREEN}quad9${PLAIN}, ${GREEN}system${PLAIN}\n"
     _separator
     local raw_input
-    read -rp "  请输入 DNS 地址/服务商: " raw_input
+    raw_input=$(_ui_ask "请输入 DNS 地址/服务商" "")
     raw_input=$(_mihomoconf_trim "${raw_input:-}")
     if [[ -z "$raw_input" ]]; then
         _warn "输入为空，已取消"
@@ -25684,7 +25752,7 @@ _ssrust_dns_manage() {
         _separator
 
         local ch
-        read -rp "  选择 [0-5]: " ch
+        ch=$(_ui_ask "请选择 [0-5]" "")
         case "$ch" in
             1)
                 _ssrust_dns_domestic_menu "$config_file"
@@ -25755,7 +25823,7 @@ _ssrust_pick_listen_port() {
     local _out_var="${2:-}"
     local port_input usage_line
     while true; do
-        read -rp "  Shadowsocks-Rust 监听端口 [默认 ${default_port}]: " port_input
+        port_input=$(_ui_ask "Shadowsocks-Rust 监听端口" "${default_port}")
         port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
         if ! _is_valid_port "$port_input"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -26044,7 +26112,7 @@ _ssrust_configure() {
 
     local install_confirm
     if ! command -v ssserver >/dev/null 2>&1 && [[ ! -x "$_SSRUST_BIN" ]]; then
-        read -rp "  未检测到 ssserver，先安装? [Y/n]: " install_confirm
+        if _ui_confirm "未检测到 ssserver，先安装?" y; then install_confirm=y; else install_confirm=n; fi
         if [[ "$install_confirm" =~ ^([Nn]|[Nn][Oo])$ ]]; then
             _info "已取消"
             _press_any_key
@@ -26086,7 +26154,7 @@ _ssrust_configure() {
     _menu_pair "3" "aes-128-gcm" "" "green" "4" "2022-blake3-aes-128-gcm" "SS2022-AES-128" "green"
     _menu_pair "5" "2022-blake3-aes-256-gcm" "SS2022-AES-256" "green" "0" "取消" "" "red"
     _separator
-    read -rp "  加密方法 [0-5，默认 ${method_default}]: " method_pick
+    method_pick=$(_ui_ask "加密方法 [0-5]" "${method_default}")
     case "${method_pick:-$method_default}" in
         1) method_value="chacha20-ietf-poly1305" ;;
         2) method_value="aes-256-gcm" ;;
@@ -26106,7 +26174,7 @@ _ssrust_configure() {
         current_password_compatible="1"
     fi
 
-    read -rp "  密码 [留空自动生成兼容密钥/保留当前兼容值]: " password_input
+    password_input=$(_ui_ask "密码 [留空自动生成兼容密钥/保留当前兼容值]" "")
     password_input=$(_mihomoconf_trim "${password_input:-}")
     if [[ -n "$password_input" ]]; then
         password_value="$password_input"
@@ -26143,7 +26211,7 @@ _ssrust_configure() {
     _menu_pair "1" "tcp_and_udp" "默认" "green" "2" "tcp_only" "" "green"
     _menu_pair "3" "udp_only" "" "green" "0" "取消" "" "red"
     _separator
-    read -rp "  传输模式 [0-3，默认 ${mode_default}]: " mode_pick
+    mode_pick=$(_ui_ask "传输模式 [0-3]" "${mode_default}")
     case "${mode_pick:-$mode_default}" in
         1) mode_value="tcp_and_udp" ;;
         2) mode_value="tcp_only" ;;
@@ -26153,7 +26221,7 @@ _ssrust_configure() {
     esac
 
     [[ -z "$current_server" ]] && current_server="0.0.0.0"
-    read -rp "  监听地址 [默认 ${current_server}，如 0.0.0.0 / ::]: " listen_input
+    listen_input=$(_ui_ask "监听地址 (如 0.0.0.0 / ::)" "${current_server}")
     listen_addr=$(_mihomoconf_trim "${listen_input:-$current_server}")
     if [[ -z "$listen_addr" ]]; then
         _error_no_exit "监听地址不能为空"
@@ -26177,7 +26245,7 @@ _ssrust_configure() {
 
     host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
-    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    host_input=$(_ui_ask "客户端连接地址" "${host_default}")
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     [[ -z "$client_host" ]] && client_host="$host_default"
 
@@ -26188,7 +26256,7 @@ _ssrust_configure() {
         ss_export_uot="0"
         ss_export_uot_bool="false"
     else
-        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
+        if _ui_confirm "SS-Rust 导出: 开启 UDP over TCP v2?" n; then ss_export_uot_answer=y; else ss_export_uot_answer=n; fi
         if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
             ss_export_uot="1"
             ss_export_uot_bool="true"
@@ -26250,7 +26318,7 @@ _ssrust_enable() {
     if [[ -n "$service_file" && -f "$service_file" ]]; then
         _warn "${service_name} 服务文件已存在"
         local overwrite
-        read -rp "  覆盖? [y/N]: " overwrite
+        if _ui_confirm "覆盖?" n; then overwrite=y; else overwrite=n; fi
         if [[ ! "$overwrite" =~ ^[Yy] ]]; then
             _press_any_key
             return
@@ -26307,7 +26375,7 @@ _ssrust_export_node_config() {
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
     [[ -z "$host_default" ]] && host_default="${server:-YOUR_SERVER_IP}"
 
-    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    host_input=$(_ui_ask "客户端连接地址" "${host_default}")
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     if [[ -z "$client_host" ]]; then
         _error_no_exit "客户端连接地址不能为空"
@@ -26316,7 +26384,7 @@ _ssrust_export_node_config() {
     fi
 
     node_name="SS-Rust-${listen_port}"
-    read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
+    node_name_input=$(_ui_ask "节点名称" "${node_name}")
     node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
     [[ -z "$node_name" ]] && node_name="SS-Rust-${listen_port}"
 
@@ -26327,7 +26395,7 @@ _ssrust_export_node_config() {
         ss_export_uot="0"
         ss_export_uot_bool="false"
     else
-        read -rp "  SS-Rust 导出: 开启 UDP over TCP v2? [y/N]: " ss_export_uot_answer
+        if _ui_confirm "SS-Rust 导出: 开启 UDP over TCP v2?" n; then ss_export_uot_answer=y; else ss_export_uot_answer=n; fi
         if [[ "$ss_export_uot_answer" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
             ss_export_uot="1"
             ss_export_uot_bool="true"
@@ -26433,7 +26501,7 @@ _ssrust_log() {
         echo ""
         _separator
         local follow
-        read -rp "  实时跟踪日志? [y/N]: " follow
+        if _ui_confirm "实时跟踪日志?" n; then follow=y; else follow=n; fi
         if [[ "$follow" =~ ^[Yy] ]]; then
             journalctl -u "$_SSRUST_SERVICE_NAME" -f
         fi
@@ -26463,7 +26531,7 @@ _ssrust_uninstall() {
         printf "    可执行文件: %s\n" "$_SSRUST_BIN"
     fi
     printf "    配置目录: %s\n" "$_SSRUST_CONFIG_DIR"
-    read -rp "  确认卸载 Shadowsocks-Rust? [y/N]: " confirm
+    if _ui_confirm "确认卸载 Shadowsocks-Rust?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -26508,7 +26576,7 @@ _ssrust_uninstall() {
     done
 
     if [[ -d "$_SSRUST_CONFIG_DIR" ]]; then
-        read -rp "  同时删除配置目录 ${_SSRUST_CONFIG_DIR}? [y/N]: " remove_config
+        if _ui_confirm "同时删除配置目录 ${_SSRUST_CONFIG_DIR}?" n; then remove_config=y; else remove_config=n; fi
         if [[ "$remove_config" =~ ^[Yy] ]]; then
             rm -rf "$_SSRUST_CONFIG_DIR"
             removed_count=$((removed_count + 1))
@@ -26519,7 +26587,7 @@ _ssrust_uninstall() {
     fi
 
     if [[ -f "$_SSRUST_LOG_FILE" || -f "$_SSRUST_ERR_FILE" ]]; then
-        read -rp "  同时删除日志文件? [y/N]: " remove_logs
+        if _ui_confirm "同时删除日志文件?" n; then remove_logs=y; else remove_logs=n; fi
         if [[ "$remove_logs" =~ ^[Yy] ]]; then
             rm -f "$_SSRUST_LOG_FILE" "$_SSRUST_ERR_FILE"
             removed_count=$((removed_count + 1))
@@ -26714,7 +26782,7 @@ _ssrust_manage() {
         _ui_print_screen _ssrust_manage_screen
 
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
+        ch=$(_ui_ask "请选择 [0-8]" "")
         case "$ch" in
             1) _ssrust_install_or_update ;;
             2) _ssrust_configure ;;
@@ -26725,7 +26793,7 @@ _ssrust_manage() {
             7) _ssrust_dns_manage ;;
             8) _ssrust_uninstall ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -27215,7 +27283,7 @@ _wireguard_pick_port() {
     local default_port="${1:-51820}"
     local port_input usage_line
     while true; do
-        read -rp "  WireGuard 监听端口 [默认 ${default_port}]: " port_input
+        port_input=$(_ui_ask "WireGuard 监听端口" "${default_port}")
         port_input=$(_mihomoconf_trim "${port_input:-$default_port}")
         if ! _is_valid_port "$port_input"; then
             _warn "端口无效，请输入 1-65535 的数字"
@@ -27336,7 +27404,7 @@ _wireguard_deploy() {
     local postup_line="" postdown_line=""
 
     iface_default=$(_wireguard_detect_iface)
-    read -rp "  接口名 [默认 ${iface_default}]: " iface_input
+    iface_input=$(_ui_ask "接口名" "${iface_default}")
     iface=$(_mihomoconf_trim "${iface_input:-$iface_default}")
     if [[ -z "$iface" || ! "$iface" =~ ^[A-Za-z0-9._-]+$ ]]; then
         _error_no_exit "接口名无效，仅支持字母/数字/._-"
@@ -27350,7 +27418,7 @@ _wireguard_deploy() {
     listen_port=$(_wireguard_pick_port "$current_port")
 
     endpoint_default=$(_wireguard_detect_default_endpoint "$iface")
-    read -rp "  客户端连接地址 [默认 ${endpoint_default}]: " endpoint_input
+    endpoint_input=$(_ui_ask "客户端连接地址" "${endpoint_default}")
     endpoint_host=$(_mihomoconf_trim "${endpoint_input:-$endpoint_default}")
     if [[ -z "$endpoint_host" ]]; then
         _error_no_exit "客户端连接地址不能为空"
@@ -27367,7 +27435,7 @@ _wireguard_deploy() {
     else
         prefix_default="$_WIREGUARD_DEFAULT_PREFIX"
     fi
-    read -rp "  内网网段前缀 [默认 ${prefix_default}，格式如 10.66.0]: " prefix_input
+    prefix_input=$(_ui_ask "内网网段前缀 (格式如 10.66.0)" "${prefix_default}")
     prefix=$(_mihomoconf_trim "${prefix_input:-$prefix_default}")
     if ! _wireguard_is_valid_ipv4_prefix "$prefix"; then
         _error_no_exit "网段前缀格式错误，请使用 x.x.x（每段 0-255）"
@@ -27376,7 +27444,7 @@ _wireguard_deploy() {
     fi
 
     egress_default=$(_wireguard_detect_egress_iface)
-    read -rp "  出口网卡 [默认 ${egress_default:-eth0}]: " egress_input
+    egress_input=$(_ui_ask "出口网卡" "${egress_default:-eth0}")
     egress_iface=$(_mihomoconf_trim "${egress_input:-${egress_default:-eth0}}")
     if command -v ip >/dev/null 2>&1 && ! ip link show "$egress_iface" >/dev/null 2>&1; then
         _error_no_exit "网卡 ${egress_iface} 不存在，请重新输入"
@@ -27385,7 +27453,7 @@ _wireguard_deploy() {
     fi
     dns_default=$(_wireguard_meta_get "$iface" "vpsgo-dns" 2>/dev/null || true)
     [[ -z "$dns_default" ]] && dns_default=$(_wireguard_default_dns)
-    read -rp "  客户端 DNS [默认 ${dns_default}]: " dns_input
+    dns_input=$(_ui_ask "客户端 DNS" "${dns_default}")
     dns_servers=$(_wireguard_normalize_csv "${dns_input:-$dns_default}")
     if [[ -z "$dns_servers" ]] || ! _wireguard_validate_dns_csv "$dns_servers"; then
         _error_no_exit "客户端 DNS 格式无效，请使用逗号分隔的 IP 列表"
@@ -27649,7 +27717,7 @@ _wireguard_add_client() {
         allowed_ips_client="${allowed_ips_client}, ::/0"
     fi
 
-    read -rp "  客户端名称 [默认 client${next_host}]: " client_name_input
+    client_name_input=$(_ui_ask "客户端名称" "client${next_host}")
     client_name=$(_mihomoconf_trim "${client_name_input:-client${next_host}}")
     if ! _wireguard_is_valid_client_name "$client_name"; then
         _error_no_exit "客户端名称无效，仅支持字母/数字/._-"
@@ -27676,7 +27744,7 @@ _wireguard_add_client() {
     chmod 700 "$_WIREGUARD_CLIENT_DIR"
     client_conf="${_WIREGUARD_CLIENT_DIR}/${iface}-${client_name}.conf"
     if [[ -f "$client_conf" ]]; then
-        read -rp "  客户端配置已存在，覆盖 ${client_conf}? [y/N]: " overwrite
+        if _ui_confirm "客户端配置已存在，覆盖 ${client_conf}?" n; then overwrite=y; else overwrite=n; fi
         if [[ ! "$overwrite" =~ ^[Yy] ]]; then
             _info "已取消"
             _press_any_key
@@ -27687,7 +27755,7 @@ _wireguard_add_client() {
     listen_port=$(_wireguard_conf_get_value "$iface" "ListenPort" 2>/dev/null || true)
     [[ -z "$listen_port" ]] && listen_port="51820"
     endpoint_default=$(_wireguard_detect_default_endpoint "$iface")
-    read -rp "  客户端连接地址 [默认 ${endpoint_default}]: " endpoint_input
+    endpoint_input=$(_ui_ask "客户端连接地址" "${endpoint_default}")
     endpoint_host=$(_mihomoconf_trim "${endpoint_input:-$endpoint_default}")
     if [[ -z "$endpoint_host" ]]; then
         _error_no_exit "客户端连接地址不能为空"
@@ -27696,7 +27764,7 @@ _wireguard_add_client() {
     fi
     dns_default=$(_wireguard_meta_get "$iface" "vpsgo-dns" 2>/dev/null || true)
     [[ -z "$dns_default" ]] && dns_default=$(_wireguard_default_dns)
-    read -rp "  客户端 DNS [默认 ${dns_default}]: " dns_input
+    dns_input=$(_ui_ask "客户端 DNS" "${dns_default}")
     dns_servers=$(_wireguard_normalize_csv "${dns_input:-$dns_default}")
     if [[ -z "$dns_servers" ]] || ! _wireguard_validate_dns_csv "$dns_servers"; then
         _error_no_exit "客户端 DNS 格式无效，请使用逗号分隔的 IP 列表"
@@ -27879,7 +27947,7 @@ _wireguard_show_client() {
     local iface default_client client_file
     iface=$(_wireguard_detect_iface)
     default_client="${_WIREGUARD_CLIENT_DIR}/${iface}-client1.conf"
-    read -rp "  客户端配置文件 [默认 ${default_client}]: " client_file
+    client_file=$(_ui_ask "客户端配置文件" "${default_client}")
     client_file=$(_mihomoconf_trim "${client_file:-$default_client}")
     if [[ ! -f "$client_file" ]]; then
         _error_no_exit "未找到客户端配置: ${client_file}"
@@ -27907,7 +27975,7 @@ _wireguard_uninstall() {
     _warn "将停止 WireGuard 节点服务，可删除配置文件。"
     printf "    服务: %s\n" "$service_name"
     printf "    配置: %s\n" "${_WIREGUARD_DIR}/${iface}.conf"
-    read -rp "  继续? [y/N]: " confirm
+    if _ui_confirm "继续?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -27934,7 +28002,7 @@ _wireguard_uninstall() {
     fi
     sysctl --system >/dev/null 2>&1 || true
 
-    read -rp "  删除 WireGuard 配置目录 ${_WIREGUARD_DIR}? [y/N]: " remove_config
+    if _ui_confirm "删除 WireGuard 配置目录 ${_WIREGUARD_DIR}?" n; then remove_config=y; else remove_config=n; fi
     if [[ "$remove_config" =~ ^[Yy] ]]; then
         rm -rf "$_WIREGUARD_DIR"
         _success "已删除配置目录: ${_WIREGUARD_DIR}"
@@ -28008,7 +28076,7 @@ _wireguard_manage() {
         _ui_print_screen _wireguard_manage_screen
 
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        ch=$(_ui_ask "请选择 [0-7]" "")
         case "$ch" in
             1) _wireguard_install_or_update ;;
             2) _wireguard_deploy ;;
@@ -28018,7 +28086,7 @@ _wireguard_manage() {
             6) _wireguard_add_client ;;
             7) _wireguard_uninstall ;;
             0) return ;;
-            *) _error_no_exit "无效选项"; sleep 1 ;;
+            *) _ui_invalid; sleep 1 ;;
         esac
     done
 }
@@ -28110,7 +28178,7 @@ _acme_install_or_update() {
 
     local email_input email
     email="$(_acme_random_email)"
-    read -rp "  注册邮箱 [默认 ${email}]: " email_input
+    email_input=$(_ui_ask "注册邮箱" "${email}")
     email="${email_input:-$email}"
 
     if ! command -v curl >/dev/null 2>&1; then
@@ -28170,7 +28238,7 @@ _acme_manual_renew_cert() {
     _acme_cmd --list 2>/dev/null || true
 
     local domain
-    read -rp "  输入要续期的域名: " domain
+    domain=$(_ui_ask "输入要续期的域名" "")
     domain="${domain//[[:space:]]/}"
     if [ -z "$domain" ]; then
         _error_no_exit "域名不能为空"
@@ -28180,7 +28248,7 @@ _acme_manual_renew_cert() {
 
     local cert_dir_input cert_dir
     cert_dir="${_ACME_CERT_DEFAULT_DIR}"
-    read -rp "  证书输出目录 [默认 ${cert_dir}]: " cert_dir_input
+    cert_dir_input=$(_ui_ask "证书输出目录" "${cert_dir}")
     cert_dir="${cert_dir_input:-$cert_dir}"
     mkdir -p "$cert_dir"
 
@@ -28223,7 +28291,7 @@ _acme_toggle_auto_update() {
     _separator
 
     local pick
-    read -rp "  选择 [0-2]: " pick
+    pick=$(_ui_ask "请选择 [0-2]" "")
     case "$pick" in
         1)
             _acme_cmd --upgrade --auto-upgrade >/dev/null 2>&1 \
@@ -28247,7 +28315,7 @@ _acme_select_ca() {
     _menu_pair "3" "Buypass" "buypass" "green" "4" "SSL.com" "sslcom" "green"
     _separator
     local pick
-    read -rp "  证书提供商 [1-4，默认 1]: " pick
+    pick=$(_ui_ask "证书提供商 [1-4]" "1")
     case "${pick:-1}" in
         1) _ACME_CA_SERVER="letsencrypt" ;;
         2) _ACME_CA_SERVER="zerossl" ;;
@@ -28267,18 +28335,18 @@ _acme_prepare_dns_provider() {
     _separator
 
     local pick
-    read -rp "  DNS 厂商 [0-3]: " pick
+    pick=$(_ui_ask "DNS 厂商 [0-3]" "")
     case "$pick" in
         1)
             local cf_token cf_account cf_key cf_email
-            read -rp "  CF_Token: " cf_token
-            read -rp "  CF_Account_ID (可选): " cf_account
+            cf_token=$(_ui_ask "CF_Token" "")
+            cf_account=$(_ui_ask "CF_Account_ID (可选)" "")
             if [ -n "$cf_token" ]; then
                 export CF_Token="$cf_token"
                 [ -n "$cf_account" ] && export CF_Account_ID="$cf_account"
             else
-                read -rp "  CF_Key: " cf_key
-                read -rp "  CF_Email: " cf_email
+                cf_key=$(_ui_ask "CF_Key" "")
+                cf_email=$(_ui_ask "CF_Email" "")
                 if [ -z "$cf_key" ] || [ -z "$cf_email" ]; then
                     _error_no_exit "Cloudflare 凭据不完整"
                     return 1
@@ -28290,8 +28358,8 @@ _acme_prepare_dns_provider() {
             ;;
         2)
             local ali_key ali_secret
-            read -rp "  Ali_Key: " ali_key
-            read -rp "  Ali_Secret: " ali_secret
+            ali_key=$(_ui_ask "Ali_Key" "")
+            ali_secret=$(_ui_ask "Ali_Secret" "")
             if [ -z "$ali_key" ] || [ -z "$ali_secret" ]; then
                 _error_no_exit "AliDNS 凭据不完整"
                 return 1
@@ -28302,8 +28370,8 @@ _acme_prepare_dns_provider() {
             ;;
         3)
             local dp_id dp_key
-            read -rp "  DP_Id: " dp_id
-            read -rp "  DP_Key: " dp_key
+            dp_id=$(_ui_ask "DP_Id" "")
+            dp_key=$(_ui_ask "DP_Key" "")
             if [ -z "$dp_id" ] || [ -z "$dp_key" ]; then
                 _error_no_exit "DNSPod 凭据不完整"
                 return 1
@@ -28328,7 +28396,7 @@ _acme_issue_cert() {
     fi
 
     local domain
-    read -rp "  输入证书域名 (如 example.com 或 *.example.com): " domain
+    domain=$(_ui_ask "输入证书域名 (如 example.com 或 *.example.com)" "")
     domain="${domain//[[:space:]]/}"
     if [ -z "$domain" ]; then
         _error_no_exit "域名不能为空"
@@ -28338,7 +28406,7 @@ _acme_issue_cert() {
 
     _acme_verify_domain_points_here "$domain" || {
         local force_continue
-        read -rp "  域名未指向本机，仍继续申请? [y/N]: " force_continue
+        if _ui_confirm "域名未指向本机，仍继续申请?" n; then force_continue=y; else force_continue=n; fi
         [[ "$force_continue" =~ ^[Yy]$ ]] || { _press_any_key; return; }
     }
 
@@ -28354,7 +28422,7 @@ _acme_issue_cert() {
     _separator
 
     local method
-    read -rp "  验证方式 [0-2]: " method
+    method=$(_ui_ask "验证方式 [0-2]" "")
     case "$method" in
         1)
             if [[ "$domain" == \*.* ]]; then
@@ -28393,7 +28461,7 @@ _acme_issue_cert() {
 
     local cert_dir_input cert_dir
     cert_dir="${_ACME_CERT_DEFAULT_DIR}"
-    read -rp "  证书输出目录 [默认 ${cert_dir}]: " cert_dir_input
+    cert_dir_input=$(_ui_ask "证书输出目录" "${cert_dir}")
     cert_dir="${cert_dir_input:-$cert_dir}"
     mkdir -p "$cert_dir"
 
@@ -28445,7 +28513,7 @@ _acme_manage() {
         _ui_print_screen _acme_manage_screen
 
         local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-5]: " choice
+        choice=$(_ui_ask "请选择 [0-5]" "")
         case "$choice" in
             1) _acme_install_or_update ;;
             2) _acme_issue_cert ;;
@@ -28453,7 +28521,7 @@ _acme_manage() {
             4) _acme_toggle_auto_update ;;
             5) _acme_manual_renew_cert ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${choice}"; sleep 1 ;;
+            *) _ui_invalid "$choice"; sleep 1 ;;
         esac
     done
 }
@@ -28614,7 +28682,7 @@ _akdns_setup() {
     echo ""
     
     local confirm
-    read -rp "  已在 https://dns.akile.ai 添加本机 IP? [y/N]: " confirm
+    if _ui_confirm "已在 https://dns.akile.ai 添加本机 IP?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "请先前往网站添加 IP，然后再返回继续操作。"
         _press_any_key
@@ -29559,7 +29627,7 @@ _dns_benchmark_mainstream() {
 
         local group_choice
 
-        read -rp "  选择 [0-5]: " group_choice
+        group_choice=$(_ui_ask "请选择 [0-5]" "")
         case "$group_choice" in
             1)
                 _dns_benchmark_print_group_table "国内 DNS 组测速（ECS 标记）" "qq.com" "A" "${cn_dns[@]}"
@@ -29598,7 +29666,7 @@ _dns64_quick_setup_flow() {
 
     if ! _dns_is_ipv6_only_host; then
         _warn "当前主机不是 IPv6-only 网络环境，DNS64 主要用于纯 IPv6 服务器。"
-        read -rp "  是否继续设置 DNS64? [y/N]: " confirm
+        if _ui_confirm "是否继续设置 DNS64?" n; then confirm=y; else confirm=n; fi
         echo ""
         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
             return
@@ -29621,7 +29689,7 @@ _dns64_quick_setup_flow() {
     _separator
 
     local choice selected_servers=""
-    read -rp "  选择 DNS64 服务器 (编号，空格分隔多选): " choice
+    choice=$(_ui_ask "请选择 DNS64 服务器 (编号，空格分隔多选)" "")
 
     i=1
     for entry in "${_DNS64_PRESETS[@]}"; do
@@ -29653,7 +29721,7 @@ _dns64_quick_setup_flow() {
     _menu_item "2" "永久修改" "持久化并重启组件" "green"
     _separator
 
-    read -rp "  选择 [1-2, 默认2]: " mode
+    mode=$(_ui_ask "请选择 [1-2]" "2")
     echo ""
     mode="${mode:-2}"
 
@@ -29689,13 +29757,13 @@ _dns_change_flow() {
     local dns_input clear_existing dns_default
 
     echo ""
-    read -rp "  清除现有 DNS，仅保留你输入的新 DNS? [Y/n]: " clear_existing
+    if _ui_confirm "清除现有 DNS，仅保留你输入的新 DNS?" y; then clear_existing=y; else clear_existing=n; fi
     echo ""
     dns_default="$(_dns_recommended_servers)"
     if _dns_is_ipv6_only_host; then
         _info "检测到 IPv6-only 网络，推荐使用 DNS64 服务器以访问 IPv4 资源。"
     fi
-    read -rp "  请输入 DNS（空格/逗号分隔）[默认 ${dns_default}]: " dns_input
+    dns_input=$(_ui_ask "请输入 DNS（空格/逗号分隔）" "${dns_default}")
     dns_input="${dns_input:-$dns_default}"
     if ! _dns_parse_servers "$dns_input"; then
         _press_any_key
@@ -29742,7 +29810,7 @@ _dns_manage() {
         _ui_print_screen _dns_manage_screen
 
         local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-5]: " choice
+        choice=$(_ui_ask "请选择 [0-5]" "")
         case "$choice" in
             1) _dns_change_flow "temporary" ;;
             2) _dns_change_flow "permanent" ;;
@@ -29754,7 +29822,7 @@ _dns_manage() {
             4) _dns_benchmark_mainstream ;;
             5) _dns64_quick_setup_flow ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${choice}"; sleep 1 ;;
+            *) _ui_invalid "$choice"; sleep 1 ;;
         esac
     done
 }
@@ -29815,7 +29883,7 @@ _swap_create_flow() {
     echo ""
 
     local swap_input swap_size_mib
-    read -rp "  请输入要创建的 Swap 大小 (MiB) [默认 ${recommend_new_mib}]: " swap_input
+    swap_input=$(_ui_ask "请输入要创建的 Swap 大小 (MiB)" "${recommend_new_mib}")
     swap_size_mib="${swap_input:-$recommend_new_mib}"
 
     # 校验输入
@@ -29837,7 +29905,7 @@ _swap_create_flow() {
     echo ""
     _warn "将在 /swapfile 创建 ${swap_size_mib} MiB 的 Swap"
     local confirm
-    read -rp "  继续? [y/N]: " confirm
+    if _ui_confirm "继续?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -29894,7 +29962,7 @@ _swap_create_flow() {
 
     echo ""
     local reboot_confirm
-    read -rp "  立即重启系统? [y/N]: " reboot_confirm
+    if _ui_confirm "立即重启系统?" n; then reboot_confirm=y; else reboot_confirm=n; fi
     if [[ "$reboot_confirm" =~ ^[Yy] ]]; then
         _info "系统将在 3 秒后重启..."
         sleep 3
@@ -29908,7 +29976,7 @@ _swap_delete_flow() {
     if [ -f /swapfile ]; then
         _warn "确定要删除 /swapfile 并释放空间吗？"
         local confirm
-        read -rp "  确定删除? [y/N]: " confirm
+        if _ui_confirm "确定删除?" n; then confirm=y; else confirm=n; fi
         if [[ ! "$confirm" =~ ^[Yy] ]]; then
             _info "已取消"
             _press_any_key
@@ -29922,7 +29990,7 @@ _swap_delete_flow() {
         _info "已删除 /swapfile 并移除 fstab 条目"
         echo ""
         local reboot_confirm
-        read -rp "  立即重启系统? [y/N]: " reboot_confirm
+        if _ui_confirm "立即重启系统?" n; then reboot_confirm=y; else reboot_confirm=n; fi
         if [[ "$reboot_confirm" =~ ^[Yy] ]]; then
             _info "系统将在 3 秒后重启..."
             sleep 3
@@ -29992,14 +30060,14 @@ _swap_setup() {
         _separator
 
         local choice
-        read -rp "  选择 [0-4]: " choice
+        choice=$(_ui_ask "请选择 [0-4]" "")
         case "$choice" in
             1) _swap_create_flow ;;
             2) _swap_delete_flow ;;
             3) _swap_set_swappiness 1 ;;
             4) _swap_set_swappiness 60 ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${choice}"; _press_any_key ;;
+            *) _ui_invalid "$choice"; _press_any_key ;;
         esac
     done
 }
@@ -30279,7 +30347,7 @@ _ssh_change_port() {
         fi
     fi
 
-    read -rp "  新 SSH 端口 [1-65535]: " new_port
+    new_port=$(_ui_ask "新 SSH 端口 [1-65535]" "")
     if ! _is_valid_port "${new_port:-}"; then
         _error_no_exit "端口无效: ${new_port:-空}"
         _press_any_key
@@ -30293,7 +30361,7 @@ _ssh_change_port() {
     fi
 
     _warn "将把 SSH 监听端口改为 ${new_port}，请确认防火墙/安全组已放行该端口。"
-    read -rp "  继续? [y/N]: " confirm
+    if _ui_confirm "继续?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         _info "已取消"
         _press_any_key
@@ -30344,7 +30412,7 @@ _rootssh_enable() {
     _warn "将设置 root 密码，允许 root SSH 登录。"
 
     local confirm
-    read -rp "  继续? [Y/n]: " confirm
+    if _ui_confirm "继续?" y; then confirm=y; else confirm=n; fi
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         _info "已取消"
         _press_any_key
@@ -30352,7 +30420,7 @@ _rootssh_enable() {
     fi
 
     echo ""
-    _info "步骤 1/3: 设置 root 密码 (passwd root)"
+    _ui_step "1/3" "设置 root 密码 (passwd root)"
     if ! passwd root; then
         _error_no_exit "root 密码设置失败"
         _press_any_key
@@ -30360,7 +30428,7 @@ _rootssh_enable() {
     fi
 
     echo ""
-    _info "步骤 2/3: 修改 SSH 配置，允许 root 登录"
+    _ui_step "2/3" "修改 SSH 配置，允许 root 登录"
     local sshd_cfg="/etc/ssh/sshd_config"
     if [ ! -f "$sshd_cfg" ]; then
         _error_no_exit "未找到 ${sshd_cfg}"
@@ -30389,7 +30457,7 @@ _rootssh_enable() {
     fi
 
     echo ""
-    _info "步骤 3/3: 复制现有用户公钥到 root"
+    _ui_step "3/3" "复制现有用户公钥到 root"
     local src_user
     src_user="$(_rootssh_pick_source_user)"
     _rootssh_copy_key_if_exists "$src_user"
@@ -30406,7 +30474,7 @@ _ssh_force_key_login() {
     _warn "将禁用 SSH 密码登录，仅允许密钥登录。"
 
     local confirm
-    read -rp "  继续? [Y/n]: " confirm
+    if _ui_confirm "继续?" y; then confirm=y; else confirm=n; fi
     if [[ "$confirm" =~ ^[Nn]$ ]]; then
         _info "已取消"
         _press_any_key
@@ -30420,7 +30488,7 @@ _ssh_force_key_login() {
     fi
 
     echo ""
-    _info "步骤 1/2: 修改 SSH 配置，禁用密码登录"
+    _ui_step "1/2" "修改 SSH 配置，禁用密码登录"
     local sshd_cfg="/etc/ssh/sshd_config"
     if [ ! -f "$sshd_cfg" ]; then
         _error_no_exit "未找到 ${sshd_cfg}"
@@ -30446,7 +30514,7 @@ _ssh_force_key_login() {
     fi
 
     echo ""
-    _info "步骤 2/2: 重启 SSH 服务并应用配置"
+    _ui_step "2/2" "重启 SSH 服务并应用配置"
     if ! _restart_first_available_service ssh sshd; then
         _warn "未检测到可重启的 ssh/sshd 服务，请手动重启 SSH 服务"
     fi
@@ -30529,7 +30597,7 @@ _ssh_manage_keys() {
         _separator
 
         local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-2]: " choice
+        choice=$(_ui_ask "请选择 [0-2]" "")
         case "$choice" in
             1)
                 if [ ! -f "$auth_file" ] || [ "${#keys[@]}" -eq 0 ]; then
@@ -30539,7 +30607,7 @@ _ssh_manage_keys() {
                 fi
 
                 local del_idx
-                read -rp "  请输入要删除的密钥编号 (支持多个，用空格分隔，例如 '1' 或 '1 3'): " del_idx
+                del_idx=$(_ui_ask "请输入要删除的密钥编号 (支持多个，用空格分隔，例如 '1' 或 '1 3')" "")
                 if [ -z "$del_idx" ]; then
                     continue
                 fi
@@ -30579,7 +30647,7 @@ _ssh_manage_keys() {
                     if [ "$password_disabled" -eq 1 ]; then
                         _warn "检测到当前已禁用密码登录，若清空密钥，您可能会被锁在系统之外！"
                     fi
-                    read -rp "  确认要清空所有密钥吗？输入 'y' 确认: " confirm
+                    confirm=$(_ui_ask "确认要清空所有密钥吗？输入 'y' 确认" "")
                     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
                         _info "已取消删除"
                         _press_any_key
@@ -30587,7 +30655,7 @@ _ssh_manage_keys() {
                     fi
                 else
                     _warn "您选择删除 ${#to_delete[@]} 个密钥，剩余 $total_after 个密钥。"
-                    read -rp "  确认删除吗？[y/N]: " confirm
+                    if _ui_confirm "确认删除吗？" n; then confirm=y; else confirm=n; fi
                     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
                         _info "已取消删除"
                         _press_any_key
@@ -30643,7 +30711,7 @@ _ssh_manage_keys() {
                 _header "添加/导入 SSH 密钥"
                 _info "请输入或粘贴您的 SSH 公钥 (以 ssh-rsa, ssh-ed25519 等开头):"
                 local new_key
-                read -rp "  公钥: " new_key
+                new_key=$(_ui_ask "公钥" "")
                 new_key=$(echo "$new_key" | tr -d '\r\n')
                 if [ -z "$new_key" ]; then
                     _info "已取消"
@@ -30692,7 +30760,7 @@ _ssh_manage_keys() {
                 _press_any_key
                 ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${choice}"; sleep 1 ;;
+            *) _ui_invalid "$choice"; sleep 1 ;;
         esac
     done
 }
@@ -30853,7 +30921,7 @@ _ssh_proxy_export_config() {
         _separator
 
         local sel_input
-        read -rp "  请输入要导出的用户名或编号: " sel_input
+        sel_input=$(_ui_ask "请输入要导出的用户名或编号" "")
         sel_input=$(_mihomoconf_trim "$sel_input")
         if [[ "$sel_input" =~ ^[0-9]+$ ]] && [ "$sel_input" -ge 1 ] && [ "$sel_input" -le "${#proxy_users[@]}" ]; then
             sel_user="${proxy_users[$((sel_input - 1))]}"
@@ -30886,7 +30954,7 @@ _ssh_proxy_export_config() {
     host_default=$(_mihomoconf_get_saved_host "$_MIHOMOCONF_CONFIG_FILE" 2>/dev/null || true)
     [[ -z "$host_default" ]] && host_default=$(_mihomoconf_get_server_ip)
 
-    read -rp "  客户端连接地址 [默认 ${host_default}]: " host_input
+    host_input=$(_ui_ask "客户端连接地址" "${host_default}")
     client_host=$(_mihomoconf_trim "${host_input:-$host_default}")
     [[ -z "$client_host" ]] && client_host="YOUR_SERVER_IP"
 
@@ -30894,7 +30962,7 @@ _ssh_proxy_export_config() {
     ssh_port=$(_ssh_current_ports | cut -d',' -f1)
     [[ -z "$ssh_port" ]] && ssh_port="22"
     port_default=$(echo "$ssh_port" | tr -d ' ')
-    read -rp "  SSH 端口号 [默认 ${port_default}]: " port_input
+    port_input=$(_ui_ask "SSH 端口号" "${port_default}")
     client_port=$(_mihomoconf_trim "${port_input:-$port_default}")
     [[ -z "$client_port" ]] && client_port="22"
 
@@ -30933,14 +31001,14 @@ _ssh_proxy_export_config() {
         password="$stored_password"
     else
         _info "说明：由于系统密码为哈希存储，无法直接解密提取密码。"
-        read -rp "  请输入密码 (留空则生成包含 <PASSWORD> 占位符的配置): " password
+        password=$(_ui_ask "请输入密码 (留空则生成包含 <PASSWORD> 占位符的配置)" "")
         password=$(_mihomoconf_trim "$password")
         [[ -z "$password" ]] && password="<PASSWORD>"
     fi
 
     local node_name node_name_input
     node_name="SSH-Proxy-${sel_user}"
-    read -rp "  节点名称 [默认 ${node_name}]: " node_name_input
+    node_name_input=$(_ui_ask "节点名称" "${node_name}")
     node_name=$(_mihomoconf_trim "${node_name_input:-$node_name}")
     [[ -z "$node_name" ]] && node_name="SSH-Proxy-${sel_user}"
 
@@ -31142,7 +31210,7 @@ EOF
     # 快速导入 Mihomo 功能
     echo ""
     local import_confirm
-    read -rp "  是否将该节点自动导入/更新到本地的 Mihomo 配置中？[y/N]: " import_confirm
+    if _ui_confirm "是否将该节点自动导入/更新到本地的 Mihomo 配置中？" n; then import_confirm=y; else import_confirm=n; fi
     import_confirm=$(_mihomoconf_trim "${import_confirm:-n}")
     if [[ "$import_confirm" =~ ^[Yy]$ ]]; then
         local config_file="$_MIHOMOCONF_CONFIG_FILE"
@@ -31230,7 +31298,7 @@ _ssh_proxy_user_manage() {
         _separator
 
         local choice
-        read -rp "  选择 [0-4]: " choice
+        choice=$(_ui_ask "请选择 [0-4]" "")
         choice=$(_mihomoconf_trim "${choice:-}")
 
         case "$choice" in
@@ -31239,7 +31307,7 @@ _ssh_proxy_user_manage() {
                 _header "创建受限代理用户"
                 local username password
                 while true; do
-                    read -rp "  请输入新用户名: " username
+                    username=$(_ui_ask "请输入新用户名" "")
                     username=$(_mihomoconf_trim "$username")
                     [[ -z "$username" ]] && continue
                     if ! [[ "$username" =~ ^[a-zA-Z0-9_-]+$ ]]; then
@@ -31258,7 +31326,7 @@ _ssh_proxy_user_manage() {
                 printf "  [1] 密码验证 (Password Authentication)\n"
                 printf "  [2] 密钥验证 (SSH Key Authentication)\n"
                 local auth_mode="1"
-                read -rp "  选择 [1-2, 默认 1]: " auth_mode
+                auth_mode=$(_ui_ask "请选择 [1-2]" "1")
                 auth_mode=$(_mihomoconf_trim "${auth_mode:-1}")
 
                 local password=""
@@ -31273,19 +31341,19 @@ _ssh_proxy_user_manage() {
                     printf "  [1] 自动生成新密钥对 (将自动配置登录并备份私钥)\n"
                     printf "  [2] 导入已有公钥 (手动粘贴已有的公钥)\n"
                     local key_choice="1"
-                    read -rp "  选择 [1-2, 默认 1]: " key_choice
+                    key_choice=$(_ui_ask "请选择 [1-2]" "1")
                     key_choice=$(_mihomoconf_trim "${key_choice:-1}")
 
                     if [[ "$key_choice" == "2" ]]; then
                         while true; do
-                            read -rp "  请粘贴您的 SSH 公钥 (例如 ssh-rsa/ssh-ed25519 开头的内容): " public_key
+                            public_key=$(_ui_ask "请粘贴您的 SSH 公钥 (例如 ssh-rsa/ssh-ed25519 开头的内容)" "")
                             public_key=$(_mihomoconf_trim "$public_key")
                             [[ -n "$public_key" ]] && break
                             _warn "公钥不能为空！"
                         done
                         
                         local paste_pk_confirm
-                        read -rp "  是否粘贴配对的私钥以支持一键导出客户端配置？[y/N]: " paste_pk_confirm
+                        if _ui_confirm "是否粘贴配对的私钥以支持一键导出客户端配置？" n; then paste_pk_confirm=y; else paste_pk_confirm=n; fi
                         paste_pk_confirm=$(_mihomoconf_trim "${paste_pk_confirm:-n}")
                         if [[ "$paste_pk_confirm" =~ ^[Yy]$ ]]; then
                             _info "请在一行或多行中粘贴私钥内容，完成后在新行按 Ctrl+D 结束输入:"
@@ -31319,7 +31387,7 @@ _ssh_proxy_user_manage() {
                 fi
 
                 if [[ "$is_key_mode" -eq 0 ]]; then
-                    read -rp "  请输入密码 (留空随机生成): " password
+                    password=$(_ui_ask "请输入密码 (留空随机生成)" "")
                     password=$(_mihomoconf_trim "$password")
                     if [ -z "$password" ]; then
                         password=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
@@ -31409,7 +31477,7 @@ _ssh_proxy_user_manage() {
                     
                     _separator
                     local show_export
-                    read -rp "  是否立即配置并导出该用户的完整客户端配置(支持一键导入Mihomo)？[Y/n]: " show_export
+                    if _ui_confirm "是否立即配置并导出该用户的完整客户端配置(支持一键导入Mihomo)？" y; then show_export=y; else show_export=n; fi
                     show_export=$(_mihomoconf_trim "${show_export:-y}")
                     if [[ "$show_export" =~ ^[Yy]$ ]]; then
                         _ssh_proxy_export_config "$username"
@@ -31454,7 +31522,7 @@ _ssh_proxy_user_manage() {
 
                 local del_user=""
                 local del_input
-                read -rp "  请输入要删除的用户名或编号: " del_input
+                del_input=$(_ui_ask "请输入要删除的用户名或编号" "")
                 del_input=$(_mihomoconf_trim "$del_input")
                 if [[ "$del_input" =~ ^[0-9]+$ ]] && [ "$del_input" -ge 1 ] && [ "$del_input" -le "${#proxy_users[@]}" ]; then
                     del_user="${proxy_users[$((del_input - 1))]}"
@@ -31476,7 +31544,7 @@ _ssh_proxy_user_manage() {
                 fi
 
                 local confirm
-                read -rp "  确认删除代理用户 ${del_user} 及其主目录吗？[y/N]: " confirm
+                if _ui_confirm "确认删除代理用户 ${del_user} 及其主目录吗？" n; then confirm=y; else confirm=n; fi
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     if command -v userdel >/dev/null 2>&1; then
                         userdel -r "$del_user" >/dev/null 2>&1 || userdel "$del_user" >/dev/null 2>&1
@@ -31517,7 +31585,7 @@ _ssh_proxy_user_manage() {
                 printf "  [1] 开启流量接管 (通过 iptables 将 sshproxy 组的流量转发至 Mihomo)\n"
                 printf "  [2] 关闭流量接管 (清除相关 iptables 转发规则)\n"
                 local take_choice="1"
-                read -rp "  选择 [1-2, 默认 1]: " take_choice
+                take_choice=$(_ui_ask "请选择 [1-2]" "1")
                 take_choice=$(_mihomoconf_trim "${take_choice:-1}")
 
                 if [[ "$take_choice" == "2" ]]; then
@@ -31602,7 +31670,7 @@ EOF
                 _ssh_proxy_export_config
                 ;;
             *)
-                _error_no_exit "无效选项: ${choice}"
+                _ui_invalid "$choice"
                 sleep 1
                 ;;
         esac
@@ -31871,7 +31939,7 @@ _onepanel_apply_iptables_chains() {
 
     echo ""
     local save_choice
-    read -rp "  保存规则以便重启后生效? [Y/n]: " save_choice
+    if _ui_confirm "保存规则以便重启后生效?" y; then save_choice=y; else save_choice=n; fi
     if [[ "$save_choice" =~ ^[Nn]$ ]]; then
         _warn "已跳过保存；重启服务器或重启防火墙后规则可能丢失。"
     else
@@ -32095,7 +32163,7 @@ _self_uninstall() {
 
     _warn "即将删除 ${INSTALL_PATH}"
     local confirm
-    read -rp "  确认卸载? [y/N]: " confirm
+    if _ui_confirm "确认卸载?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消"
         _press_any_key
@@ -32243,7 +32311,7 @@ _select_lxc_container() {
 
     local choice
     while true; do
-        read -rp "  请选择容器序号 [1-${#lxc_list[@]}, 默认: 1]: " choice
+        choice=$(_ui_ask "请选择 容器序号 [1-${#lxc_list[@]}]" "1")
         choice="${choice:-1}"
         choice=$(echo "$choice" | xargs)
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#lxc_list[@]}" ]; then
@@ -32321,7 +32389,7 @@ _he_ipv6_lxc_menu() {
     while true; do
         _ui_print_screen _he_ipv6_lxc_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-8]: " ch
+        ch=$(_ui_ask "请选择 [0-8]" "")
         case "$ch" in
             1) _he_ipv6_lxc_install ;;
             2) _he_tunnel_edit ;;
@@ -32332,7 +32400,7 @@ _he_ipv6_lxc_menu() {
             7) _he_ipv6_lxc_uninstall ;;
             8) _he_tunnel_daemon_menu ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -32478,7 +32546,7 @@ _he_tunnel_edit_impl() {
     local new_server_ipv4 new_client_ipv6 new_server_ipv6 new_local_ipv4 new_routed_ipv6
 
     while true; do
-        read -rp "  HE Server IPv4 [${_HE_CUR_SERVER_IPV4}]: " new_server_ipv4
+        new_server_ipv4=$(_ui_ask "HE Server IPv4 [${_HE_CUR_SERVER_IPV4}]" "")
         new_server_ipv4="${new_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
         new_server_ipv4="${new_server_ipv4%%/*}"
         if _is_ipv4 "$new_server_ipv4"; then
@@ -32488,7 +32556,7 @@ _he_tunnel_edit_impl() {
     done
 
     while true; do
-        read -rp "  HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6}] (可带 /64): " new_client_ipv6
+        new_client_ipv6=$(_ui_ask "HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6}] (可带 /64)" "")
         new_client_ipv6="${new_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
         local clean_ipv6="${new_client_ipv6%%/*}"
         if _is_ipv6 "$clean_ipv6"; then
@@ -32499,7 +32567,7 @@ _he_tunnel_edit_impl() {
     new_client_ipv6="${new_client_ipv6%%/*}"
 
     while true; do
-        read -rp "  HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6}] (可带 /64): " new_server_ipv6
+        new_server_ipv6=$(_ui_ask "HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6}] (可带 /64)" "")
         new_server_ipv6="${new_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
         local clean_ipv6="${new_server_ipv6%%/*}"
         if _is_ipv6 "$clean_ipv6"; then
@@ -32512,7 +32580,7 @@ _he_tunnel_edit_impl() {
     local default_local_ipv4
     default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || echo "$_HE_CUR_LOCAL_IPV4")
     while true; do
-        read -rp "  宿主机本地 IPv4 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " new_local_ipv4
+        new_local_ipv4=$(_ui_ask "宿主机本地 IPv4 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]" "")
         new_local_ipv4="${new_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
         new_local_ipv4="${new_local_ipv4%%/*}"
         if _is_ipv4 "$new_local_ipv4"; then
@@ -32522,7 +32590,7 @@ _he_tunnel_edit_impl() {
     done
 
     while true; do
-        read -rp "  HE Routed IPv6 Prefix [${_HE_CUR_ROUTED_IPV6:-回车跳过}]: " new_routed_ipv6
+        new_routed_ipv6=$(_ui_ask "HE Routed IPv6 Prefix [${_HE_CUR_ROUTED_IPV6:-回车跳过}]" "")
         new_routed_ipv6="${new_routed_ipv6:-$_HE_CUR_ROUTED_IPV6}"
         new_routed_ipv6=$(echo "$new_routed_ipv6" | sed 's/[[:space:]]//g')
         if [[ -z "$new_routed_ipv6" ]]; then
@@ -32554,7 +32622,7 @@ _he_tunnel_edit_impl() {
     if [[ -n "$new_routed_ipv6" ]]; then
         local random_suffix
         random_suffix=$(printf '%04x' $((RANDOM % 65536)))
-        read -rp "  请输入 Routed Prefix 的子网后缀 (随机生成可避免冲突) [${cur_suffix:-$random_suffix}]: " new_routed_suffix
+        new_routed_suffix=$(_ui_ask "请输入 Routed Prefix 的子网后缀 (随机生成可避免冲突) [${cur_suffix:-$random_suffix}]" "")
         new_routed_suffix="${new_routed_suffix:-${cur_suffix:-$random_suffix}}"
         new_routed_suffix=$(echo "$new_routed_suffix" | sed 's/[^a-fA-F0-9]//g' | tr '[:upper:]' '[:lower:]')
         if [[ -z "$new_routed_suffix" ]]; then
@@ -32568,7 +32636,7 @@ _he_tunnel_edit_impl() {
         share_with_host="n"
     fi
     local input_share
-    read -rp "  是否允许宿主机也使用此 IPv6 隧道访问外网? [y/N] (当前: $([[ "$share_with_host" == "y" ]] && echo "是" || echo "否")): " input_share
+    if _ui_confirm "是否允许宿主机也使用此 IPv6 隧道访问外网? (当前: $([[ "$share_with_host" == "y" ]] && echo 是 || echo 否))" n; then input_share=y; else input_share=n; fi
     if [[ -n "$input_share" ]]; then
         if [[ "$input_share" =~ ^[Yy] ]]; then
             share_with_host="y"
@@ -32807,7 +32875,7 @@ EOF
                 # 如果容器在运行，提示重启
                 if lxc-info -n "$uc" -s | grep -q "RUNNING"; then
                     local reboot_c="y"
-                    read -rp "    容器 ${uc} 正在运行，是否立即重启容器使配置生效? [Y/n]: " reboot_c
+                    if _ui_confirm "容器 ${uc} 正在运行，是否立即重启容器使配置生效?" y; then reboot_c=y; else reboot_c=n; fi
                     reboot_c="${reboot_c:-y}"
                     if [[ "$reboot_c" =~ ^[Yy] ]]; then
                         _info "    正在重启容器 ${uc}..."
@@ -32889,12 +32957,12 @@ _he_ipv6_lxc_install_impl() {
     fi
     
     local container_name
-    read -rp "  请输入 LXC 容器名称 [默认: warp-container]: " container_name
+    container_name=$(_ui_ask "请输入 LXC 容器名称" "warp-container")
     container_name="${container_name:-warp-container}"
     container_name=$(echo "$container_name" | xargs)
     
     local configure_he="n"
-    read -rp "  是否配置并绑定 HE IPv6 隧道? [y/N]: " configure_he
+    if _ui_confirm "是否配置并绑定 HE IPv6 隧道?" n; then configure_he=y; else configure_he=n; fi
     if [[ "$configure_he" =~ ^[Yy] ]]; then
         configure_he="y"
     else
@@ -32906,7 +32974,7 @@ _he_ipv6_lxc_install_impl() {
     _info "  1: 默认 DHCP (内外网均通，外网可通过 NAT 访问 IPv4)"
     _info "  2: 仅内网互通 (仅用于宿主机与容器互访，外网强制走 IPv6)"
     _info "  3: 完全禁用 IPv4 (容器内无任何 IPv4 地址，仅保留 IPv6)"
-    read -rp "  请选择 [1-3, 默认: 1]: " ipv4_mode
+    ipv4_mode=$(_ui_ask "请选择 [1-3]" "1")
     ipv4_mode="${ipv4_mode:-1}"
     if [[ ! "$ipv4_mode" =~ ^[123]$ ]]; then
         ipv4_mode="1"
@@ -32931,7 +32999,7 @@ _he_ipv6_lxc_install_impl() {
         fi
 
         while true; do
-            read -rp "  请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]: " he_server_ipv4
+            he_server_ipv4=$(_ui_ask "请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]" "")
             he_server_ipv4="${he_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
             he_server_ipv4="${he_server_ipv4%%/*}"
             if _is_ipv4 "$he_server_ipv4"; then
@@ -32941,7 +33009,7 @@ _he_ipv6_lxc_install_impl() {
         done
         
         while true; do
-            read -rp "  请输入 HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
+            he_client_ipv6=$(_ui_ask "请输入 HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6:-必填}]" "")
             he_client_ipv6="${he_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
             local clean_ipv6="${he_client_ipv6%%/*}"
             if _is_ipv6 "$clean_ipv6"; then
@@ -32952,7 +33020,7 @@ _he_ipv6_lxc_install_impl() {
         he_client_ipv6="${he_client_ipv6%%/*}"
         
         while true; do
-            read -rp "  请输入 HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
+            he_server_ipv6=$(_ui_ask "请输入 HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6:-必填}]" "")
             he_server_ipv6="${he_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
             local clean_ipv6="${he_server_ipv6%%/*}"
             if _is_ipv6 "$clean_ipv6"; then
@@ -32965,7 +33033,7 @@ _he_ipv6_lxc_install_impl() {
         local default_local_ipv4
         default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || echo "$_HE_CUR_LOCAL_IPV4")
         while true; do
-            read -rp "  请输入本地 IPv4 地址 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
+            he_local_ipv4=$(_ui_ask "请输入本地 IPv4 地址 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]" "")
             he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
             he_local_ipv4="${he_local_ipv4%%/*}"
             if _is_ipv4 "$he_local_ipv4"; then
@@ -32980,7 +33048,7 @@ _he_ipv6_lxc_install_impl() {
                 default_share="y"
             fi
         fi
-        read -rp "  是否允许宿主机共享此隧道访问外网? [y/N] (当前: $([[ "$default_share" == "y" ]] && echo "是" || echo "否")): " share_with_host
+        if _ui_confirm "是否允许宿主机共享此隧道访问外网? (当前: $([[ "$default_share" == "y" ]] && echo 是 || echo 否))" n; then share_with_host=y; else share_with_host=n; fi
         if [[ -n "$share_with_host" ]]; then
             if [[ "$share_with_host" =~ ^[Yy] ]]; then
                 share_with_host="y"
@@ -32992,7 +33060,7 @@ _he_ipv6_lxc_install_impl() {
         fi
         
         while true; do
-            read -rp "  请输入 HE Routed IPv6 Prefix (e.g. 2001:470:1f11:xx::/64) [${_HE_CUR_ROUTED_IPV6:-必填}]: " routed_ipv6
+            routed_ipv6=$(_ui_ask "请输入 HE Routed IPv6 Prefix (e.g. 2001:470:1f11:xx::/64) [${_HE_CUR_ROUTED_IPV6:-必填}]" "")
             routed_ipv6="${routed_ipv6:-$_HE_CUR_ROUTED_IPV6}"
             routed_ipv6=$(echo "$routed_ipv6" | sed 's/[[:space:]]//g')
             local clean_prefix="${routed_ipv6%%/*}"
@@ -33015,7 +33083,7 @@ _he_ipv6_lxc_install_impl() {
                 cur_suffix="${suffix_part%%::*}"
             fi
         fi
-        read -rp "  请输入 Routed Prefix 子网后缀 [${cur_suffix:-$random_suffix}]: " routed_suffix
+        routed_suffix=$(_ui_ask "请输入 Routed Prefix 子网后缀 [${cur_suffix:-$random_suffix}]" "")
         routed_suffix="${routed_suffix:-${cur_suffix:-$random_suffix}}"
         routed_suffix=$(echo "$routed_suffix" | sed 's/[^a-fA-F0-9]//g' | tr '[:upper:]' '[:lower:]')
         if [[ -z "$routed_suffix" ]]; then
@@ -33037,7 +33105,7 @@ _he_ipv6_lxc_install_impl() {
         if ip link show he-ipv6 >/dev/null 2>&1; then
             _warn "宿主机上已存在 he-ipv6 接口。"
             local overwrite_tunnel
-            read -rp "  是否删除并重新配置该接口? [y/N]: " overwrite_tunnel
+            if _ui_confirm "是否删除并重新配置该接口?" n; then overwrite_tunnel=y; else overwrite_tunnel=n; fi
             if [[ "$overwrite_tunnel" =~ ^[Yy] ]]; then
                 _info "正在清理旧的 he-ipv6 接口..."
                 _he_remove_systemd_service
@@ -33133,7 +33201,7 @@ EOF
         container_exists=1
         _warn "LXC 容器 $container_name 已存在。"
         local recreate_container
-        read -rp "  是否删除并重新创建此容器? [y/N]: " recreate_container
+        if _ui_confirm "是否删除并重新创建此容器?" n; then recreate_container=y; else recreate_container=n; fi
         if [[ "$recreate_container" =~ ^[Yy] ]]; then
             _info "正在停止并删除旧容器..."
             lxc-stop -n "$container_name" -k 2>/dev/null || true
@@ -33416,7 +33484,7 @@ EOF
     fi
 
     local auto_start="y"
-    read -rp "  是否设置容器开机自启? [Y/n]: " auto_start
+    if _ui_confirm "是否设置容器开机自启?" y; then auto_start=y; else auto_start=n; fi
     auto_start="${auto_start:-y}"
     if [[ "$auto_start" =~ ^[Yy] ]]; then
         sed -i '/lxc.start.auto/d' "$lxc_config"
@@ -33532,7 +33600,7 @@ _lxc_port_forward_menu() {
     while true; do
         _ui_print_screen _lxc_port_forward_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-3]: " ch
+        ch=$(_ui_ask "请选择 [0-3]" "")
         case "$ch" in
             1)
                 _lxc_port_forward_list
@@ -33541,7 +33609,7 @@ _lxc_port_forward_menu() {
             2) _lxc_port_forward_add ;;
             3) _lxc_port_forward_delete ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -33588,7 +33656,7 @@ _lxc_port_forward_add() {
     fi
     
     local input_ip
-    read -rp "  请输入容器的内网 IPv4 地址 [检测到: ${container_ip:-未知}]: " input_ip
+    input_ip=$(_ui_ask "请输入容器的内网 IPv4 地址 [检测到: ${container_ip:-未知}]" "")
     container_ip="${input_ip:-$container_ip}"
     if [[ -z "$container_ip" ]]; then
         _error_no_exit "必须指定容器 IP 地址。"
@@ -33598,7 +33666,7 @@ _lxc_port_forward_add() {
     
     local host_port
     while true; do
-        read -rp "  请输入宿主机监听端口 (1-65535): " host_port
+        host_port=$(_ui_ask "请输入宿主机监听端口 (1-65535)" "")
         if [[ "$host_port" =~ ^[0-9]+$ ]] && [ "$host_port" -ge 1 ] && [ "$host_port" -le 65535 ]; then
             break
         fi
@@ -33607,7 +33675,7 @@ _lxc_port_forward_add() {
     
     local container_port
     while true; do
-        read -rp "  请输入容器目标端口 [默认与宿主机端口一致: $host_port]: " container_port
+        container_port=$(_ui_ask "请输入容器目标端口 (默认与宿主机端口一致)" "$host_port")
         container_port="${container_port:-$host_port}"
         if [[ "$container_port" =~ ^[0-9]+$ ]] && [ "$container_port" -ge 1 ] && [ "$container_port" -le 65535 ]; then
             break
@@ -33616,7 +33684,7 @@ _lxc_port_forward_add() {
     done
     
     local proto
-    read -rp "  请输入转发协议 (tcp/udp/both) [默认: both]: " proto
+    proto=$(_ui_ask "请输入转发协议 (tcp/udp/both)" "both")
     proto=$(echo "${proto:-both}" | tr '[:upper:]' '[:lower:]')
     
     if [[ "$proto" == "tcp" || "$proto" == "both" ]]; then
@@ -33651,7 +33719,7 @@ _lxc_port_forward_delete() {
     count=$(echo "$rules" | wc -l)
     
     local num
-    read -rp "  请选择要删除的规则序号 [1-$count, 默认取消]: " num
+    num=$(_ui_ask "请选择 要删除的规则序号 [1-$count]" "")
     if ! [[ "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -gt "$count" ]; then
         _info "已取消。"
         _press_any_key
@@ -33743,7 +33811,7 @@ _he_ipv6_lxc_status_check() {
             
             echo ""
             local show_raw="n"
-            read -rp "  是否查看原始网卡数据? [y/N]: " show_raw
+            if _ui_confirm "是否查看原始网卡数据?" n; then show_raw=y; else show_raw=n; fi
             if [[ "$show_raw" =~ ^[Yy] ]]; then
                 _info "原始网卡数据:"
                 lxc-attach -n "$container_name" -- ip addr show 2>/dev/null | sed 's/^/      /' || true
@@ -33809,7 +33877,7 @@ _he_ipv6_lxc_power_control() {
     if [[ "$c_status" == "RUNNING" ]]; then
         _info "当前容器正在运行。"
         local action
-        read -rp "  是否停止容器? [y/N]: " action
+        if _ui_confirm "是否停止容器?" n; then action=y; else action=n; fi
         if [[ "$action" =~ ^[Yy] ]]; then
             _info "正在停止容器..."
             lxc-stop -n "$container_name"
@@ -33818,7 +33886,7 @@ _he_ipv6_lxc_power_control() {
     else
         _info "当前容器已停止。"
         local action
-        read -rp "  是否启动容器? [y/N]: " action
+        if _ui_confirm "是否启动容器?" n; then action=y; else action=n; fi
         if [[ "$action" =~ ^[Yy] ]]; then
             if [ -f /etc/network/interfaces.d/he-ipv6 ]; then
                 if ! ip link show he-ipv6 >/dev/null 2>&1; then
@@ -33869,7 +33937,7 @@ _lxc_attach() {
     if [[ "$c_status" != "RUNNING" ]]; then
         _warn "容器 $target_name 当前处于 $c_status 状态，无法进入终端。"
         local start_choice
-        read -rp "  是否尝试启动该容器? [Y/n]: " start_choice
+        if _ui_confirm "是否尝试启动该容器?" y; then start_choice=y; else start_choice=n; fi
         start_choice="${start_choice:-y}"
         if [[ "$start_choice" =~ ^[Yy] ]]; then
             if ! _ensure_lxcbr0; then
@@ -33917,7 +33985,7 @@ _he_ipv6_lxc_uninstall() {
     
     _warn "警告：此操作将永久删除容器 $container_name 并清除关联的隧道和端口转发配置！"
     local confirm
-    read -rp "  你确定要继续吗? [y/N]: " confirm
+    if _ui_confirm "你确定要继续吗?" n; then confirm=y; else confirm=n; fi
     if [[ ! "$confirm" =~ ^[Yy] ]]; then
         _info "已取消卸载操作。"
         _press_any_key
@@ -34017,7 +34085,7 @@ _he_host_tunnel_menu() {
     while true; do
         _ui_print_screen _he_host_tunnel_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-5]: " ch
+        ch=$(_ui_ask "请选择 [0-5]" "")
         case "$ch" in
             1) _he_host_tunnel_install ;;
             2) _he_host_tunnel_status ;;
@@ -34025,7 +34093,7 @@ _he_host_tunnel_menu() {
             4) _he_host_tunnel_uninstall ;;
             5) _he_tunnel_daemon_menu ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -34056,7 +34124,7 @@ _he_host_tunnel_install() {
     local he_server_ipv4="" he_client_ipv6="" he_server_ipv6="" he_local_ipv4=""
     
     while true; do
-        read -rp "  请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]: " he_server_ipv4
+        he_server_ipv4=$(_ui_ask "请输入 HE Server IPv4 (Endpoint) [${_HE_CUR_SERVER_IPV4:-必填}]" "")
         he_server_ipv4="${he_server_ipv4:-$_HE_CUR_SERVER_IPV4}"
         he_server_ipv4="${he_server_ipv4%%/*}"
         if _is_ipv4 "$he_server_ipv4"; then
@@ -34066,7 +34134,7 @@ _he_host_tunnel_install() {
     done
     
     while true; do
-        read -rp "  请输入 HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6:-必填}]: " he_client_ipv6
+        he_client_ipv6=$(_ui_ask "请输入 HE Client IPv6 Address [${_HE_CUR_CLIENT_IPV6:-必填}]" "")
         he_client_ipv6="${he_client_ipv6:-$_HE_CUR_CLIENT_IPV6}"
         local clean_ipv6="${he_client_ipv6%%/*}"
         if _is_ipv6 "$clean_ipv6"; then
@@ -34077,7 +34145,7 @@ _he_host_tunnel_install() {
     he_client_ipv6="${he_client_ipv6%%/*}"
     
     while true; do
-        read -rp "  请输入 HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6:-必填}]: " he_server_ipv6
+        he_server_ipv6=$(_ui_ask "请输入 HE Server IPv6 Address [${_HE_CUR_SERVER_IPV6:-必填}]" "")
         he_server_ipv6="${he_server_ipv6:-$_HE_CUR_SERVER_IPV6}"
         local clean_ipv6="${he_server_ipv6%%/*}"
         if _is_ipv6 "$clean_ipv6"; then
@@ -34090,7 +34158,7 @@ _he_host_tunnel_install() {
     local default_local_ipv4
     default_local_ipv4=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[0-9.]+' || ip route get 8.8.8.8 2>/dev/null | awk '{print $7}' || curl -4 -s -m 5 ip.sb 2>/dev/null || echo "$_HE_CUR_LOCAL_IPV4")
     while true; do
-        read -rp "  请输入本地 IPv4 地址 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]: " he_local_ipv4
+        he_local_ipv4=$(_ui_ask "请输入本地 IPv4 地址 [${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}]" "")
         he_local_ipv4="${he_local_ipv4:-${_HE_CUR_LOCAL_IPV4:-$default_local_ipv4}}"
         he_local_ipv4="${he_local_ipv4%%/*}"
         if _is_ipv4 "$he_local_ipv4"; then
@@ -34107,7 +34175,7 @@ _he_host_tunnel_install() {
     if ip link show he-ipv6 >/dev/null 2>&1; then
         _warn "宿主机上已存在 he-ipv6 接口。"
         local overwrite_tunnel
-        read -rp "  是否删除并重新配置该接口? [y/N]: " overwrite_tunnel
+        if _ui_confirm "是否删除并重新配置该接口?" n; then overwrite_tunnel=y; else overwrite_tunnel=n; fi
         if [[ "$overwrite_tunnel" =~ ^[Yy] ]]; then
             _info "正在清理旧的 he-ipv6 接口..."
             _he_tunnel_daemon_uninstall_silent
@@ -34231,7 +34299,7 @@ _he_host_tunnel_toggle() {
     
     local action
     if [[ "$state" == "UP" || "$state" == "UNKNOWN" ]]; then
-        read -rp "  是否关闭宿主机 HE 隧道? [y/N]: " action
+        if _ui_confirm "是否关闭宿主机 HE 隧道?" n; then action=y; else action=n; fi
         if [[ "$action" =~ ^[Yy] ]]; then
             if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files he-ipv6.service >/dev/null 2>&1; then
                 _info "正在通过 systemd 关闭 he-ipv6 服务..."
@@ -34243,7 +34311,7 @@ _he_host_tunnel_toggle() {
             _success "已关闭"
         fi
     else
-        read -rp "  是否开启宿主机 HE 隧道? [y/N]: " action
+        if _ui_confirm "是否开启宿主机 HE 隧道?" n; then action=y; else action=n; fi
         if [[ "$action" =~ ^[Yy] ]]; then
             if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files he-ipv6.service >/dev/null 2>&1; then
                 _info "正在通过 systemd 开启 he-ipv6 服务..."
@@ -34262,7 +34330,7 @@ _he_host_tunnel_uninstall() {
     _header "卸载宿主机 HE 隧道"
     
     local action
-    read -rp "  确定要完全删除宿主机的 HE 隧道配置与接口吗? [y/N]: " action
+    if _ui_confirm "确定要完全删除宿主机的 HE 隧道配置与接口吗?" n; then action=y; else action=n; fi
     if [[ "$action" =~ ^[Yy] ]]; then
         _info "正在停止并删除 he-ipv6 隧道接口..."
         _he_tunnel_daemon_uninstall_silent
@@ -34316,7 +34384,7 @@ _he_tunnel_daemon_menu() {
     while true; do
         _ui_print_screen _he_tunnel_daemon_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-3]: " ch
+        ch=$(_ui_ask "请选择 [0-3]" "")
         case "$ch" in
             1) _he_tunnel_daemon_install ;;
             2) _he_tunnel_daemon_uninstall ;;
@@ -34326,7 +34394,7 @@ _he_tunnel_daemon_menu() {
                 _press_any_key
                 ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -34570,7 +34638,7 @@ _network_mtu_detect() {
     printf "  - 对于 WARP/WireGuard: 推荐使用 Cloudflare Endpoint IP: ${CYAN}162.159.193.10${PLAIN}\n"
     printf "  - 对于国内普通网络: 推荐使用 ${CYAN}223.5.5.5${PLAIN} (阿里 DNS) 或 ${CYAN}119.29.29.29${PLAIN} (腾讯 DNS)\n"
     printf "  - 对于国际普通网络: 推荐使用 ${CYAN}1.1.1.1${PLAIN} (Cloudflare) 或 ${CYAN}8.8.8.8${PLAIN} (Google)\n"
-    read -rp "  目标 [默认 1.1.1.1]: " target
+    target=$(_ui_ask "目标" "1.1.1.1")
     target="${target:-1.1.1.1}"
 
     if [[ "$target" =~ : ]]; then
@@ -34683,7 +34751,7 @@ _network_mtu_detect() {
 
     printf "\n"
     local apply_ch
-    read -rp "  是否应用到网卡? [y/N]: " apply_ch
+    if _ui_confirm "是否应用到网卡?" n; then apply_ch=y; else apply_ch=n; fi
     if [[ "$apply_ch" != "y" && "$apply_ch" != "Y" ]]; then
         _press_any_key
         return 0
@@ -34716,7 +34784,7 @@ _network_mtu_detect() {
     _separator
 
     local sel
-    read -rp "  ${CYAN}➜${PLAIN}  选择网卡 [0-${#ifaces[@]}, q 返回]: " sel
+    sel=$(_ui_ask "请选择 网卡 [0-${#ifaces[@]}, q 返回]" "")
 
     if [[ "$sel" == "q" || "$sel" == "Q" ]]; then
         return
@@ -34736,7 +34804,7 @@ _network_mtu_detect() {
     fi
 
     local new_mtu
-    read -rp "  MTU 值 [默认 ${opt_mtu}]: " new_mtu
+    new_mtu=$(_ui_ask "MTU 值" "${opt_mtu}")
     new_mtu=$(_mihomoconf_trim "${new_mtu:-}")
     new_mtu="${new_mtu:-$opt_mtu}"
 
@@ -34764,7 +34832,7 @@ _network_mtu_detect() {
 
     printf "\n"
     local persist
-    read -rp "  持久化 (重启后生效)? [Y/n]: " persist
+    if _ui_confirm "持久化 (重启后生效)?" y; then persist=y; else persist=n; fi
     persist="${persist:-Y}"
     if [[ "$persist" == "Y" || "$persist" == "y" ]]; then
         _network_mtu_persist "${new_mtu}" "${selected_ifaces[@]}"
@@ -34849,7 +34917,7 @@ _network_opt_menu() {
     while true; do
         _ui_print_screen _network_opt_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-6]: " ch
+        ch=$(_ui_ask "请选择 [0-6]" "")
         case "$ch" in
             1) _bbr_install ;;
             2) _qdisc_setup ;;
@@ -34858,7 +34926,7 @@ _network_opt_menu() {
             5) _network_mtu_detect ;;
             6) _warp_manage ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -34878,7 +34946,7 @@ _script_tools_menu() {
     while true; do
         _ui_print_screen _script_tools_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-7]: " ch
+        ch=$(_ui_ask "请选择 [0-7]" "")
         case "$ch" in
             1) _iperf3_setup ;;
             2) _nodequality_setup ;;
@@ -34888,7 +34956,7 @@ _script_tools_menu() {
             6) _ntrace_setup ;;
             7) _ipquality_setup ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -34972,7 +35040,7 @@ _virt_container_diagnose() {
 
     # Diagnosing details based on env
     if [[ "$virt_type" == "kvm" || "$virt_type" == "qemu" || "$virt_type" == "vm" ]]; then
-        _info "[ 虚拟机环境诊断结果 ]"
+        _info "虚拟机环境诊断结果"
         
         # Clock source
         local clocksource="未知"
@@ -35009,7 +35077,7 @@ _virt_container_diagnose() {
         fi
 
     elif [[ "$virt_type" == "lxc" ]]; then
-        _info "[ LXC 容器环境诊断结果 ]"
+        _info "LXC 容器环境诊断结果"
 
         # Privileged / Unprivileged
         local is_unprivileged=0
@@ -35076,7 +35144,7 @@ _virt_container_diagnose() {
     _separator
 
     local ch
-    read -rp "  选择 [0-2]: " ch
+    ch=$(_ui_ask "请选择 [0-2]" "")
     case "$ch" in
         1)
             _time_sync_force_once
@@ -35087,7 +35155,7 @@ _virt_container_diagnose() {
             _press_any_key
             ;;
         0) return ;;
-        *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+        *) _ui_invalid "$ch"; sleep 1 ;;
     esac
 }
 
@@ -35107,7 +35175,7 @@ _system_opt_menu() {
     while true; do
         _ui_print_screen _system_opt_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-10]: " ch
+        ch=$(_ui_ask "请选择 [0-10]" "")
         case "$ch" in
             1) _dockerlog_setup ;;
             2) _swap_setup ;;
@@ -35120,7 +35188,7 @@ _system_opt_menu() {
             9) _he_ipv6_lxc_menu ;;
             10) _he_host_tunnel_menu ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -35204,7 +35272,7 @@ _proxy_cipher_benchmark() {
     _separator
 
     local choice
-    read -rp "  选择 [0-2，默认 1]: " choice
+    choice=$(_ui_ask "请选择 [0-2]" "1")
     choice="${choice:-1}"
     case "$choice" in
         0) return ;;
@@ -35277,7 +35345,7 @@ _proxy_tools_menu() {
     while true; do
         _ui_print_screen _proxy_tools_menu_screen
         local ch
-        read -rp "  ${CYAN}➜${PLAIN}  选择 [0-9]: " ch
+        ch=$(_ui_ask "请选择 [0-9]" "")
         case "$ch" in
             1) _mihomo_manage ;;
             2) _snell_manage ;;
@@ -35289,7 +35357,7 @@ _proxy_tools_menu() {
             8) _acme_manage ;;
             9) _proxy_cipher_benchmark ;;
             0) return ;;
-            *) _error_no_exit "无效选项: ${ch}"; sleep 1 ;;
+            *) _ui_invalid "$ch"; sleep 1 ;;
         esac
     done
 }
@@ -35367,7 +35435,7 @@ _auto_detect_apply_mtu() {
 }
 
 _auto_mihomo_install() {
-    _info "4/5. 正在检查并安装 Mihomo..."
+    _ui_step "4/5" "正在检查并安装 Mihomo..."
     if [[ "$(uname -s)" != "Linux" ]]; then
         _warn "Mihomo 仅支持 Linux 系统，跳过安装"
         return 1
@@ -35431,7 +35499,7 @@ _auto_mihomo_install() {
 }
 
 _auto_speedtest_install() {
-    _info "5/5. 正在检查并安装 Speedtest..."
+    _ui_step "4/4" "正在检查并安装 Speedtest..."
     if command -v speedtest >/dev/null 2>&1; then
         local current_version
         current_version="$(speedtest --version 2>&1 | head -1 || true)"
@@ -35448,10 +35516,10 @@ _auto_speedtest_install() {
 }
 
 _hidden_no_command() {
-    _header "执行隐藏一键优化功能"
+    _header "一键优化"
 
     # 1. 开启 BBR
-    _info "1/5. 正在检查并开启 BBR..."
+    _ui_step "1/4" "正在检查并开启 BBR..."
     if _bbr_check_status; then
         _success "BBR 已经处于启用状态"
     else
@@ -35476,12 +35544,12 @@ _hidden_no_command() {
 
     echo ""
     # 2. 自动探测并应用最佳 mtu
-    _info "2/5. 正在探测并应用最佳 MTU..."
+    _ui_step "2/4" "正在探测并应用最佳 MTU..."
     _auto_detect_apply_mtu
 
     echo ""
     # 3. 如果是 v4 单栈则设置 ipv4 优先
-    _info "3/5. 正在检查 IP 协议栈..."
+    _ui_step "3/4" "正在检查 IP 协议栈..."
     if _dns_has_ipv4_default_route && ! _dns_has_ipv6_default_route; then
         _info "检测到当前为 IPv4 单栈环境，正在设置 IPv4 优先..."
         _v4v6_set_ipv4_first
@@ -35491,11 +35559,7 @@ _hidden_no_command() {
     fi
 
     echo ""
-    # 4. 安装 mihomo
-    _auto_mihomo_install
-
-    echo ""
-    # 5. 安装 speedtest
+    # 4. 安装 speedtest
     _auto_speedtest_install
 
     echo ""
@@ -35513,7 +35577,7 @@ main() {
         _ui_print_screen _show_home_screen
 
         local choice
-        read -rp "  ${CYAN}➜${PLAIN}  选择: " choice
+        choice=$(_ui_ask "请选择 功能" "")
 
         case "$choice" in
             1) _network_opt_menu ;;
@@ -35531,7 +35595,7 @@ main() {
                 exit 0
                 ;;
             *)
-                _error_no_exit "无效选项: ${choice}"
+                _ui_invalid "$choice"
                 sleep 1
                 ;;
         esac
