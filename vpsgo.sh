@@ -32322,6 +32322,83 @@ _select_lxc_container() {
     done
 }
 
+_lxc_cgroup_version() {
+    # 返回 "2" 表示 cgroup v2 (unified)，否则返回 "1" (legacy)
+    if [ -d /sys/fs/cgroup/cgroup.controllers ] || [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+        echo "2"
+    else
+        echo "1"
+    fi
+}
+
+_lxc_write_resource_limits() {
+    # 参数: 容器配置路径, 内存限制(MB, 0=不限制), CPU 核数限制(如 2 或 1.5, 0=不限制)
+    local lxc_config="$1" mem_mb="$2" cpu_cores="$3"
+    mem_mb="${mem_mb:-0}"
+    cpu_cores="${cpu_cores:-0}"
+
+    sed -i '/lxc.cgroup2.memory.max/d' "$lxc_config"
+    sed -i '/lxc.cgroup.memory.limit_in_bytes/d' "$lxc_config"
+    sed -i '/lxc.cgroup2.cpu.max/d' "$lxc_config"
+    sed -i '/lxc.cgroup.cpu.cfs_quota_us/d' "$lxc_config"
+    sed -i '/lxc.cgroup.cpu.cfs_period_us/d' "$lxc_config"
+
+    local cgver
+    cgver=$(_lxc_cgroup_version)
+    if [[ "$mem_mb" =~ ^[0-9]+$ ]] && [ "$mem_mb" -gt 0 ]; then
+        if [ "$cgver" = "2" ]; then
+            echo "lxc.cgroup2.memory.max = ${mem_mb}M" >> "$lxc_config"
+        else
+            echo "lxc.cgroup.memory.limit_in_bytes = ${mem_mb}M" >> "$lxc_config"
+        fi
+    fi
+    if [[ "$cpu_cores" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v c="$cpu_cores" 'BEGIN{exit !(c>0)}'; then
+        local quota
+        quota=$(awk "BEGIN{printf \"%d\", $cpu_cores * 100000}")
+        if [ "$cgver" = "2" ]; then
+            echo "lxc.cgroup2.cpu.max = ${quota} 100000" >> "$lxc_config"
+        else
+            echo "lxc.cgroup.cpu.cfs_quota_us = ${quota}" >> "$lxc_config"
+            echo "lxc.cgroup.cpu.cfs_period_us = 100000" >> "$lxc_config"
+        fi
+    fi
+}
+
+_lxc_read_resource_limits() {
+    # 参数: 容器配置路径
+    # 输出: "内存MB CPU核数" (0 表示不限制)
+    local lxc_config="$1"
+    local mem=0 cpu=0 cgver
+    cgver=$(_lxc_cgroup_version)
+    if [ "$cgver" = "2" ]; then
+        local m
+        m=$(grep -E '^\s*lxc\.cgroup2\.memory\.max\s*=' "$lxc_config" 2>/dev/null | tail -1 | awk -F'=' '{print $2}' | xargs)
+        if [[ "$m" =~ ^[0-9]+M$ ]]; then
+            mem=$(( ${m%M} ))
+        fi
+        local cline quota period
+        cline=$(grep -E '^\s*lxc\.cgroup2\.cpu\.max\s*=' "$lxc_config" 2>/dev/null | tail -1 | awk -F'=' '{print $2}' | xargs)
+        quota="${cline%% *}"
+        period="${cline##* }"
+        if [[ "$quota" =~ ^[0-9]+$ && "$period" =~ ^[0-9]+$ && "$period" -gt 0 ]]; then
+            cpu=$(awk "BEGIN{printf \"%g\", $quota / $period}")
+        fi
+    else
+        local m
+        m=$(grep -E '^\s*lxc\.cgroup\.memory\.limit_in_bytes\s*=' "$lxc_config" 2>/dev/null | tail -1 | awk -F'=' '{print $2}' | xargs)
+        if [[ "$m" =~ ^[0-9]+$ ]]; then
+            mem=$(( m / 1024 / 1024 ))
+        fi
+        local q p
+        q=$(grep -E '^\s*lxc\.cgroup\.cpu\.cfs_quota_us\s*=' "$lxc_config" 2>/dev/null | tail -1 | awk -F'=' '{print $2}' | xargs)
+        p=$(grep -E '^\s*lxc\.cgroup\.cpu\.cfs_period_us\s*=' "$lxc_config" 2>/dev/null | tail -1 | awk -F'=' '{print $2}' | xargs)
+        if [[ "$q" =~ ^[0-9]+$ && "$p" =~ ^[0-9]+$ && "$p" -gt 0 ]]; then
+            cpu=$(awk "BEGIN{printf \"%g\", $q / $p}")
+        fi
+    fi
+    echo "$mem $cpu"
+}
+
 _he_ipv6_lxc_menu_screen() {
     _header "LXC 容器(支持HE隧道)"
 
@@ -32380,6 +32457,7 @@ _he_ipv6_lxc_menu_screen() {
     _menu_pair "3" "端口转发管理" "映射宿主机端口到容器" "green" "4" "可用性与状态检查" "诊断宿主机与容器的网络" "green"
     _menu_pair "5" "启动/停止容器" "控制 LXC 容器开关" "green" "6" "进入容器终端" "快速连入运行中容器的 Shell" "green"
     _menu_pair "7" "卸载与清理" "删除容器与 HE 隧道配置" "red" "8" "隧道守护进程" "监控与自动修复 HE 隧道" "green"
+    _menu_pair "9" "修改容器资源限制" "调整内存/CPU 限制 (重启生效)" "cyan" ""
     _separator
     _menu_item "0" "返回上级菜单" "" "red"
     _separator
@@ -32389,7 +32467,7 @@ _he_ipv6_lxc_menu() {
     while true; do
         _ui_print_screen _he_ipv6_lxc_menu_screen
         local ch
-        ch=$(_ui_ask "请选择 [0-8]" "")
+        ch=$(_ui_ask "请选择 [0-9]" "")
         case "$ch" in
             1) _he_ipv6_lxc_install ;;
             2) _he_tunnel_edit ;;
@@ -32399,6 +32477,7 @@ _he_ipv6_lxc_menu() {
             6) _lxc_attach ;;
             7) _he_ipv6_lxc_uninstall ;;
             8) _he_tunnel_daemon_menu ;;
+            9) _lxc_limits_edit ;;
             0) return ;;
             *) _ui_invalid "$ch"; sleep 1 ;;
         esac
@@ -33243,6 +33322,30 @@ lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file
 lxc.apparmor.profile = unconfined
 EOF
     
+    # 2. 资源限制（内存/CPU）
+    local lxc_mem_mb="0" lxc_cpu_cores="0"
+    _info "请设置容器资源限制 (直接回车表示不限制):"
+    lxc_mem_mb=$(_ui_ask "内存限制 (MB，如 512 或 1024，回车=不限制)" "")
+    lxc_mem_mb="${lxc_mem_mb:-0}"
+    lxc_mem_mb=$(echo "$lxc_mem_mb" | xargs)
+    if [[ ! "$lxc_mem_mb" =~ ^[0-9]+$ ]]; then
+        _warn "内存限制格式无效，已忽略 (不限制)。"
+        lxc_mem_mb=0
+    fi
+    lxc_cpu_cores=$(_ui_ask "CPU 核数限制 (如 2 或 1.5，回车=不限制)" "")
+    lxc_cpu_cores="${lxc_cpu_cores:-0}"
+    lxc_cpu_cores=$(echo "$lxc_cpu_cores" | xargs)
+    if [[ ! "$lxc_cpu_cores" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        _warn "CPU 核数格式无效，已忽略 (不限制)。"
+        lxc_cpu_cores=0
+    fi
+    _lxc_write_resource_limits "$lxc_config" "$lxc_mem_mb" "$lxc_cpu_cores"
+    if [[ "$lxc_mem_mb" != "0" || "$lxc_cpu_cores" != "0" ]]; then
+        _success "已写入资源限制: 内存=${lxc_mem_mb}MB, CPU=${lxc_cpu_cores}核"
+    else
+        _info "未设置资源限制，容器将使用宿主机全部可用资源。"
+    fi
+    
 
     
     local container_rootfs="/var/lib/lxc/$container_name/rootfs"
@@ -33918,6 +34021,106 @@ _he_ipv6_lxc_power_control() {
                 fi
             fi
         fi
+    fi
+    _press_any_key
+}
+
+_lxc_limits_edit() {
+    _header "修改容器资源限制"
+
+    local container_name
+    if ! container_name=$(_select_lxc_container); then
+        _error_no_exit "当前系统中未检测到任何 LXC 容器。"
+        _press_any_key
+        return 1
+    fi
+
+    local lxc_config="/var/lib/lxc/$container_name/config"
+    if [ ! -f "$lxc_config" ]; then
+        _error_no_exit "未找到容器配置文件: $lxc_config"
+        _press_any_key
+        return 1
+    fi
+
+    local cur_mem cur_cpu
+    read -r cur_mem cur_cpu < <(_lxc_read_resource_limits "$lxc_config")
+    [[ -z "$cur_mem" ]] && cur_mem=0
+    [[ -z "$cur_cpu" ]] && cur_cpu=0
+
+    local cur_mem_txt="不限制" cur_cpu_txt="不限制"
+    [[ "$cur_mem" != "0" ]] && cur_mem_txt="${cur_mem}MB"
+    [[ "$cur_cpu" != "0" ]] && cur_cpu_txt="${cur_cpu}核"
+
+    _status_kv "容器" "$container_name" "cyan" "12"
+    _status_kv "当前内存限制" "$cur_mem_txt" "$([[ "$cur_mem" != "0" ]] && echo green || echo dim)" "12"
+    _status_kv "当前 CPU 限制" "$cur_cpu_txt" "$([[ "$cur_cpu" != "0" ]] && echo green || echo dim)" "12"
+    _separator
+
+    _info "输入 0 表示取消限制，直接回车表示保持当前值不变。"
+    local new_mem new_cpu
+    new_mem=$(_ui_ask "新的内存限制 (MB) [当前: $cur_mem_txt]" "")
+    new_mem=$(echo "$new_mem" | xargs)
+    if [[ -n "$new_mem" ]]; then
+        if [[ "$new_mem" =~ ^[0-9]+$ ]]; then
+            cur_mem="$new_mem"
+        else
+            _warn "内存限制格式无效，已保持原值 ($cur_mem_txt)。"
+        fi
+    fi
+
+    new_cpu=$(_ui_ask "新的 CPU 核数限制 [当前: $cur_cpu_txt]" "")
+    new_cpu=$(echo "$new_cpu" | xargs)
+    if [[ -n "$new_cpu" ]]; then
+        if [[ "$new_cpu" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            cur_cpu="$new_cpu"
+        else
+            _warn "CPU 核数格式无效，已保持原值 ($cur_cpu_txt)。"
+        fi
+    fi
+
+    _lxc_write_resource_limits "$lxc_config" "$cur_mem" "$cur_cpu"
+
+    local mem_txt="不限制" cpu_txt="不限制"
+    [[ "$cur_mem" != "0" ]] && mem_txt="${cur_mem}MB"
+    [[ "$cur_cpu" != "0" ]] && cpu_txt="${cur_cpu}核"
+    _success "已更新容器资源限制: 内存=$mem_txt, CPU=$cpu_txt"
+
+    local c_status
+    c_status=$(lxc-info -n "$container_name" -s 2>/dev/null | awk '{print $2}')
+    if [[ "$c_status" == "RUNNING" ]]; then
+        local restart_choice
+        if _ui_confirm "容器正在运行，需要重启容器才能使新限制生效，是否立即重启?" y; then restart_choice=y; else restart_choice=n; fi
+        restart_choice="${restart_choice:-y}"
+        if [[ "$restart_choice" =~ ^[Yy] ]]; then
+            _info "正在重启容器 $container_name..."
+            lxc-stop -n "$container_name" -k 2>/dev/null || true
+            if ! _ensure_lxcbr0; then
+                _press_any_key
+                return 1
+            fi
+            lxc-start -n "$container_name" -l DEBUG -o "/tmp/lxc_${container_name}.log"
+            local wait_i=0
+            while [ $wait_i -lt 15 ]; do
+                if lxc-info -n "$container_name" -s | grep -q "RUNNING"; then
+                    break
+                fi
+                sleep 1
+                wait_i=$((wait_i + 1))
+            done
+            if lxc-info -n "$container_name" -s | grep -q "RUNNING"; then
+                _success "容器已重启，新资源限制已生效"
+            else
+                _error_no_exit "容器重启超时，请后续手动启动。"
+                if [ -f "/tmp/lxc_${container_name}.log" ]; then
+                    _info "容器启动调试日志最后 20 行："
+                    tail -n 20 "/tmp/lxc_${container_name}.log" | sed 's/^/      /'
+                fi
+            fi
+        else
+            _info "新限制将在容器下次启动时生效。"
+        fi
+    else
+        _info "容器当前未运行，新限制将在下次启动时生效。"
     fi
     _press_any_key
 }
