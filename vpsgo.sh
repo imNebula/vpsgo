@@ -33290,9 +33290,9 @@ EOF
     fi
     
     if [ "$container_exists" -eq 0 ]; then
-        _info "正在创建 Debian 12 LXC 容器 (名称: $container_name)..."
+        _info "正在创建 Alpine 3.19 LXC 容器 (名称: $container_name)..."
         _info "将从官方下载模板，首次拉取可能需要几分钟，请耐心等待..."
-        if ! lxc-create -t download -n "$container_name" -- -d debian -r bookworm -a amd64; then
+        if ! lxc-create -t download -n "$container_name" -- -d alpine -r 3.19 -a amd64; then
             _error_no_exit "创建 LXC 容器失败，请检查网络后重试。"
             _press_any_key
             return 1
@@ -33562,11 +33562,15 @@ EOF
         # 防止 Proxmox VE 覆盖容器 DNS
         touch "${container_rootfs}/etc/.pve-ignore.resolv.conf" 2>/dev/null || true
 
-        # 锁定 APT 仅走 IPv6
-        _info "正在配置容器 APT 强制 IPv6..."
-        mkdir -p "${container_rootfs}/etc/apt/apt.conf.d" 2>/dev/null || true
-        echo 'Acquire::ForceIPv6 "true";' > "${container_rootfs}/etc/apt/apt.conf.d/99force-ipv6"
-        _success "已写入 Acquire::ForceIPv6 true (容器内 /etc/apt/apt.conf.d/99force-ipv6)"
+        # 包管理器强制 IPv6 (Debian/Ubuntu 用 apt, Alpine 用 apk)
+        if [ -d "${container_rootfs}/etc/apt" ]; then
+            _info "正在配置容器 APT 强制 IPv6..."
+            mkdir -p "${container_rootfs}/etc/apt/apt.conf.d" 2>/dev/null || true
+            echo 'Acquire::ForceIPv6 "true";' > "${container_rootfs}/etc/apt/apt.conf.d/99force-ipv6"
+            _success "已写入 Acquire::ForceIPv6 true (容器内 /etc/apt/apt.conf.d/99force-ipv6)"
+        elif [ -d "${container_rootfs}/etc/apk" ]; then
+            _info "容器为 Alpine，apk 已支持 IPv6 源 (dl-cdn.alpinelinux.org 提供 AAAA 记录)。"
+        fi
     fi
 
     if [[ "$configure_he" == "y" ]]; then
@@ -33619,6 +33623,10 @@ EOF
     
     if lxc-info -n "$container_name" -s | grep -q "RUNNING"; then
         _success "LXC 容器 $container_name 启动成功"
+        if [ -f "${container_rootfs}/etc/alpine-release" ]; then
+            _info "检测到 Alpine 容器，正在启用 networking 开机自启服务..."
+            lxc-attach -n "$container_name" -- rc-update add networking default 2>/dev/null || true
+        fi
     else
         _error_no_exit "LXC 容器启动超时，请后续使用 lxc-info 手动排查。"
         if [ -f "/tmp/lxc_${container_name}.log" ]; then
@@ -33657,9 +33665,10 @@ EOF
         
         _info "容器内获取公共 IPv6 测试:"
         local ipv6_hosts=("ip.sb" "api6.ipify.org" "icanhazip.com" "ident.me")
-        local container_ipv6_addr=""
+        local container_ipv6_addr="" container_getter=""
+        lxc-attach -n "$container_name" -- command -v curl >/dev/null 2>&1 && container_getter="curl -6 -s -m 5" || container_getter="wget -6 -q -T 5 -O -"
         for host in "${ipv6_hosts[@]}"; do
-            container_ipv6_addr=$(lxc-attach -n "$container_name" -- curl -6 -s -m 5 "$host" 2>/dev/null | tr -d '[:space:]')
+            container_ipv6_addr=$(lxc-attach -n "$container_name" -- $container_getter "$host" 2>/dev/null | tr -d '[:space:]')
             if [[ -n "$container_ipv6_addr" ]]; then
                 break
             fi
@@ -33931,9 +33940,10 @@ _he_ipv6_lxc_status_check() {
         
         if [[ "$has_ipv6" == "y" ]]; then
             local ipv6_hosts=("ip.sb" "api6.ipify.org" "icanhazip.com" "ident.me")
-            local container_ipv6_addr=""
+            local container_ipv6_addr="" container_getter=""
+            lxc-attach -n "$container_name" -- command -v curl >/dev/null 2>&1 && container_getter="curl -6 -s -m 5" || container_getter="wget -6 -q -T 5 -O -"
             for host in "${ipv6_hosts[@]}"; do
-                container_ipv6_addr=$(lxc-attach -n "$container_name" -- curl -6 -s -m 5 "$host" 2>/dev/null | tr -d '[:space:]')
+                container_ipv6_addr=$(lxc-attach -n "$container_name" -- $container_getter "$host" 2>/dev/null | tr -d '[:space:]')
                 if [[ -n "$container_ipv6_addr" ]]; then
                     break
                 fi
