@@ -30469,6 +30469,36 @@ _rootssh_enable() {
     _press_any_key
 }
 
+# 核心逻辑: 修改 sshd 配置禁用密码登录并重启服务 (不含确认交互)，供菜单与隐藏一键优化 (no) 复用
+_ssh_keyonly_apply() {
+    local sshd_cfg="/etc/ssh/sshd_config"
+    if [ ! -f "$sshd_cfg" ]; then
+        _error_no_exit "未找到 ${sshd_cfg}"
+        return 1
+    fi
+    local backup="${sshd_cfg}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$sshd_cfg" "$backup"
+    _info "已备份 SSH 配置: ${backup}"
+
+    _rootssh_set_sshd_option "$sshd_cfg" "PubkeyAuthentication" "yes"
+    _rootssh_set_sshd_option "$sshd_cfg" "PasswordAuthentication" "no"
+    _rootssh_set_sshd_option "$sshd_cfg" "KbdInteractiveAuthentication" "no"
+    _rootssh_set_sshd_option "$sshd_cfg" "ChallengeResponseAuthentication" "no"
+    _ssh_keyonly_write_override_conf
+
+    if command -v sshd >/dev/null 2>&1; then
+        if ! sshd -t -f "$sshd_cfg" >/dev/null 2>&1; then
+            _error_no_exit "sshd 配置校验失败，已保留备份: ${backup}"
+            return 1
+        fi
+    fi
+
+    if ! _restart_first_available_service ssh sshd; then
+        _warn "未检测到可重启的 ssh/sshd 服务，请手动重启 SSH 服务"
+    fi
+    return 0
+}
+
 _ssh_force_key_login() {
     _header "强制 SSH 密钥登录"
     _warn "将禁用 SSH 密码登录，仅允许密钥登录。"
@@ -30489,34 +30519,10 @@ _ssh_force_key_login() {
 
     echo ""
     _ui_step "1/2" "修改 SSH 配置，禁用密码登录"
-    local sshd_cfg="/etc/ssh/sshd_config"
-    if [ ! -f "$sshd_cfg" ]; then
-        _error_no_exit "未找到 ${sshd_cfg}"
+    _ui_step "2/2" "重启 SSH 服务并应用配置"
+    if ! _ssh_keyonly_apply; then
         _press_any_key
         return
-    fi
-    local backup="${sshd_cfg}.bak.$(date +%Y%m%d%H%M%S)"
-    cp "$sshd_cfg" "$backup"
-    _info "已备份 SSH 配置: ${backup}"
-
-    _rootssh_set_sshd_option "$sshd_cfg" "PubkeyAuthentication" "yes"
-    _rootssh_set_sshd_option "$sshd_cfg" "PasswordAuthentication" "no"
-    _rootssh_set_sshd_option "$sshd_cfg" "KbdInteractiveAuthentication" "no"
-    _rootssh_set_sshd_option "$sshd_cfg" "ChallengeResponseAuthentication" "no"
-    _ssh_keyonly_write_override_conf
-
-    if command -v sshd >/dev/null 2>&1; then
-        if ! sshd -t -f "$sshd_cfg" >/dev/null 2>&1; then
-            _error_no_exit "sshd 配置校验失败，已保留备份: ${backup}"
-            _press_any_key
-            return
-        fi
-    fi
-
-    echo ""
-    _ui_step "2/2" "重启 SSH 服务并应用配置"
-    if ! _restart_first_available_service ssh sshd; then
-        _warn "未检测到可重启的 ssh/sshd 服务，请手动重启 SSH 服务"
     fi
 
     echo ""
@@ -35799,16 +35805,59 @@ _auto_speedtest_install() {
     fi
 }
 
+# 隐藏一键优化附加检查: 已配置 SSH 密钥且密码登录开启时提醒关闭 (直接回车 = 关闭)
+_hidden_ssh_password_guard() {
+    if [ ! -f /etc/ssh/sshd_config ]; then
+        _info "未检测到 SSH 服务，跳过密码登录检查"
+        return 0
+    fi
+
+    if ! _ssh_keyonly_has_any_key; then
+        _info "未检测到 SSH 密钥 (authorized_keys)，跳过密码登录检查"
+        return 0
+    fi
+
+    local pw=""
+    if command -v sshd >/dev/null 2>&1; then
+        pw="$(sshd -T 2>/dev/null | awk 'tolower($1) == "passwordauthentication" { print tolower($2); exit }')"
+    fi
+    if [ -z "$pw" ]; then
+        if grep -Eqi '^[[:space:]]*PasswordAuthentication[[:space:]]+no' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null; then
+            pw="no"
+        else
+            pw="yes"
+        fi
+    fi
+
+    if [ "$pw" != "yes" ]; then
+        _success "SSH 密码登录已关闭 (密钥登录模式)"
+        return 0
+    fi
+
+    _warn "检测到已配置 SSH 密钥，但密码登录仍开启"
+    local confirm
+    if _ui_confirm "是否关闭 SSH 密码登录?" y; then confirm=y; else confirm=n; fi
+    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+        _info "已保留密码登录"
+        return 0
+    fi
+
+    if _ssh_keyonly_apply; then
+        _success "SSH 已切换为密钥登录，密码登录已关闭"
+        _warn "请先在新终端验证密钥登录成功后，再关闭当前会话"
+    fi
+}
+
 _hidden_no_command() {
     _header "一键优化"
 
     # 1. 安装基础依赖
-    _ui_step "1/5" "正在安装基础依赖 (sudo/wget/curl/bash/vim)..."
+    _ui_step "1/6" "正在安装基础依赖 (sudo/wget/curl/bash/vim)..."
     _deps_install_core
 
     echo ""
     # 2. 开启 BBR
-    _ui_step "2/5" "正在检查并开启 BBR..."
+    _ui_step "2/6" "正在检查并开启 BBR..."
     if _bbr_check_status; then
         _success "BBR 已经处于启用状态"
     else
@@ -35833,12 +35882,12 @@ _hidden_no_command() {
 
     echo ""
     # 3. 自动探测并应用最佳 mtu
-    _ui_step "3/5" "正在探测并应用最佳 MTU..."
+    _ui_step "3/6" "正在探测并应用最佳 MTU..."
     _auto_detect_apply_mtu
 
     echo ""
     # 4. 如果是 v4 单栈则设置 ipv4 优先
-    _ui_step "4/5" "正在检查 IP 协议栈..."
+    _ui_step "4/6" "正在检查 IP 协议栈..."
     if _dns_has_ipv4_default_route && ! _dns_has_ipv6_default_route; then
         _info "检测到当前为 IPv4 单栈环境，正在设置 IPv4 优先..."
         _v4v6_set_ipv4_first
@@ -35850,6 +35899,11 @@ _hidden_no_command() {
     echo ""
     # 5. 安装 speedtest
     _auto_speedtest_install
+
+    echo ""
+    # 6. SSH 密钥/密码登录安全检查
+    _ui_step "6/6" "正在检查 SSH 密钥与密码登录安全..."
+    _hidden_ssh_password_guard
 
     echo ""
     _success "隐藏一键优化功能执行完毕!"

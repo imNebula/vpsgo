@@ -103,7 +103,8 @@ VPSGO_INSTALL_PATH=/usr/bin/vpsgo bash /usr/local/bin/vpsgo
 | 16 | Swap 管理 | 智能推荐大小，创建/删除 Swap 文件 |
 | 17 | 1Panel iptables 代理链 | 快速挂载 1PANEL_PREROUTING / 1PANEL_POSTROUTING 到 NAT 主链，并可尝试保存规则 |
 | - | SSH 端口 | 快速修改 sshd 监听端口，自动备份、校验并重启 SSH 服务 |
-| - | 安装依赖 | 按发行版自动安装 sudo/wget/curl/bash/vim 等基础依赖（隐藏快捷键 `no` 一键优化时也会自动执行） |
+| - | 安装依赖 | 按发行版自动安装 sudo/wget/curl/bash/vim 等基础依赖 |
+| - | 隐藏快捷键 `no` | 一键优化：安装基础依赖、开启 BBR、探测 MTU、IPv4 优先、安装 Speedtest，并检查 SSH 密钥/密码登录安全（已配置密钥且密码登录开启时提醒关闭，回车默认关闭） |
 
 ### 其他
 
