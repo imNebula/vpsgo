@@ -35372,6 +35372,75 @@ _virt_container_diagnose() {
     esac
 }
 
+# --- 基础依赖安装 (sudo/wget/curl/bash/vim) ---
+
+# 核心安装逻辑: 供「系统相关 → 安装依赖」与隐藏一键优化 (no) 复用
+_deps_install_core() {
+    local sys pkgs_ok=0
+
+    if [ -f /etc/os-release ]; then
+        sys="$(. /etc/os-release 2>/dev/null; printf '%s' "${ID:-}")"
+    fi
+    [ -z "$sys" ] && sys="$(uname | tr 'A-Z' 'a-z')"
+
+    _info "检测到系统: ${sys}"
+
+    case "$sys" in
+        alpine)
+            _info "执行: apk update && apk add sudo wget curl bash"
+            apk update && apk add sudo wget curl bash && pkgs_ok=1
+            ;;
+        ubuntu|debian)
+            _info "执行: apt-get update && apt-get install -y sudo wget curl bash vim"
+            apt-get update && apt-get install -y sudo wget curl bash vim && pkgs_ok=1
+            ;;
+        centos|rhel|rocky|almalinux)
+            if command -v dnf >/dev/null 2>&1; then
+                _info "执行: dnf install -y sudo wget curl bash vim"
+                dnf install -y sudo wget curl bash vim && pkgs_ok=1
+            else
+                _info "执行: yum install -y sudo wget curl bash vim"
+                yum install -y sudo wget curl bash vim && pkgs_ok=1
+            fi
+            ;;
+        darwin)
+            if command -v brew >/dev/null 2>&1; then
+                _info "执行: brew install wget curl bash vim"
+                brew install wget curl bash vim && pkgs_ok=1
+            else
+                _warn "Mac 需先安装 Homebrew"
+            fi
+            ;;
+        *)
+            if command -v apt-get >/dev/null 2>&1; then
+                _info "执行: apt-get update && apt-get install -y sudo wget curl bash"
+                apt-get update && apt-get install -y sudo wget curl bash && pkgs_ok=1
+            elif command -v apk >/dev/null 2>&1; then
+                _info "执行: apk update && apk add sudo wget curl bash"
+                apk update && apk add sudo wget curl bash && pkgs_ok=1
+            else
+                _error_no_exit "未检测到支持的包管理器"
+            fi
+            ;;
+    esac
+
+    [ "$pkgs_ok" -eq 1 ]
+}
+
+_deps_setup() {
+    _header "安装依赖"
+
+    _info "将根据发行版自动安装: sudo wget curl bash vim"
+    echo ""
+
+    if _deps_install_core; then
+        _success "基础依赖安装完成"
+    else
+        _warn "基础依赖安装未完全成功，请检查上方输出"
+    fi
+    _press_any_key
+}
+
 _system_opt_menu_screen() {
     _header "系统相关"
     _menu_pair "1" "日志轮转" "限制 Docker 日志" "green" "2" "Swap 管理" "创建/删除 Swap" "green"
@@ -35379,6 +35448,7 @@ _system_opt_menu_screen() {
     _menu_pair "5" "SSH 端口" "快速修改 sshd 监听端口" "green" "6" "SSH 密钥管理" "添加/删除/查看 SSH 密钥" "green"
     _menu_pair "7" "1Panel NAT 链" "挂载转发链" "green" "8" "环境诊断" "KVM/LXC 时钟及特权诊断" "green"
     _menu_pair "9" "LXC 容器(支持HE)" "管理容器与 HE 隧道" "green" "10" "宿主机 HE 隧道" "配置绑定 HE IPv6 隧道" "green"
+    _menu_item "11" "安装依赖" "sudo/wget/curl/bash/vim" "green"
     _separator
     _menu_item "0" "返回主菜单" "" "red"
     _separator
@@ -35388,7 +35458,7 @@ _system_opt_menu() {
     while true; do
         _ui_print_screen _system_opt_menu_screen
         local ch
-        ch=$(_ui_ask "请选择 [0-10]" "")
+        ch=$(_ui_ask "请选择 [0-11]" "")
         case "$ch" in
             1) _dockerlog_setup ;;
             2) _swap_setup ;;
@@ -35400,6 +35470,7 @@ _system_opt_menu() {
             8) _virt_container_diagnose ;;
             9) _he_ipv6_lxc_menu ;;
             10) _he_host_tunnel_menu ;;
+            11) _deps_setup ;;
             0) return ;;
             *) _ui_invalid "$ch"; sleep 1 ;;
         esac
@@ -35731,8 +35802,13 @@ _auto_speedtest_install() {
 _hidden_no_command() {
     _header "一键优化"
 
-    # 1. 开启 BBR
-    _ui_step "1/4" "正在检查并开启 BBR..."
+    # 1. 安装基础依赖
+    _ui_step "1/5" "正在安装基础依赖 (sudo/wget/curl/bash/vim)..."
+    _deps_install_core
+
+    echo ""
+    # 2. 开启 BBR
+    _ui_step "2/5" "正在检查并开启 BBR..."
     if _bbr_check_status; then
         _success "BBR 已经处于启用状态"
     else
@@ -35756,13 +35832,13 @@ _hidden_no_command() {
     fi
 
     echo ""
-    # 2. 自动探测并应用最佳 mtu
-    _ui_step "2/4" "正在探测并应用最佳 MTU..."
+    # 3. 自动探测并应用最佳 mtu
+    _ui_step "3/5" "正在探测并应用最佳 MTU..."
     _auto_detect_apply_mtu
 
     echo ""
-    # 3. 如果是 v4 单栈则设置 ipv4 优先
-    _ui_step "3/4" "正在检查 IP 协议栈..."
+    # 4. 如果是 v4 单栈则设置 ipv4 优先
+    _ui_step "4/5" "正在检查 IP 协议栈..."
     if _dns_has_ipv4_default_route && ! _dns_has_ipv6_default_route; then
         _info "检测到当前为 IPv4 单栈环境，正在设置 IPv4 优先..."
         _v4v6_set_ipv4_first
@@ -35772,7 +35848,7 @@ _hidden_no_command() {
     fi
 
     echo ""
-    # 4. 安装 speedtest
+    # 5. 安装 speedtest
     _auto_speedtest_install
 
     echo ""
